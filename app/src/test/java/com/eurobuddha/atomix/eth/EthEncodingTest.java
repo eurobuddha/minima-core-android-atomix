@@ -1,4 +1,4 @@
-package com.eurobuddha.usdtswap.eth;
+package com.eurobuddha.atomix.eth;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;

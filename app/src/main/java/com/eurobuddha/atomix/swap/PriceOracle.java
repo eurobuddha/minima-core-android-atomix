@@ -2,6 +2,8 @@ package com.eurobuddha.atomix.swap;
 
 import android.content.SharedPreferences;
 
+import com.eurobuddha.atomix.TradingContext;
+
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -34,10 +36,13 @@ import java.util.concurrent.Executors;
 public final class PriceOracle {
     private PriceOracle() {}
 
-    public static final String SOURCE = "Parity";
-    // usdtSwap trades native-USDT (mxUSDT) ↔ ERC20 USDT, so the mid is PARITY (1.0) — no external feed. Skew +
-    // spread come from the peg config (P_BIAS / P_STEP) applied in applyPeg, exactly as the MEXC build did.
-    private static final double PARITY_MID = 1.0;
+    /** Feed label — follows the ACTIVE currency. mxUSDT trades at PARITY to ERC20 USDT (no external book, mid
+     *  always 1.0); MINIMA pegs to the live MEXC MINIMA/USDT order book. The peg/freshness machinery below is
+     *  identical for both — only {@link #fetchOnce()} branches on the model. */
+    public static String source() { return TradingContext.active().pricingParity ? "Parity" : "MEXC"; }
+    private static final double PARITY_MID = 1.0;   // mxUSDT ↔ ERC20 USDT mid (no external feed)
+    private static final String DEPTH_URL = "https://api.mexc.com/api/v3/depth?symbol=MINIMAUSDT&limit=20";
+    private static final String BOOK_URL  = "https://api.mexc.com/api/v3/ticker/bookTicker?symbol=MINIMAUSDT";
 
     public static final long FRESH_MS = 5 * 60_000;          // ≤ this old → peg TIGHT at the configured step
     public static final long WITHDRAW_MS = 10 * 60_000;      // feed down this long AND no usable price → withdraw
@@ -141,10 +146,10 @@ public final class PriceOracle {
     public static String describe() {
         synchronized (LOCK) {
             if (price <= 0)
-                return fetching ? SOURCE + ": fetching…"
-                        : lastError != null ? SOURCE + ": unavailable (" + lastError + ")" : SOURCE + ": no price yet";
+                return fetching ? source() + ": fetching…"
+                        : lastError != null ? source() + ": unavailable (" + lastError + ")" : source() + ": no price yet";
             long age = System.currentTimeMillis() - goodAtMs;
-            String s = SOURCE + " mid " + fmt(price)
+            String s = source() + " mid " + fmt(price)
                     + (bid > 0 ? "  (bid " + fmt(bid) + " / ask " + fmt(ask) + ")" : "")
                     + "  ·  " + (age / 1000) + "s ago";
             if (age > FRESH_MS) {
@@ -192,9 +197,13 @@ public final class PriceOracle {
     }
 
     private static void fetchOnce() {
-        // PARITY: USDT↔USDT has no external order book — the mid is always 1.0. Stamp a fresh 1.0 each call so
-        // the ladder is always TIGHT (never stale/withdrawn) and the freshness machinery treats parity as
-        // always-available. Skew (P_BIAS) + spread (P_STEP) are applied downstream in applyPeg, unchanged.
+        if (TradingContext.active().pricingParity) { fetchParity(); } else { fetchMexc(); }
+    }
+
+    /** mxUSDT: USDT↔USDT has no external order book — the mid is always 1.0. Stamp a fresh 1.0 each call so the
+     *  ladder is always TIGHT (never stale/withdrawn) and the freshness machinery treats parity as
+     *  always-available. Skew (P_BIAS) + spread (P_STEP) are applied downstream in applyPeg, unchanged. */
+    private static void fetchParity() {
         synchronized (LOCK) {
             suspect = 0;
             price = PARITY_MID; bid = PARITY_MID; ask = PARITY_MID;
@@ -202,6 +211,52 @@ public final class PriceOracle {
             lastError = null;
             if (sPrefs != null) sPrefs.edit().putLong(P_LAST_OK, goodAtMs)
                     .putString(P_LAST_PRICE, Double.toString(PARITY_MID)).apply();
+        }
+    }
+
+    /** MINIMA: peg to the live MEXC MINIMA/USDT order book (effective bid/ask at DEPTH_MIN_USDT notional, with a
+     *  spread sanity check and a two-read confirmation on a suspect jump). Identical to the minimaSwap oracle. */
+    private static void fetchMexc() {
+        try {
+            double b = 0, a = 0;
+            try {
+                // PRIMARY: order-book depth. On a thin market the top-of-book is dust and trivially movable,
+                // so the effective bid/ask is the level where CUMULATIVE notional reaches DEPTH_MIN_USDT per
+                // side — dragging that price requires committing real size, not a dust order.
+                JSONObject depth = httpGet(DEPTH_URL);
+                b = effectiveLevel(depth.optJSONArray("bids"));
+                a = effectiveLevel(depth.optJSONArray("asks"));
+            } catch (IOException ignore) {
+                // FALLBACK: top-of-book only (depth endpoint unreachable). Weaker but still spread-checked.
+                JSONObject book = httpGet(BOOK_URL);
+                b = book.optDouble("bidPrice", 0);
+                a = book.optDouble("askPrice", 0);
+            }
+            // No last-trade tier: on a thin market a dust self-trade can print any price inside the book —
+            // an empty/absent book means there is no market, and the freshness/withdraw machinery handles
+            // "no price" safely. Better no quote than a fake one.
+            if (!(b > 0) || !(a > 0) || b > a) throw new IOException("thin/empty book");
+            if ((a - b) / a >= 0.2) throw new IOException("spread too wide — book too thin to quote");
+            double m = (a + b) / 2;
+            if (!(m > 0) || Double.isInfinite(m)) throw new IOException("bad price");
+            synchronized (LOCK) {
+                if (price > 0 && Math.abs(m - price) / price > JUMP_FRACTION) {
+                    // Suspect glitch: only accept once a SECOND consecutive read lands within 10% of it.
+                    if (!(suspect > 0 && Math.abs(m - suspect) / suspect < 0.10)) {
+                        suspect = m; lastError = "suspect jump " + fmt(price) + "→" + fmt(m);
+                        return;
+                    }
+                }
+                suspect = 0;
+                price = m; bid = b; ask = a;
+                goodAtMs = System.currentTimeMillis();
+                lastError = null;
+                // Persist BOTH the clock and the price so a restart can keep the market live around the last mid.
+                if (sPrefs != null) sPrefs.edit().putLong(P_LAST_OK, goodAtMs)
+                        .putString(P_LAST_PRICE, Double.toString(m)).apply();
+            }
+        } catch (Exception e) {
+            synchronized (LOCK) { lastError = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(); }
         }
     }
 

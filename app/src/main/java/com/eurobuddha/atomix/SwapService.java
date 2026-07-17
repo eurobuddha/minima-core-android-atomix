@@ -107,6 +107,7 @@ public class SwapService extends Service {
         if (!startForegroundCompat()) { stopSelf(); return; }
 
         prefs = getSharedPreferences("atomix", MODE_PRIVATE);
+        TradingContext.load(prefs);   // the selected trading currency — drives token/sentinels/pricing this session
         PriceOracle.init(prefs);   // restore the persisted last-good stamp — the withdraw clock survives restarts
         ls = Sodium.get();
         EthNet net = EthNet.MAINNET;
@@ -115,6 +116,7 @@ public class SwapService extends Service {
 
         node = new NodeApi(this, this::onPaired);
         minima = new MinimaHtlc(node);
+        minima.setActiveToken(TradingContext.active().tokenId);   // publish/liquidity in the selected currency
         engine = new SwapEngine(node, minima, db, wallet, h, notifier);
         otcDb = new OtcDb(this);
         engine.setOtcDb(otcDb);
@@ -322,7 +324,7 @@ public class SwapService extends Service {
     private void scanTakeRequests() {
         if (crypto == null || identity == null || engine == null) return;
         if (takeScanner == null) {
-            takeScanner = new CommsScanner(node, crypto, new PrefsMeta(prefs), SwapTake.ADDRESS, this::routeTakeRequest, (ok, n) -> {});
+            takeScanner = new CommsScanner(node, crypto, new PrefsMeta(prefs), SwapTake.address(), this::routeTakeRequest, (ok, n) -> {});
             for (String hh : incomingHashlocks()) engine.addIncomingHashlock(hh);   // re-arm persisted handshakes
         }
         takeScanner.scan(0);   // bounded depth-grow scan; block number only affects bookmarking
@@ -339,7 +341,7 @@ public class SwapService extends Service {
             otc.setMyOffer(prefs.getBoolean("otc_enable", false), sell, buy);
         }
         if (otcScanner == null)
-            otcScanner = new CommsScanner(node, crypto, new PrefsMeta(prefs), OtcMessage.ADDRESS, otc::route, (ok, n) -> {});
+            otcScanner = new CommsScanner(node, crypto, new PrefsMeta(prefs), OtcMessage.address(), otc::route, (ok, n) -> {});
         otcScanner.scan(0);
         otc.expireStale(System.currentTimeMillis());
     }
@@ -355,7 +357,7 @@ public class SwapService extends Service {
             if (isNew) prefs.edit().putString("incoming_hashlocks", android.text.TextUtils.join(",", set)).apply();
             engine.addIncomingHashlock(hash);
             if (isNew && !MainActivity.SWEEP_ACTIVE) engine.checkBuyNow(hash);   // act now — don't wait for the next 90s poll
-            if (isNew) alert("Buy request received", "A buyer wants your mxUSDT — finding their USDT lock, then locking.");
+            if (isNew) alert("Buy request received", "A buyer wants your " + TradingContext.active().coinLabel + " — finding their USDT lock, then locking.");
             return isNew;
         } catch (Exception e) { return false; }
     }
@@ -424,7 +426,7 @@ public class SwapService extends Service {
                 SwapLog.d("bg publish OK " + txpowid);
                 updateFg(fgStateText());
                 if (restored && peg == PriceOracle.PEG_APPLIED)
-                    alert(PriceOracle.SOURCE + " feed recovered", "Your pegged order is live again.");
+                    alert(PriceOracle.source() + " feed recovered", "Your pegged order is live again.");
             }
             @Override public void onFailed(String message) {
                 PublishGate.release(PublishGate.ORDER);
@@ -493,7 +495,7 @@ public class SwapService extends Service {
             }
             @Override public void onFailed(String message) { SwapLog.w("svc tombstone publish FAIL: " + message); /* retried next tick */ }
         });
-        if (first) alert(PriceOracle.SOURCE + " price feed lost",
+        if (first) alert(PriceOracle.source() + " price feed lost",
                 "Your pegged order was withdrawn for safety. It re-publishes automatically when the feed recovers.");
     }
 

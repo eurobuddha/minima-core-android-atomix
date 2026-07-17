@@ -227,9 +227,10 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
-        Design.load(this);   // persisted theme + bundled Inter/JetBrains Mono, before any view is built
         ls = Sodium.get();
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        TradingContext.load(prefs);   // the selected currency — BEFORE Design.load so the theme opens in the right identity
+        Design.load(this);   // persisted theme + bundled Inter/JetBrains Mono, before any view is built
         PriceOracle.init(prefs);   // restore the persisted last-good stamp — the withdraw clock survives restarts
         net = EthNet.MAINNET;
         rpc = new EthRpc(rpcUrl(net));
@@ -256,6 +257,7 @@ public class MainActivity extends AppCompatActivity {
         node = new NodeApi(this, this::onPaired);
         lastRegisterMs = System.currentTimeMillis();   // the constructor's REGISTER counts as attempt #1
         minima = new MinimaHtlc(node);
+        minima.setActiveToken(TradingContext.active().tokenId);   // publish/liquidity in the selected currency
         engine = new SwapEngine(node, minima, db, wallet, ui, notifier);
         otcDb = new OtcDb(this);
         engine.setOtcDb(otcDb);
@@ -342,8 +344,37 @@ public class MainActivity extends AppCompatActivity {
         render();
     }
 
+    /** Confirm before switching the traded currency — it changes which market you make and re-themes the app. */
+    private void switchCurrencyDialog() {
+        final TradingContext target = TradingContext.active().other();
+        dialog()
+            .setTitle("Switch to " + target.coinLabel + "?")
+            .setMessage("AtomiX publishes and market-makes in ONE currency at a time. Switching to "
+                    + target.coinLabel + " re-themes the app and moves your order/market-making to the "
+                    + target.coinLabel + " book.\n\nYour current " + TradingContext.active().coinLabel
+                    + " orders simply stop being maintained (they age off the book). Any in-flight swaps in "
+                    + "either currency keep settling safely in the background — switching never strands them.")
+            .setPositiveButton("Switch to " + target.coinLabel, (d, w) -> doSwitchCurrency(target))
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    /** Persist the new currency and restart cleanly so every scanner/engine/theme re-reads it. The background
+     *  settlement is currency-agnostic, so in-flight swaps in the other currency continue to completion. */
+    private void doSwitchCurrency(TradingContext target) {
+        TradingContext.setActive(target, prefs);
+        // Stop the foreground watcher so it re-reads the new currency (sentinels/token/pricing) on its next start;
+        // the recreate() below re-runs onCreate → startSwapService() with a fresh SwapService instance.
+        try { stopService(new android.content.Intent(this, SwapService.class)); } catch (Exception ignored) {}
+        serviceStarted = false;
+        recreate();   // rebuild the whole UI + scanners in the target currency's identity (full re-theme)
+    }
+
     /** AlertDialog builder whose chrome follows the in-app theme (dark/light). */
     private AlertDialog.Builder dialog() { return new AlertDialog.Builder(this, Design.dialogTheme()); }
+
+    /** The active currency's coin label ("MINIMA" / "mxUSDT") for user-facing strings. */
+    private static String ccy() { return TradingContext.active().coinLabel; }
 
     // ---- pairing + identity ----
 
@@ -464,7 +495,7 @@ public class MainActivity extends AppCompatActivity {
     // ---- balances ----
 
     private void fetchMinimaBalance() {
-        node.cmd("balance tokenid:" + MinimaHtlc.USDT_TOKENID, new NodeApi.Cb() {
+        node.cmd("balance tokenid:" + TradingContext.active().tokenId, new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
                 Object resp = j.opt("response");
                 JSONObject t = null;
@@ -487,7 +518,7 @@ public class MainActivity extends AppCompatActivity {
      *  exactly what inflates the balance (e.g. shared order-book / HTLC / casino coins vs your simple coins). */
     private void minimaCoinDump() {
         toast("Reading coins…");
-        node.cmd("coins relevant:true tokenid:" + MinimaHtlc.USDT_TOKENID + " simplestate:false", new NodeApi.Cb() {
+        node.cmd("coins relevant:true tokenid:" + TradingContext.active().tokenId + " simplestate:false", new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
                 Object resp = j.opt("response");
                 JSONArray coins = resp instanceof JSONArray ? (JSONArray) resp : new JSONArray();
@@ -505,7 +536,7 @@ public class MainActivity extends AppCompatActivity {
                     String mx = c.optString("miniaddress", "");
                     String tag = "";
                     if (MinimaHtlc.HTLC_ADDRESS.equalsIgnoreCase(mx)) tag = " (swap HTLC)";
-                    else if (SwapOrderBook.ADDRESS.equalsIgnoreCase(addr)) tag = " (order book)";
+                    else if (SwapOrderBook.address().equalsIgnoreCase(addr)) tag = " (order book)";
                     sb.append(Util.tidyAmount(amt)).append("   ")
                       .append(addr.length() > 16 ? addr.substring(0, 16) + "…" : addr).append(tag).append("\n");
                 }
@@ -659,7 +690,7 @@ public class MainActivity extends AppCompatActivity {
         }, err -> {});
         if (otc != null && crypto != null) {
             if (otcScanner == null)
-                otcScanner = new CommsScanner(node, crypto, new PrefsMeta(prefs), OtcMessage.ADDRESS, otc::route, (ok, n) -> {});
+                otcScanner = new CommsScanner(node, crypto, new PrefsMeta(prefs), OtcMessage.address(), otc::route, (ok, n) -> {});
             otcScanner.scan(chainBlock);
             otc.expireStale(System.currentTimeMillis());
         }
@@ -678,7 +709,7 @@ public class MainActivity extends AppCompatActivity {
     private void scanTakeRequests() {
         if (!paired || crypto == null || identity == null || engine == null) return;
         if (takeScanner == null) {
-            takeScanner = new CommsScanner(node, crypto, new PrefsMeta(prefs), SwapTake.ADDRESS, this::routeTakeRequest, (ok, n) -> {});
+            takeScanner = new CommsScanner(node, crypto, new PrefsMeta(prefs), SwapTake.address(), this::routeTakeRequest, (ok, n) -> {});
         }
         takeScanner.scan(chainBlock);
     }
@@ -703,8 +734,8 @@ public class MainActivity extends AppCompatActivity {
             // Act NOW — don't wait for the next ~90s poll. Stand down only mid-SELL-sweep (same as watchTick),
             // since that path also selects mxUSDT coins and a concurrent responder lock could double-select.
             if (engine != null && (sweepRun == null || !sweepRun.sell)) engine.checkBuyNow(hash);
-            postNotification("Buy request received", "A buyer wants your mxUSDT — finding their USDT lock, then locking.");
-            orderStatus = "↧ Buy request received — locking mxUSDT for a buyer…"; render();
+            postNotification("Buy request received", "A buyer wants your " + ccy() + " — finding their USDT lock, then locking.");
+            orderStatus = "↧ Buy request received — locking " + ccy() + " for a buyer…"; render();
         }
         return isNew;
     }
@@ -744,7 +775,7 @@ public class MainActivity extends AppCompatActivity {
         if (!wallet.ready()) { toast("ETH wallet not ready yet"); return; }
         if (prefs.getBoolean(PriceOracle.P_ENABLE, false) && !PriceOracle.fresh()) {
             // Pegged: grab a live price first so a user-tapped Publish never quotes a stale one.
-            orderStatus = "Fetching " + PriceOracle.SOURCE + " price…"; render();
+            orderStatus = "Fetching " + PriceOracle.source() + " price…"; render();
             io.execute(() -> { PriceOracle.refreshSync(); ui.post(this::publishOrderNow); });
             return;
         }
@@ -758,7 +789,7 @@ public class MainActivity extends AppCompatActivity {
         // price at all does it refuse; a stale-but-known price publishes a widened defensive ladder (stay-live).
         final int peg = PriceOracle.applyPeg(o, prefs);
         if (peg == PriceOracle.PEG_STALE) {
-            orderStatus = "✗ " + PriceOracle.SOURCE + " price unavailable — can't peg yet (no price)";
+            orderStatus = "✗ " + PriceOracle.source() + " price unavailable — can't peg yet (no price)";
             render(); return;
         }
         final boolean wide = peg == PriceOracle.PEG_WIDE;
@@ -780,9 +811,9 @@ public class MainActivity extends AppCompatActivity {
                 if (peg == PriceOracle.PEG_APPLIED || wide) PriceOracle.commitPeg(prefs, pegMid, wide);   // baseline moves only on a CONFIRMED publish
                 engine.setMyOrder(o);
                 orderStatus = wide
-                        ? "✓ Order live — pegged to " + PriceOracle.SOURCE + " (feed stale — defensive spread; auto-tightens when it recovers)"
+                        ? "✓ Order live — pegged to " + PriceOracle.source() + " (feed stale — defensive spread; auto-tightens when it recovers)"
                         : peg == PriceOracle.PEG_APPLIED
-                        ? "✓ Order live — pegged to " + PriceOracle.SOURCE + " (mid " + fmtPrice(PriceOracle.mid()) + "), auto-reprices"
+                        ? "✓ Order live — pegged to " + PriceOracle.source() + " (mid " + fmtPrice(PriceOracle.mid()) + "), auto-reprices"
                         : "✓ Order published — auto-refreshes every 30 min";
                 render(); ui.postDelayed(MainActivity.this::scanOrderBook, 2000);
             }
@@ -835,8 +866,8 @@ public class MainActivity extends AppCompatActivity {
                 PublishGate.release(PublishGate.ORDER);
                 SwapLog.d("fg publish OK " + txpowid);
                 if (restored && peg == PriceOracle.PEG_APPLIED) {
-                    orderStatus = "✓ " + PriceOracle.SOURCE + " feed recovered — pegged order is live again";
-                    postNotification(PriceOracle.SOURCE + " feed recovered", "Your pegged order is live again.");
+                    orderStatus = "✓ " + PriceOracle.source() + " feed recovered — pegged order is live again";
+                    postNotification(PriceOracle.source() + " feed recovered", "Your pegged order is live again.");
                     render();
                 }
             }
@@ -876,8 +907,8 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onFailed(String message) { SwapLog.w("fg tombstone publish FAIL: " + message); /* retried next tick */ }
         });
         if (first) {
-            orderStatus = "⚠ " + PriceOracle.SOURCE + " feed lost — pegged order withdrawn until it recovers";
-            postNotification(PriceOracle.SOURCE + " price feed lost",
+            orderStatus = "⚠ " + PriceOracle.source() + " feed lost — pegged order withdrawn until it recovers";
+            postNotification(PriceOracle.source() + " price feed lost",
                     "Your pegged order was withdrawn for safety. It re-publishes automatically when the feed recovers.");
             render();
         }
@@ -892,7 +923,7 @@ public class MainActivity extends AppCompatActivity {
         final boolean live = o.hasLiquidity();
         final int peg = live ? PriceOracle.applyPeg(o, prefs) : PriceOracle.PEG_OFF;
         if (peg == PriceOracle.PEG_STALE) {
-            orderStatus = "Saved. " + PriceOracle.SOURCE + " price unavailable — publishes when a price arrives.";
+            orderStatus = "Saved. " + PriceOracle.source() + " price unavailable — publishes when a price arrives.";
             render(); return;
         }
         final boolean wide = peg == PriceOracle.PEG_WIDE;
@@ -940,8 +971,8 @@ public class MainActivity extends AppCompatActivity {
         box.setPadding(dp(20), dp(8), dp(20), dp(8));
 
         TextView hint = new TextView(this);
-        hint.setText("Your depth ladder for mxUSDT / " + sym + "  (price = USDT per mxUSDT):\n"
-                + "•  ASKS — where YOU SELL mxUSDT (higher).   BIDS — where YOU BUY (lower).\n"
+        hint.setText("Your depth ladder for " + ccy() + " / " + sym + "  (price = USDT per " + ccy() + "):\n"
+                + "•  ASKS — where YOU SELL " + ccy() + " (higher).   BIDS — where YOU BUY (lower).\n"
                 + "•  Each level's amount is a per-take cap. Leave rows blank to skip them.\n"
                 + "•  Tip: make your best level your largest — old-app takers only see your best price.");
         hint.setTextColor(Design.DIM()); hint.setTextSize(12f); hint.setTypeface(Design.sans()); hint.setLineSpacing(dp(2), 1f); hint.setPadding(0, 0, 0, dp(10));
@@ -952,9 +983,9 @@ public class MainActivity extends AppCompatActivity {
         box.addView(sw);
 
         // ---- auto-MM: peg the ladder to the live MEXC mxUSDT/USDT market ----
-        box.addView(fieldLabel("AUTO MARKET-MAKE — PEG TO " + PriceOracle.SOURCE));
+        box.addView(fieldLabel("AUTO MARKET-MAKE — PEG TO " + PriceOracle.source()));
         final SwitchCompat pegSw = new SwitchCompat(this);
-        pegSw.setText("Peg ladder to " + PriceOracle.SOURCE + " (auto-reprice)");
+        pegSw.setText("Peg ladder to " + PriceOracle.source() + " (auto-reprice)");
         pegSw.setTextColor(Design.DIM());
         pegSw.setChecked(prefs.getBoolean(PriceOracle.P_ENABLE, false));
         box.addView(pegSw);
@@ -964,10 +995,10 @@ public class MainActivity extends AppCompatActivity {
         pegPx.setText(PriceOracle.describe());
         box.addView(pegPx);
         TextView pegHint = new TextView(this);
-        pegHint.setText("While pegged, the ladder regenerates around the " + PriceOracle.SOURCE + " mid (± step %, "
+        pegHint.setText("While pegged, the ladder regenerates around the " + PriceOracle.source() + " mid (± step %, "
                 + "your size per level) at every publish, and re-publishes when the market moves ≥ your threshold. "
                 + "If the feed goes down your order is withdrawn for safety, then restored when it recovers. "
-                + PriceOracle.SOURCE + "'s mxUSDT market is THIN — keep step % above its typical spread and "
+                + PriceOracle.source() + "'s " + ccy() + " market is THIN — keep step % above its typical spread and "
                 + "level sizes small; you auto-trade at these prices.");
         pegHint.setTextColor(Design.DIM2()); pegHint.setTextSize(11f); pegHint.setTypeface(Design.sans());
         pegHint.setLineSpacing(dp(2), 1f); pegHint.setPadding(0, 0, 0, dp(4));
@@ -1007,7 +1038,7 @@ public class MainActivity extends AppCompatActivity {
         // ASKS (maker sells mxUSDT, higher) — laid out ORDER-BOOK style: highest (A6) at the top, best/lowest
         // ask A1 at the BOTTOM adjacent to the bids, so the spread sits in the middle. askRows[] stays indexed
         // A1..A6 (A1 = best); only the visual insertion order is reversed.
-        TextView ah = new TextView(this); ah.setText("ASKS — you SELL mxUSDT (higher price)");
+        TextView ah = new TextView(this); ah.setText("ASKS — you SELL " + ccy() + " (higher price)");
         ah.setTextColor(Design.RED()); ah.setTextSize(12.5f); ah.setTypeface(Design.sansBold()); ah.setLetterSpacing(0.03f); ah.setPadding(0, dp(12), 0, dp(2));
         box.addView(ah);
         final EditText[][] askRows = new EditText[Order.MAX_LEVELS][];
@@ -1019,7 +1050,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         // BIDS (maker buys mxUSDT, lower)
-        TextView bh = new TextView(this); bh.setText("BIDS — you BUY mxUSDT (lower price)");
+        TextView bh = new TextView(this); bh.setText("BIDS — you BUY " + ccy() + " (lower price)");
         bh.setTextColor(Design.IN()); bh.setTextSize(12.5f); bh.setTypeface(Design.sansBold()); bh.setLetterSpacing(0.03f); bh.setPadding(0, dp(12), 0, dp(2));
         box.addView(bh);
         final EditText[][] bidRows = new EditText[Order.MAX_LEVELS][];
@@ -1030,7 +1061,7 @@ public class MainActivity extends AppCompatActivity {
             bidRows[i] = numRow2(box, "B" + (i + 1), px, am, Design.IN());
         }
 
-        final EditText minE = numRow(box, "min mxUSDT / trade", p.min);
+        final EditText minE = numRow(box, "min " + ccy() + " / trade", p.min);
 
         final TextView pv = new TextView(this); pv.setTextSize(12f); pv.setTypeface(Design.sans()); pv.setLineSpacing(dp(2), 1f); pv.setPadding(0, dp(10), 0, dp(2));
         box.addView(pv);
@@ -1085,7 +1116,7 @@ public class MainActivity extends AppCompatActivity {
             if (on) {
                 PriceOracle.refreshAsync();
                 if (PriceOracle.fresh()) fillFromPeg.run();
-                else { pegAwaitFill[0] = true; toast("Fetching " + PriceOracle.SOURCE + " price…"); }
+                else { pegAwaitFill[0] = true; toast("Fetching " + PriceOracle.source() + " price…"); }
             }
         });
 
@@ -1240,7 +1271,7 @@ public class MainActivity extends AppCompatActivity {
         pe.setHint("price"); pe.setHintTextColor(Design.DIM2());
         pe.setText(price > 0 ? trimSig(price) : ""); pe.setTextColor(Design.TEXT()); pe.setTextSize(14f); pe.setGravity(Gravity.END); pe.setTypeface(Design.mono());
         EditText ae = new EditText(this); decimalInput(ae);
-        ae.setHint("mxUSDT"); ae.setHintTextColor(Design.DIM2());
+        ae.setHint(ccy()); ae.setHintTextColor(Design.DIM2());
         ae.setText(amount > 0 ? trimSig(amount) : ""); ae.setTextColor(Design.TEXT()); ae.setTextSize(14f); ae.setGravity(Gravity.END); ae.setTypeface(Design.mono());
         TextView clr = new TextView(this); clr.setText("✕"); clr.setTextColor(Design.DIM2()); clr.setTextSize(15f);
         clr.setTypeface(Design.sans()); clr.setGravity(Gravity.CENTER); clr.setPadding(dp(8), dp(4), dp(2), dp(4));
@@ -1279,15 +1310,15 @@ public class MainActivity extends AppCompatActivity {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(20), dp(12), dp(20), dp(4));
         TextView info = new TextView(this);
-        info.setText((sellMinima ? "Sell mxUSDT → " + symbol : "Buy mxUSDT ← " + symbol)
-                + "\nPrice: " + trim(price) + " " + symbol + " per mxUSDT"
-                + "\nThis level: up to " + abbrev(maxAmount) + " mxUSDT"
-                + (min > 0 ? "\nMin: " + trim(min) + " mxUSDT" : ""));
+        info.setText((sellMinima ? "Sell " + ccy() + " → " + symbol : "Buy " + ccy() + " ← " + symbol)
+                + "\nPrice: " + trim(price) + " " + symbol + " per " + ccy()
+                + "\nThis level: up to " + abbrev(maxAmount) + " " + ccy()
+                + (min > 0 ? "\nMin: " + trim(min) + " " + ccy() : ""));
         info.setTextColor(Design.DIM()); info.setTextSize(13f); info.setTypeface(Design.sans()); info.setLineSpacing(dp(3), 1f); info.setPadding(0, 0, 0, dp(10));
         box.addView(info);
 
         final EditText amt = new EditText(this);
-        amt.setHint("mxUSDT to " + (sellMinima ? "sell" : "buy"));
+        amt.setHint(ccy() + " to " + (sellMinima ? "sell" : "buy"));
         decimalInput(amt);
         amt.setTextColor(Design.TEXT()); amt.setHintTextColor(Design.DIM2()); amt.setTextSize(16f); amt.setTypeface(Design.mono());
         box.addView(amt);
@@ -1303,17 +1334,17 @@ public class MainActivity extends AppCompatActivity {
 
         modalOpen = true;
         dialog()
-                .setTitle((sellMinima ? "Sell mxUSDT" : "Buy mxUSDT") + " · " + Util.shorten(maker.signerPk))
+                .setTitle((sellMinima ? "Sell " + ccy() : "Buy " + ccy()) + " · " + Util.shorten(maker.signerPk))
                 .setView(box)
                 .setPositiveButton("Start swap", (d, w) -> {
                     String minima = amt.getText().toString().trim();
                     String usdt = computeUsdt(minima, price);
-                    if (usdt == null) { toast("Enter a valid mxUSDT amount"); return; }
+                    if (usdt == null) { toast("Enter a valid " + ccy() + " amount"); return; }
                     // Client-side guards are UX-only — the maker's engine guard is authoritative — but catch the
                     // obvious auto-declines before locking any coins on-chain.
                     double m = parseD(minima, 0);
-                    if (m > maxAmount + 1e-9) { toast("This level takes up to " + abbrev(maxAmount) + " mxUSDT — more will be auto-declined"); return; }
-                    if (min > 0 && m < min) { toast("Below the maker's minimum (" + trim(min) + " mxUSDT)"); return; }
+                    if (m > maxAmount + 1e-9) { toast("This level takes up to " + abbrev(maxAmount) + " " + ccy() + " — more will be auto-declined"); return; }
+                    if (min > 0 && m < min) { toast("Below the maker's minimum (" + trim(min) + " " + ccy() + ")"); return; }
                     startSwap(maker, symbol, sellMinima, minima, usdt);
                 })
                 .setNegativeButton("Cancel", null)
@@ -1580,9 +1611,19 @@ public class MainActivity extends AppCompatActivity {
         header.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView brand = new TextView(this);
-        brand.setText("usdtSwap");
+        brand.setText("AtomiX");
         brand.setTextColor(Design.TEXT()); brand.setTextSize(21f); brand.setTypeface(Design.sansBold()); brand.setLetterSpacing(-0.01f);
         header.addView(brand, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        // Currency selector — the active market's identity (accent-tinted). Tap to switch MINIMA ↔ mxUSDT: the
+        // whole app re-themes to that currency and market-making moves to it (one currency at a time).
+        TextView ccyPill = Design.pill(this, TradingContext.active().coinLabel, Design.ACCENT_SOFT(), Design.ACCENT());
+        ccyPill.setTextSize(12f);
+        ccyPill.setOnClickListener(v -> switchCurrencyDialog());
+        Design.pressable(ccyPill);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        clp.rightMargin = dp(8);
+        header.addView(ccyPill, clp);
 
         TextView theme = Design.pill(this, Design.isDark() ? "☾" : "☀", Design.SURFACE2(), Design.DIM());
         theme.setTextSize(13f);
@@ -1636,7 +1677,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void renderSwapTab(LinearLayout col) {
         TextView h = new TextView(this);
-        h.setText("Swap mxUSDT ⇄ USDT");
+        h.setText("Swap " + ccy() + " ⇄ USDT");
         h.setTextColor(Design.TEXT()); h.setTextSize(18f); h.setTypeface(Design.sansBold());
         h.setPadding(0, dp(4), 0, dp(2));
         col.addView(h);
@@ -1648,8 +1689,8 @@ public class MainActivity extends AppCompatActivity {
         // direction toggle (segmented)
         LinearLayout seg = new LinearLayout(this);
         seg.setOrientation(LinearLayout.HORIZONTAL);
-        TextView sellTab = segTab("Sell mxUSDT", swapSell, () -> { swapInputFocused = false; if (!swapSell) { swapSell = true; } render(); });
-        TextView buyTab = segTab("Buy mxUSDT", !swapSell, () -> { swapInputFocused = false; if (swapSell) { swapSell = false; } render(); });
+        TextView sellTab = segTab("Sell " + ccy(), swapSell, () -> { swapInputFocused = false; if (!swapSell) { swapSell = true; } render(); });
+        TextView buyTab = segTab("Buy " + ccy(), !swapSell, () -> { swapInputFocused = false; if (swapSell) { swapSell = false; } render(); });
         LinearLayout.LayoutParams sp1 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); sp1.rightMargin = dp(5);
         LinearLayout.LayoutParams sp2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); sp2.leftMargin = dp(5);
         seg.addView(sellTab, sp1); seg.addView(buyTab, sp2);
@@ -1772,7 +1813,7 @@ public class MainActivity extends AppCompatActivity {
         double bestCap = sellMinima ? best.bidCap : best.askCap;
         double depth = sweepDepthMinima(sellMinima);
         TextView bp = new TextView(this);
-        bp.setText("Best price " + fmtPrice(price) + " USDT/mxUSDT  ·  up to ~" + abbrev(bestCap) + " at best"
+        bp.setText("Best price " + fmtPrice(price) + " USDT/" + ccy() + "  ·  up to ~" + abbrev(bestCap) + " at best"
                 + (depth > bestCap + 1e-9 ? ", ~" + abbrev(depth) + " across the book" : "")
                 + (sellMinima ? "" : "  ·  ETH gas per part"));
         bp.setTextColor(Design.DIM2()); bp.setTextSize(11.5f); bp.setTypeface(Design.sans()); bp.setPadding(0, dp(12), 0, 0);
@@ -1835,7 +1876,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(dp(34), dp(34)); clp.rightMargin = dp(10);
         chip.addView(circle, clp);
         LinearLayout colc = new LinearLayout(this); colc.setOrientation(LinearLayout.VERTICAL);
-        TextView tk = new TextView(this); tk.setText(minima ? "mxUSDT" : "USDT"); tk.setTextColor(Design.TEXT()); tk.setTextSize(15f); tk.setTypeface(Design.sansBold());
+        TextView tk = new TextView(this); tk.setText(minima ? ccy() : "USDT"); tk.setTextColor(Design.TEXT()); tk.setTextSize(15f); tk.setTypeface(Design.sansBold());
         TextView sub = new TextView(this);
         String usdt = tokenBals.get("USDT");
         sub.setText(minima ? ("avail " + abbrev(parseD(minimaBal, 0))) : ("avail " + (usdt != null ? Util.tidyAmount(usdt) : "—")));
@@ -1865,16 +1906,16 @@ public class MainActivity extends AppCompatActivity {
         if (minima == null || usdt == null) { toast("Enter a valid amount"); return; }
         // UX-only cap check against the best level (the maker's guard is authoritative) — stop over-sizing before a lock.
         if (maxAmount > 0 && parseD(minima, 0) > maxAmount + 1e-9) {
-            toast("Best level takes up to " + abbrev(maxAmount) + " mxUSDT — reduce the amount"); return;
+            toast("Best level takes up to " + abbrev(maxAmount) + " " + ccy() + " — reduce the amount"); return;
         }
         String msg = sellMinima
-                ? ("Sell  " + minima + " mxUSDT\nReceive  ≈ " + usdt + " USDT\n\nBest price " + fmtPrice(price) + " USDT/mxUSDT\nCounterparty  " + Util.shorten(maker.signerPk)
-                    + "\n\nThis locks your mxUSDT on-chain. Continue?")
-                : ("Buy  ≈ " + minima + " mxUSDT\nPay  " + usdt + " USDT (+ ETH gas)\n\nBest price " + fmtPrice(price) + " USDT/mxUSDT\nCounterparty  " + Util.shorten(maker.signerPk)
+                ? ("Sell  " + minima + " " + ccy() + "\nReceive  ≈ " + usdt + " USDT\n\nBest price " + fmtPrice(price) + " USDT/" + ccy() + "\nCounterparty  " + Util.shorten(maker.signerPk)
+                    + "\n\nThis locks your " + ccy() + " on-chain. Continue?")
+                : ("Buy  ≈ " + minima + " " + ccy() + "\nPay  " + usdt + " USDT (+ ETH gas)\n\nBest price " + fmtPrice(price) + " USDT/" + ccy() + "\nCounterparty  " + Util.shorten(maker.signerPk)
                     + "\n\nThis locks your USDT on-chain. Continue?");
         modalOpen = true;
         dialog()
-                .setTitle(sellMinima ? "Review — Sell mxUSDT" : "Review — Buy mxUSDT")
+                .setTitle(sellMinima ? "Review — Sell " + ccy() : "Review — Buy " + ccy())
                 .setMessage(msg)
                 .setPositiveButton("Start swap", (d, w) -> { swapAmount = ""; startSwap(maker, "USDT", sellMinima, minima, usdt); })
                 .setNegativeButton("Cancel", null)
@@ -1886,18 +1927,18 @@ public class MainActivity extends AppCompatActivity {
     /** {@code minimaStr} is the mxUSDT amount to sell / to buy (the mxUSDT-side field). */
     private void onSwapCta(boolean sell, String minimaStr, Best best) {
         swapInputFocused = false;   // leaving the amount field — panel re-renders live from here (0.8.1 lesson)
-        if (minimaStr.isEmpty()) { toast("Enter how much mxUSDT to " + (sell ? "sell" : "buy")); return; }
+        if (minimaStr.isEmpty()) { toast("Enter how much " + ccy() + " to " + (sell ? "sell" : "buy")); return; }
         final Order bestMaker = sell ? best.bidMaker : best.askMaker;
         final double bestPrice = sell ? best.bestBid : best.bestAsk;
         final double bestCap = sell ? best.bidCap : best.askCap;   // mxUSDT
         if (bestMaker == null || bestPrice <= 0) { toast("No quote available right now."); return; }
         final double EPS = 1e-9;
         final double want = parseD(minimaStr, 0);
-        if (want <= 0) { toast("Enter a valid mxUSDT amount."); return; }
+        if (want <= 0) { toast("Enter a valid " + ccy() + " amount."); return; }
 
         if (sell) {
             if (want > parseD(minimaBal, 0) + EPS) {
-                toast("You only have ~" + abbrev(parseD(minimaBal, 0)) + " mxUSDT available to sell."); return;
+                toast("You only have ~" + abbrev(parseD(minimaBal, 0)) + " " + ccy() + " available to sell."); return;
             }
             if (want <= bestCap + EPS) { reviewSwap(bestMaker, true, minimaStr, bestPrice, bestCap); return; }   // single (send = mxUSDT)
             SweepPlan plan = buildSweepPlan(true, minimaStr, 0);
@@ -1911,7 +1952,7 @@ public class MainActivity extends AppCompatActivity {
         if (plan.legs.isEmpty()) { toast(sweepEmptyMsg(plan)); return; }
         double haveUsdt = parseD(Util.tidyAmount(tokenBals.get("USDT")), 0);
         if (plan.totalUsdt > haveUsdt + EPS) {
-            toast("Need ≈ " + trimSig(plan.totalUsdt) + " USDT for " + abbrev(plan.filledMinima) + " mxUSDT (within "
+            toast("Need ≈ " + trimSig(plan.totalUsdt) + " USDT for " + abbrev(plan.filledMinima) + " " + ccy() + " (within "
                     + pctStr(buySlippage() * 100) + "%) — you have " + trimSig(haveUsdt) + "."); return;
         }
         reviewSweep(plan);
@@ -1932,13 +1973,13 @@ public class MainActivity extends AppCompatActivity {
 
         TextView head = new TextView(this);
         head.setText(sell
-                ? ("Sell " + abbrev(plan.filledMinima) + " mxUSDT in " + plan.legs.size() + (plan.legs.size() == 1 ? " part" : " parts"))
-                : ("Buy ≈ " + abbrev(plan.filledMinima) + " mxUSDT for ≈ " + trimSig(plan.totalUsdt) + " USDT in " + plan.legs.size() + (plan.legs.size() == 1 ? " part" : " parts")));
+                ? ("Sell " + abbrev(plan.filledMinima) + " " + ccy() + " in " + plan.legs.size() + (plan.legs.size() == 1 ? " part" : " parts"))
+                : ("Buy ≈ " + abbrev(plan.filledMinima) + " " + ccy() + " for ≈ " + trimSig(plan.totalUsdt) + " USDT in " + plan.legs.size() + (plan.legs.size() == 1 ? " part" : " parts")));
         head.setTextColor(Design.TEXT()); head.setTextSize(15f); head.setTypeface(Design.sansBold()); head.setPadding(0, 0, 0, dp(6));
         box.addView(head);
 
         TextView metrics = new TextView(this);
-        metrics.setText("Avg " + fmtPrice(plan.avgPrice) + "  ·  worst " + fmtPrice(plan.worstPrice) + " USDT/mxUSDT"
+        metrics.setText("Avg " + fmtPrice(plan.avgPrice) + "  ·  worst " + fmtPrice(plan.worstPrice) + " USDT/" + ccy()
                 + (!sell && plan.slippagePct > 0 ? "  ·  within " + pctStr(plan.slippagePct) + "% slippage" : ""));
         metrics.setTextColor(Design.DIM()); metrics.setTextSize(12.5f); metrics.setTypeface(Design.sans()); metrics.setPadding(0, 0, 0, dp(8));
         box.addView(metrics);
@@ -1946,21 +1987,21 @@ public class MainActivity extends AppCompatActivity {
         for (int i = 0; i < plan.legs.size(); i++) {
             SweepLeg leg = plan.legs.get(i);
             TextView r = new TextView(this);
-            r.setText("Part " + (i + 1) + " · " + leg.minima + " mxUSDT @ " + fmtPrice(leg.price) + " → " + leg.usdt + " USDT · " + shortAddr(leg.maker.signerPk));
+            r.setText("Part " + (i + 1) + " · " + leg.minima + " " + ccy() + " @ " + fmtPrice(leg.price) + " → " + leg.usdt + " USDT · " + shortAddr(leg.maker.signerPk));
             r.setTextColor(Design.TEXT()); r.setTextSize(12f); r.setTypeface(Design.mono()); r.setPadding(0, dp(2), 0, dp(2));
             box.addView(r);
         }
 
         TextView totals = new TextView(this);
         totals.setText(sell
-                ? ("Total: sell " + trimSig(plan.filledMinima) + " mxUSDT · receive ≈ " + trimSig(plan.totalUsdt) + " USDT")
-                : ("Total: pay ≈ " + trimSig(plan.totalUsdt) + " USDT · receive ≈ " + trimSig(plan.filledMinima) + " mxUSDT"));
+                ? ("Total: sell " + trimSig(plan.filledMinima) + " " + ccy() + " · receive ≈ " + trimSig(plan.totalUsdt) + " USDT")
+                : ("Total: pay ≈ " + trimSig(plan.totalUsdt) + " USDT · receive ≈ " + trimSig(plan.filledMinima) + " " + ccy()));
         totals.setTextColor(Design.ACCENT()); totals.setTextSize(12.5f); totals.setTypeface(Design.sansBold()); totals.setPadding(0, dp(8), 0, dp(2));
         box.addView(totals);
 
         if (plan.partial) {
             TextView pw = new TextView(this);
-            String msg = "Fills " + abbrev(plan.filledMinima) + " of " + abbrev(plan.target) + " mxUSDT — ";
+            String msg = "Fills " + abbrev(plan.filledMinima) + " of " + abbrev(plan.target) + " " + ccy() + " — ";
             if (!sell && "slippage".equals(plan.stopReason))
                 msg += "the rest is priced beyond your " + pctStr(plan.slippagePct) + "% slippage.";
             else
@@ -2007,7 +2048,7 @@ public class MainActivity extends AppCompatActivity {
         // pre-flight readiness
         box.addView(stagePill("Node connected", paired ? STG_DONE : STG_WARN));
         if (swapSell) {
-            box.addView(stagePill("mxUSDT ready to sell", parseD(minimaBal, 0) > 0 ? STG_DONE : STG_WARN));
+            box.addView(stagePill(ccy() + " ready to sell", parseD(minimaBal, 0) > 0 ? STG_DONE : STG_WARN));
         } else {
             String usdt = tokenBals.get("USDT");
             box.addView(stagePill("USDT ready to spend", (usdt != null && parseD(usdt, 0) > 0) ? STG_DONE : STG_WARN));
@@ -2312,7 +2353,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(20), dp(12), dp(20), dp(4));
         TextView h = new TextView(this);
-        h.setText("The most above the best price you'll pay per mxUSDT when a buy fills across deeper levels.");
+        h.setText("The most above the best price you'll pay per " + ccy() + " when a buy fills across deeper levels.");
         h.setTextColor(Design.DIM()); h.setTextSize(12.5f); h.setTypeface(Design.sans()); h.setLineSpacing(dp(2), 1f); h.setPadding(0, 0, 0, dp(10));
         box.addView(h);
         final EditText e = new EditText(this); decimalInput(e);
@@ -2332,7 +2373,7 @@ public class MainActivity extends AppCompatActivity {
     // ---- Wallet tab ----
 
     private void renderWalletTab(LinearLayout col) {
-        LinearLayout minimaCard = walletCard("Minima · available to swap", minimaBal + " mxUSDT", minimaBreakdown() + "  ·  long-press for coins", Design.ACCENT());
+        LinearLayout minimaCard = walletCard("Minima · available to swap", minimaBal + " " + ccy(), minimaBreakdown() + "  ·  long-press for coins", Design.ACCENT());
         minimaCard.setOnLongClickListener(v -> { minimaCoinDump(); return true; });
         col.addView(minimaCard);
         minimaBalView = (TextView) minimaCard.findViewWithTag(TAG_BAL);   // fresh ref each render (tree is rebuilt)
@@ -2461,10 +2502,10 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putBoolean("seen_welcome", true).apply();
         dialog()
                 .setTitle("Welcome to usdtSwap")
-                .setMessage("Swap mxUSDT ⇄ USDT trustlessly across chains — no middleman ever holds your funds.\n\n"
+                .setMessage("Swap " + ccy() + " ⇄ USDT trustlessly across chains — no middleman ever holds your funds.\n\n"
                         + "To trade you'll need:\n"
                         + "•  Minima Core running, with usdtSwap enabled in Apps\n"
-                        + "•  Some mxUSDT to sell — or USDT plus a little ETH (for gas) to buy mxUSDT\n\n"
+                        + "•  Some " + ccy() + " to sell — or USDT plus a little ETH (for gas) to buy " + ccy() + "\n\n"
                         + "Your keys are derived from your Minima node seed, so it's the same wallet on any device.\n\n"
                         + "Tabs:  Swap (quick trade)  ·  Wallet (your money)  ·  Activity (your swaps)  ·  "
                         + "Market (full order book)  ·  OTC (private deals).\n\n"
@@ -2587,7 +2628,7 @@ public class MainActivity extends AppCompatActivity {
 
         TextView stats = new TextView(this);
         String last = chartData.isEmpty() ? "—" : fmtPrice(chartData.get(chartData.size() - 1).price);
-        stats.setText("last " + last + " USDT/mxUSDT  ·  " + countByStatus(recent) + "  ·  price only (buy/sell not shown)");
+        stats.setText("last " + last + " USDT/" + ccy() + "  ·  " + countByStatus(recent) + "  ·  price only (buy/sell not shown)");
         stats.setTextColor(Design.DIM2()); stats.setTextSize(11f); stats.setTypeface(Design.sans()); stats.setPadding(dp(2), dp(8), 0, dp(6));
         col.addView(stats);
 
@@ -2855,7 +2896,7 @@ public class MainActivity extends AppCompatActivity {
         double bestAsk = asksAgg.isEmpty() ? 0 : ((Order.Level) asksAgg.get(0)[1]).price;
         if (bestBid > 0 && bestAsk > 0) {
             TextView sp = new TextView(this);
-            sp.setText("spread " + fmtPrice(bestAsk - bestBid) + " " + sym + "  ·  " + sym + " per mxUSDT, size in mxUSDT");
+            sp.setText("spread " + fmtPrice(bestAsk - bestBid) + " " + sym + "  ·  " + sym + " per " + ccy() + ", size in " + ccy());
             sp.setTextColor(Design.DIM2()); sp.setTextSize(11f); sp.setTypeface(Design.sans()); sp.setPadding(dp(2), dp(4), 0, dp(4));
             col.addView(sp);
         }
@@ -2863,8 +2904,8 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout legend = new LinearLayout(this);
         legend.setOrientation(LinearLayout.HORIZONTAL);
         legend.setPadding(dp(6), dp(4), dp(6), dp(2));
-        TextView lL = new TextView(this); lL.setText("SELL mxUSDT (bid)"); lL.setTextColor(Design.IN()); lL.setTextSize(11f); lL.setTypeface(Design.sansBold()); lL.setLetterSpacing(0.04f);
-        TextView lR = new TextView(this); lR.setText("BUY mxUSDT (ask)"); lR.setTextColor(Design.RED()); lR.setTextSize(11f); lR.setTypeface(Design.sansBold()); lR.setLetterSpacing(0.04f); lR.setGravity(Gravity.END);
+        TextView lL = new TextView(this); lL.setText("SELL " + ccy() + " (bid)"); lL.setTextColor(Design.IN()); lL.setTextSize(11f); lL.setTypeface(Design.sansBold()); lL.setLetterSpacing(0.04f);
+        TextView lR = new TextView(this); lR.setText("BUY " + ccy() + " (ask)"); lR.setTextColor(Design.RED()); lR.setTextSize(11f); lR.setTypeface(Design.sansBold()); lR.setLetterSpacing(0.04f); lR.setGravity(Gravity.END);
         legend.addView(lL, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         legend.addView(lR, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         col.addView(legend);
@@ -3165,15 +3206,15 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout box = otcCardBox(col);
         final boolean enabled = prefs.getBoolean("otc_enable", false);
 
-        box.addView(fieldLabel("I SELL mxUSDT up to"));
+        box.addView(fieldLabel("I SELL " + ccy() + " up to"));
         final EditText sellE = new EditText(this); decimalInput(sellE);
-        sellE.setHint("max mxUSDT (blank = off)"); sellE.setHintTextColor(Design.DIM2());
+        sellE.setHint("max " + ccy() + " (blank = off)"); sellE.setHintTextColor(Design.DIM2());
         sellE.setText(prefs.getString("otc_sell_size", "")); sellE.setTextColor(Design.TEXT()); sellE.setTextSize(15f); sellE.setTypeface(Design.mono());
         box.addView(sellE);
 
-        box.addView(fieldLabel("I BUY mxUSDT up to"));
+        box.addView(fieldLabel("I BUY " + ccy() + " up to"));
         final EditText buyE = new EditText(this); decimalInput(buyE);
-        buyE.setHint("max mxUSDT (blank = off)"); buyE.setHintTextColor(Design.DIM2());
+        buyE.setHint("max " + ccy() + " (blank = off)"); buyE.setHintTextColor(Design.DIM2());
         buyE.setText(prefs.getString("otc_buy_size", "")); buyE.setTextColor(Design.TEXT()); buyE.setTextSize(15f); buyE.setTypeface(Design.mono());
         box.addView(buyE);
 
@@ -3208,21 +3249,21 @@ public class MainActivity extends AppCompatActivity {
             any = true;
             LinearLayout box = otcCardBox(col);
             StringBuilder sides = new StringBuilder();
-            if (o.sells()) sides.append("sells up to ").append(trimSig(o.sellSize)).append(" mxUSDT");
-            if (o.buys()) { if (sides.length() > 0) sides.append("   ·   "); sides.append("buys up to ").append(trimSig(o.buySize)).append(" mxUSDT"); }
+            if (o.sells()) sides.append("sells up to ").append(trimSig(o.sellSize)).append(" " + ccy());
+            if (o.buys()) { if (sides.length() > 0) sides.append("   ·   "); sides.append("buys up to ").append(trimSig(o.buySize)).append(" " + ccy()); }
             TextView t = new TextView(this);
             t.setText(sides.toString()); t.setTextColor(Design.TEXT()); t.setTextSize(14.5f); t.setTypeface(Design.sansBold()); box.addView(t);
             TextView who = new TextView(this); who.setText("LP " + shortAddr(o.signerPk));
             who.setTextColor(Design.DIM()); who.setTextSize(12f); who.setTypeface(Design.sans()); who.setPadding(0, dp(4), 0, dp(8)); box.addView(who);
             LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
             if (o.sells()) {   // LP sells → I can BUY mxUSDT from them
-                TextView b = Design.pill(this, "Buy mxUSDT", Design.ACCENT(), Design.ON_ACCENT());
+                TextView b = Design.pill(this, "Buy " + ccy(), Design.ACCENT(), Design.ON_ACCENT());
                 b.setOnClickListener(v -> otcProposeDialog(o, OtcOffer.LP_SELLS_MINIMA)); Design.pressable(b);
                 LinearLayout.LayoutParams m = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT); m.rightMargin = dp(8);
                 row.addView(b, m);
             }
             if (o.buys()) {    // LP buys → I can SELL mxUSDT to them
-                TextView s = Design.pill(this, "Sell mxUSDT", Design.SURFACE2(), Design.TEXT());
+                TextView s = Design.pill(this, "Sell " + ccy(), Design.SURFACE2(), Design.TEXT());
                 s.setOnClickListener(v -> otcProposeDialog(o, OtcOffer.LP_BUYS_MINIMA)); Design.pressable(s);
                 row.addView(s);
             }
@@ -3242,7 +3283,7 @@ public class MainActivity extends AppCompatActivity {
                     ? (OtcDb.ROLE_INSTIGATOR.equals(d.role) ? "BUY " : "SELL ")
                     : (OtcDb.ROLE_INSTIGATOR.equals(d.role) ? "SELL " : "BUY ");
             TextView t = new TextView(this);
-            t.setText(dir + d.amount + " mxUSDT @ " + d.price + " USDT");
+            t.setText(dir + d.amount + " " + ccy() + " @ " + d.price + " USDT");
             t.setTextColor(Design.TEXT()); t.setTextSize(15f); t.setTypeface(Design.sansBold()); box.addView(t);
             TextView st = new TextView(this);
             st.setText(otcStatusText(d)); st.setTextColor(otcStatusColor(d)); st.setTextSize(12.5f); st.setTypeface(Design.sans()); st.setPadding(0, dp(4), 0, dp(2)); box.addView(st);
@@ -3299,7 +3340,7 @@ public class MainActivity extends AppCompatActivity {
         if (iLockMinima) {                                               // I'd lock mxUSDT = amount
             double have = parseD(minimaBal, -1);                         // "sendable" (tradeable) mxUSDT
             if (have < 0) return null;                                   // unknown → don't block; execute is the gate
-            if (amt > have + 1e-9) return "Not enough mxUSDT — need " + trim(amt) + ", have " + trim(have);
+            if (amt > have + 1e-9) return "Not enough " + ccy() + " — need " + trim(amt) + ", have " + trim(have);
         } else {                                                        // I'd lock USDT = amount × price
             String u = tokenBals.get("USDT");
             if (u == null) return null;                                 // not loaded → don't block
@@ -3314,12 +3355,12 @@ public class MainActivity extends AppCompatActivity {
         final boolean iBuy = OtcOffer.LP_SELLS_MINIMA.equals(dealSide);
         final double cap = lp.capFor(dealSide);
         LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(4), dp(4), dp(4), dp(4));
-        box.addView(fieldLabel("mxUSDT amount (≤ " + trimSig(cap) + ")"));
+        box.addView(fieldLabel(ccy() + " amount (≤ " + trimSig(cap) + ")"));
         final EditText amtE = new EditText(this); decimalInput(amtE); amtE.setTextColor(Design.TEXT()); amtE.setTextSize(16f); amtE.setTypeface(Design.mono()); box.addView(amtE);
-        box.addView(fieldLabel("Price (USDT per mxUSDT)"));
+        box.addView(fieldLabel("Price (USDT per " + ccy() + ")"));
         final EditText prE = new EditText(this); decimalInput(prE); prE.setTextColor(Design.TEXT()); prE.setTextSize(16f); prE.setTypeface(Design.mono()); box.addView(prE);
         modalOpen = true;
-        dialog().setTitle(iBuy ? "Buy mxUSDT" : "Sell mxUSDT")
+        dialog().setTitle(iBuy ? "Buy " + ccy() : "Sell " + ccy())
                 .setView(wrapScroll(box))
                 .setPositiveButton("Send offer", (dg, w) -> {
                     double a = parseD(amtE.getText().toString(), 0), p = parseD(prE.getText().toString(), 0);
@@ -3336,9 +3377,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void otcCounterDialog(final OtcDb.Deal d) {
         LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(4), dp(4), dp(4), dp(4));
-        box.addView(fieldLabel("mxUSDT amount"));
+        box.addView(fieldLabel(ccy() + " amount"));
         final EditText amtE = new EditText(this); decimalInput(amtE); amtE.setText(d.amount); amtE.setTextColor(Design.TEXT()); amtE.setTextSize(16f); amtE.setTypeface(Design.mono()); box.addView(amtE);
-        box.addView(fieldLabel("Price (USDT per mxUSDT)"));
+        box.addView(fieldLabel("Price (USDT per " + ccy() + ")"));
         final EditText prE = new EditText(this); decimalInput(prE); prE.setText(d.price); prE.setTextColor(Design.TEXT()); prE.setTextSize(16f); prE.setTypeface(Design.mono()); box.addView(prE);
         modalOpen = true;
         dialog().setTitle("Counter-offer").setView(wrapScroll(box))

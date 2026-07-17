@@ -154,7 +154,7 @@ public final class SwapEngine {
      *  old silent return so an unfillable deal is visible to the LP instead of a mystery hang. */
     private void declineCpNote(String hash, String reason) {
         if (!cpNoted.add(hash)) return;
-        ui.post(() -> notifier.notify("Can't lock your mxUSDT", reason));
+        ui.post(() -> notifier.notify("Can't lock your " + com.eurobuddha.atomix.TradingContext.active().coinLabel, reason));
     }
 
     private void releaseCpLeg(String hash) {
@@ -591,7 +591,7 @@ public final class SwapEngine {
                 @Override public void ok(String txpowid) {
                     db.logEvent(hash, SwapDb.EV_COLLECT, "minima", MinimaHtlc.coinAmount(coin), txpowid);
                     db.setSwapStatus(hash, SwapDb.ST_COMPLETE);
-                    notifier.notify("Swap complete", "Claimed " + MinimaHtlc.coinAmount(coin) + " mxUSDT");
+                    notifier.notify("Swap complete", "Claimed " + MinimaHtlc.coinAmount(coin) + " " + com.eurobuddha.atomix.TradingContext.labelFor(coin.optString("tokenid", "0x00")));
                     notifier.onSwapsChanged();
                     ethAttempt.remove("claimM:" + hash);
                     SwapLog.d("claim OK " + hash + " tx=" + txpowid);
@@ -626,7 +626,7 @@ public final class SwapEngine {
             @Override public void ok(String txpowid) {
                 db.logEvent(hash, SwapDb.EV_EXPIRED, "minima", MinimaHtlc.coinAmount(coin), txpowid);
                 db.setSwapStatus(hash, SwapDb.ST_REFUNDED);
-                notifier.notify("Swap refunded", "Timelock passed — reclaimed your mxUSDT");
+                notifier.notify("Swap refunded", "Timelock passed — reclaimed your " + com.eurobuddha.atomix.TradingContext.labelFor(coin.optString("tokenid", "0x00")));
                 notifier.onSwapsChanged();
                 inflight.remove("refundM:" + hash);
             }
@@ -1022,7 +1022,7 @@ public final class SwapEngine {
                     myEth(), hash, timelock, "FALSE", new MinimaHtlc.PostCb() {
                 @Override public void ok(String txpowid) {
                     db.logEvent(hash, SwapDb.EV_CPSENT, "minima", reqMinimaHuman, txpowid);
-                    notifier.notify("Locked your mxUSDT", "Waiting for the counterparty to reveal the secret");
+                    notifier.notify("Locked your " + com.eurobuddha.atomix.TradingContext.active().coinLabel, "Waiting for the counterparty to reveal the secret");
                     notifier.onSwapsChanged();
                     inflight.remove("cpMin:" + hash);
                     // keep cpInFlight[hash] reserved until the lock CONFIRMS (freed in runEthChecks) — holds the coin
@@ -1140,7 +1140,7 @@ public final class SwapEngine {
     /* package-private (not private) so unit tests can drive this OTC fund-safety boundary directly. */
     boolean otcVerifySell(JSONObject coin, OtcDb.Deal d, String reqTokenAddr) {
         if (!OtcOffer.LP_BUYS_MINIMA.equals(d.side)) return false;
-        if (!MinimaHtlc.USDT_TOKENID.equalsIgnoreCase(coin.optString("tokenid", "0x00"))) return false;  // mxUSDT only
+        if (!minima.activeToken().equalsIgnoreCase(coin.optString("tokenid", "0x00"))) return false;  // active-currency token only (OTC negotiated live in the active market)
         if (!keyEq(MinimaHtlc.stateAt(coin, 4), myMinimaPk)) return false;                            // mxUSDT to me
         String payEth = MinimaHtlc.stateAt(coin, 6);
         if (payEth == null || !payEth.equalsIgnoreCase(d.peerEthAddr)) return false;                  // I'll pay USDT to the agreed eth

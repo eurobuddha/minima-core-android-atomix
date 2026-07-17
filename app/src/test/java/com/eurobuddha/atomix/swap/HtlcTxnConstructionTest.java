@@ -1,4 +1,4 @@
-package com.eurobuddha.usdtswap.swap;
+package com.eurobuddha.atomix.swap;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;

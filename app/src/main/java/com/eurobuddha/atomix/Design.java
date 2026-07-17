@@ -73,10 +73,13 @@ public final class Design {
     public static int TEXT()        { return pick(0xFFEEF0F4, 0xFF181B22); }   // primary ink
     public static int DIM()         { return pick(0xFF8B909C, 0xFF8B909C); }   // secondary
     public static int DIM2()        { return pick(0xFF6F7583, 0xFFA6ABB6); }   // tertiary / axes
-    public static int ACCENT()      { return 0xFF26A17B; }                     // Tether green (both modes)
-    public static int ACCENT_SOFT() { return pick(0x3326A17B, 0x1F26A17B); }   // active-nav pill tint
-    public static int GRAD_START()  { return 0xFF3DBF93; }                     // CTA gradient top (lighter green)
-    public static int ON_ACCENT()   { return 0xFFFFFFFF; }                     // white ink on green (both)
+    // Accent = the ACTIVE CURRENCY's identity, so toggling MINIMA ↔ mxUSDT restyles the whole app (orange ↔
+    // Tether-green): accent, active-nav pill tint, CTA gradient and on-accent ink all follow the currency,
+    // each still keyed on dark/light where the currency defines two inks.
+    public static int ACCENT()      { return TradingContext.active().accent; }
+    public static int ACCENT_SOFT() { return pick(TradingContext.active().accentSoftDark, TradingContext.active().accentSoftLight); }
+    public static int GRAD_START()  { return TradingContext.active().gradStart; }
+    public static int ON_ACCENT()   { return pick(TradingContext.active().onAccentDark, TradingContext.active().onAccentLight); }
     public static int IN()          { return pick(0xFF3FD0A2, 0xFF12A97E); }   // received / bid / positive
     public static int POSITIVE()    { return IN(); }
     public static int OUT()         { return ACCENT(); }                       // sent

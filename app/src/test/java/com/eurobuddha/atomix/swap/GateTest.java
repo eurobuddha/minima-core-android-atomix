@@ -1,4 +1,4 @@
-package com.eurobuddha.usdtswap.swap;
+package com.eurobuddha.atomix.swap;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -8,10 +8,10 @@ import static org.mockito.Mockito.when;
 import android.os.Handler;
 
 import com.eurobuddha.comms.NodeApi;
-import com.eurobuddha.usdtswap.eth.EthHtlc;
-import com.eurobuddha.usdtswap.eth.EthNet;
-import com.eurobuddha.usdtswap.eth.EthRpc;
-import com.eurobuddha.usdtswap.eth.EthWallet;
+import com.eurobuddha.atomix.eth.EthHtlc;
+import com.eurobuddha.atomix.eth.EthNet;
+import com.eurobuddha.atomix.eth.EthRpc;
+import com.eurobuddha.atomix.eth.EthWallet;
 
 import org.json.JSONObject;
 import org.junit.Before;
@@ -43,7 +43,9 @@ public class GateTest {
     @Before public void setUp() {
         EthWallet wallet = mock(EthWallet.class);
         when(wallet.address()).thenReturn(MY_ETH);
-        engine = new SwapEngine(mock(NodeApi.class), mock(MinimaHtlc.class), mock(SwapDb.class),
+        MinimaHtlc minima = mock(MinimaHtlc.class);
+        when(minima.activeToken()).thenReturn(MinimaHtlc.USDT_TOKENID);   // LP trades mxUSDT in these gate tests
+        engine = new SwapEngine(mock(NodeApi.class), minima, mock(SwapDb.class),
                 wallet, mock(Handler.class), mock(SwapEngine.Notifier.class));
         engine.setNetwork(new EthRpc(EthNet.MAINNET.defaultRpc), EthNet.MAINNET);
         engine.setMyMinimaPk(MY_MPK);

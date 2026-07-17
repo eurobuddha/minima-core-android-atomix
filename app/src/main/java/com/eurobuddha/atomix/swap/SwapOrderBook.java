@@ -9,6 +9,7 @@ import com.eurobuddha.comms.CommsIdentity;
 import com.eurobuddha.comms.CommsTransport;
 import com.eurobuddha.comms.Hex;
 import com.eurobuddha.comms.NodeApi;
+import com.eurobuddha.atomix.TradingContext;
 
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
@@ -17,15 +18,16 @@ import java.util.function.Consumer;
 
 /**
  * The native order book — the Maxima-free replacement for the bridge's maxsign coin-state book.
- * Orders are broadcast as coin-state at the shared {@link #ADDRESS} sentinel: the order JSON in
+ * Orders are broadcast as coin-state at the shared {@link #address()} sentinel: the order JSON in
  * state[99], the maker's Ed25519 public key in state[1], and an Ed25519 signature over the JSON in
  * state[2]. Any peer scans the address, verifies the signature with libsodium (not Maxima maxverify),
  * and builds a local book — freshest order per signer wins.
  */
 public final class SwapOrderBook {
 
-    /** "USDTSWAP" in hex — the usdtSwap order-book address (distinct from minimaSwap's book). */
-    public static final String ADDRESS = "0x5553445453574150";
+    /** The active currency's order-book sentinel (per-currency hex board — MINIMASWAP / USDTSWAP), so AtomiX's
+     *  orders land on the SAME shared book the corresponding legacy app used. */
+    public static String address() { return TradingContext.active().orderBookAddr; }
 
     /** ~1 hour of Minima blocks — orders older than this are treated as stale. */
     public static final int SCAN_DEPTH = (60 * 60) / MinimaHtlc.MINIMA_BLOCK_TIME;
@@ -35,7 +37,7 @@ public final class SwapOrderBook {
     /** Re-read the live SENDABLE Minima balance, stamp it onto {@code base}, then publish — so the advertised
      *  liquidity is never stale (contract-locked coins, e.g. casino, are excluded by the node's `sendable`). */
     public static void publishFresh(NodeApi node, LazySodium ls, CommsIdentity id, Order base, CommsTransport.SendCb cb) {
-        node.cmd("balance tokenid:" + MinimaHtlc.USDT_TOKENID, new NodeApi.Cb() {
+        node.cmd("balance tokenid:" + TradingContext.active().tokenId, new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
                 Object resp = j.opt("response");
                 JSONObject t = null;
@@ -61,7 +63,7 @@ public final class SwapOrderBook {
             JSONObject extra = new JSONObject();
             extra.put("1", "0x" + Hex.to(id.signPk));
             extra.put("2", "0x" + Hex.to(sig));
-            CommsTransport.postBlob(node, ADDRESS, CommsTransport.MESSAGE_AMOUNT, CommsTransport.NATIVE,
+            CommsTransport.postBlob(node, address(), CommsTransport.MESSAGE_AMOUNT, CommsTransport.NATIVE,
                     Hex.to(msg), extra, cb);
         } catch (Exception e) {
             cb.onFailed("publish: " + e.getMessage());
@@ -78,14 +80,14 @@ public final class SwapOrderBook {
      * the node).
      */
     public static void scan(NodeApi node, LazySodium ls, Consumer<Map<String, Order>> ok, Consumer<String> err) {
-        node.cmd("coinnotify action:add address:" + ADDRESS, new NodeApi.Cb() {
+        node.cmd("coinnotify action:add address:" + address(), new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) { doScan(node, ls, ok, err); }
             @Override public void onError(String m) { doScan(node, ls, ok, err); }   // proceed regardless
         });
     }
 
     private static void doScan(NodeApi node, LazySodium ls, Consumer<Map<String, Order>> ok, Consumer<String> err) {
-        node.cmd("coins simplestate:true order:desc depth:" + SCAN_DEPTH + " address:" + ADDRESS, new NodeApi.Cb() {
+        node.cmd("coins simplestate:true order:desc depth:" + SCAN_DEPTH + " address:" + address(), new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
                 Object resp = j.opt("response");
                 JSONArray coins = resp instanceof JSONArray ? (JSONArray) resp : new JSONArray();

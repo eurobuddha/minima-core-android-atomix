@@ -7,6 +7,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import com.eurobuddha.comms.CommsIdentity;
 import com.eurobuddha.comms.CommsTransport;
+import com.eurobuddha.atomix.TradingContext;
 import com.eurobuddha.comms.Hex;
 import com.eurobuddha.comms.NodeApi;
 
@@ -17,7 +18,7 @@ import java.util.function.Consumer;
 
 /**
  * The OTC availability board — the {@link SwapOrderBook} pattern applied to OTC LP offers. Each LP
- * broadcasts availability (side + size + enable) as signed coin-state at the shared {@link #ADDRESS}: the
+ * broadcasts availability (side + size + enable) as signed coin-state at the shared {@link #address()}: the
  * offer JSON in state[99], the LP's Ed25519 public key in state[1], a signature over the JSON in state[2].
  * Peers scan, verify the signature with libsodium, and keep the freshest offer per signer. A disabled
  * (empty) offer is a tombstone that withdraws the LP from the board.
@@ -25,7 +26,7 @@ import java.util.function.Consumer;
 public final class OtcBook {
 
     /** "USDTSWAPOTCB" in hex — the OTC availability board (distinct from order book / take / OTC chat). */
-    public static final String ADDRESS = "0x55534454535741504F544342";
+    public static String address() { return TradingContext.active().otcBoardAddr; }
 
     /** ~1 hour of Minima blocks — offers older than this are treated as stale. */
     public static final int SCAN_DEPTH = (60 * 60) / MinimaHtlc.MINIMA_BLOCK_TIME;
@@ -43,7 +44,7 @@ public final class OtcBook {
             JSONObject extra = new JSONObject();
             extra.put("1", "0x" + Hex.to(id.signPk));
             extra.put("2", "0x" + Hex.to(sig));
-            CommsTransport.postBlob(node, ADDRESS, CommsTransport.MESSAGE_AMOUNT, CommsTransport.NATIVE,
+            CommsTransport.postBlob(node, address(), CommsTransport.MESSAGE_AMOUNT, CommsTransport.NATIVE,
                     Hex.to(msg), extra, cb);
         } catch (Exception e) {
             cb.onFailed("otc publish: " + e.getMessage());
@@ -52,14 +53,14 @@ public final class OtcBook {
 
     /** Bounded one-shot scan of the board; verifies signatures and returns freshest-per-signer. */
     public static void scan(NodeApi node, LazySodium ls, Consumer<Map<String, OtcOffer>> ok, Consumer<String> err) {
-        node.cmd("coinnotify action:add address:" + ADDRESS, new NodeApi.Cb() {
+        node.cmd("coinnotify action:add address:" + address(), new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) { doScan(node, ls, ok, err); }
             @Override public void onError(String m) { doScan(node, ls, ok, err); }   // proceed regardless
         });
     }
 
     private static void doScan(NodeApi node, LazySodium ls, Consumer<Map<String, OtcOffer>> ok, Consumer<String> err) {
-        node.cmd("coins simplestate:true order:desc depth:" + SCAN_DEPTH + " address:" + ADDRESS, new NodeApi.Cb() {
+        node.cmd("coins simplestate:true order:desc depth:" + SCAN_DEPTH + " address:" + address(), new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
                 Object resp = j.opt("response");
                 JSONArray coins = resp instanceof JSONArray ? (JSONArray) resp : new JSONArray();

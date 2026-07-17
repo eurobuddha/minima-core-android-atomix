@@ -116,7 +116,7 @@ public final class OtcController {
         d.side = m.side; d.amount = m.amount; d.price = m.price;
         d.status = OtcDb.ST_PROPOSED; d.whoseTurn = OtcDb.TURN_ME;
         otcDb.upsertDeal(d);
-        noteProposeRateLimited(m.amount + " mxUSDT @ " + m.price + " — your call");
+        noteProposeRateLimited(m.amount + " " + com.eurobuddha.atomix.TradingContext.active().coinLabel + " @ " + m.price + " — your call");
         ui.onDealsChanged();
         return true;
     }
@@ -151,13 +151,13 @@ public final class OtcController {
             if (isTerminal(d.status) || parseD(m.amount) <= 0 || parseD(m.price) <= 0) return;
             d.amount = m.amount; d.price = m.price; d.status = OtcDb.ST_COUNTERED; d.whoseTurn = OtcDb.TURN_ME;
             otcDb.upsertDeal(d);
-            ui.note("OTC counter", m.amount + " mxUSDT @ " + m.price + " — your call");
+            ui.note("OTC counter", m.amount + " " + com.eurobuddha.atomix.TradingContext.active().coinLabel + " @ " + m.price + " — your call");
         } else if (OtcMessage.ACCEPT.equals(m.type)) {
             if (isTerminal(d.status) || OtcDb.ST_AGREED.equals(d.status) || OtcDb.ST_EXECUTING.equals(d.status)) return;
             d.status = OtcDb.ST_AGREED;
             d.whoseTurn = OtcDb.ROLE_INSTIGATOR.equals(d.role) ? OtcDb.TURN_ME : OtcDb.TURN_PEER;
             otcDb.upsertDeal(d);
-            ui.note("OTC agreed", d.amount + " mxUSDT @ " + d.price);
+            ui.note("OTC agreed", d.amount + " " + com.eurobuddha.atomix.TradingContext.active().coinLabel + " @ " + d.price);
             if (OtcDb.ROLE_INSTIGATOR.equals(d.role)) executeDeal(d);   // I opened it → I lock leg 1
         }
         ui.onDealsChanged();

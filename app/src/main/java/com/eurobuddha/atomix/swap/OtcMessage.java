@@ -2,6 +2,7 @@ package com.eurobuddha.atomix.swap;
 
 import org.json.JSONObject;
 import com.eurobuddha.comms.CommsTransport;
+import com.eurobuddha.atomix.TradingContext;
 import com.eurobuddha.comms.CryptoProvider;
 import com.eurobuddha.comms.NodeApi;
 
@@ -9,7 +10,7 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * A single sealed OTC-negotiation message. The comms transport is stateless — each message is an
- * independent 1-nano coin at {@link #ADDRESS} — so a "conversation" is a set of these correlated by
+ * independent 1-nano coin at {@link #address()} — so a "conversation" is a set of these correlated by
  * {@code ref} (the deal thread id), deduped by {@code randomid}, and ordered by {@code date}. The
  * receiver drives the deal state machine (OtcDb) from the typed messages.
  *
@@ -20,7 +21,7 @@ import java.nio.charset.StandardCharsets;
 public final class OtcMessage {
 
     /** "USDTSWAPOTCC" in hex — the OTC negotiation channel (distinct from the order book / take / OtcBook). */
-    public static final String ADDRESS = "0x55534454535741504F544343";
+    public static String address() { return TradingContext.active().otcChatAddr; }
 
     // message types — the offer/counter/accept vocabulary
     public static final String PROPOSE = "PROPOSE";   // instigator → LP: open a deal with initial terms
@@ -75,11 +76,11 @@ public final class OtcMessage {
         } catch (Exception e) { return null; }
     }
 
-    /** Seal this message to {@code to} and post it to the OTC channel (one 1-nano coin at {@link #ADDRESS}). */
+    /** Seal this message to {@code to} and post it to the OTC channel (one 1-nano coin at {@link #address()}). */
     public void send(NodeApi node, CryptoProvider crypto, CommsTransport.SendCb cb) {
         try {
             String blob = crypto.seal(to, toWire());
-            CommsTransport.postBlob(node, ADDRESS, CommsTransport.MESSAGE_AMOUNT, CommsTransport.NATIVE, blob, null, cb);
+            CommsTransport.postBlob(node, address(), CommsTransport.MESSAGE_AMOUNT, CommsTransport.NATIVE, blob, null, cb);
         } catch (Exception e) { cb.onFailed("otc send: " + e.getMessage()); }
     }
 }

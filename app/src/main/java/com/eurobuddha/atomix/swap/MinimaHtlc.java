@@ -33,10 +33,22 @@ public final class MinimaHtlc {
 
     public static final String HTLC_ADDRESS = "MxG080CRJB1D4NHGRYGNF7Q52FK7023UM3FUUPVD1W1WCQZSA8MDQ25982N842G";
     public static final String NOTIFY = "0xFFEEDD9999";
-    /** The Minima-side traded asset: mxUSDT (bridged native-USDT), the token PandaPools uses. The vault script +
-     *  address are token-independent (unchanged), so every scan filters on this id to isolate usdtSwap's coins
-     *  from the native-MINIMA coins minimaSwap locks at the SAME shared HTLC_ADDRESS. */
-    public static final String USDT_TOKENID = "0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90";
+    /** The two Minima-side traded assets AtomiX supports. The vault script + address are token-independent
+     *  (unchanged), so PUBLISHING/liquidity/market-feed scans filter on {@link #activeToken} to isolate the
+     *  ACTIVE currency's coins at the SAME shared HTLC_ADDRESS. SETTLEMENT scans (by unique hashlock / my key)
+     *  deliberately DROP the token filter so an in-flight swap in the OTHER currency is never stranded when the
+     *  user switches the active currency — claim()/refund() read each coin's own tokenid, so both settle. */
+    public static final String USDT_TOKENID   = "0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90"; // mxUSDT (8dp, coloured)
+    public static final String MINIMA_TOKENID = "0x00";                                                                 // native MINIMA (44dp)
+
+    /** The token AtomiX is currently PUBLISHING/market-making in (the selected currency). Governs new locks,
+     *  the ask-ladder liquidity, the market feed and balance display — NOT settlement (see class notes). */
+    private volatile String activeToken = USDT_TOKENID;
+    public void setActiveToken(String tokenid) { if (tokenid != null && !tokenid.isEmpty()) this.activeToken = tokenid; }
+    public String activeToken() { return activeToken; }
+    /** Grain the active-currency lock amount: mxUSDT quantizes DOWN to 6dp (the 1:1 ERC20-USDT grain); native
+     *  MINIMA has no counter-leg grain so it passes through untouched. */
+    private String maybeGrain(String amt) { return USDT_TOKENID.equals(activeToken) ? grain(amt) : amt; }
     public static final int MINIMA_BLOCK_TIME = 50;                 // seconds/block (upstream htlcvars.js)
     public static final int TIMELOCK_BLOCKS = (60 * 60 * 2) / MINIMA_BLOCK_TIME;   // 2h ≈ 144 blocks
 
@@ -158,8 +170,8 @@ public final class MinimaHtlc {
         // Fund from ANY of my 64 default addresses (no fromaddress/signkey constraint) — the node has no
         // dedicated "bridge wallet" here, so pinning to one address would fail when funds sit elsewhere.
         // The refund owner is set explicitly via state[0]=myPubkey, so the coin stays mine to reclaim.
-        String send = "send amount:" + grain(amount) + " mine:true address:" + HTLC_ADDRESS
-                + " state:" + state.toString() + " tokenid:" + USDT_TOKENID;
+        String send = "send amount:" + maybeGrain(amount) + " mine:true address:" + HTLC_ADDRESS
+                + " state:" + state.toString() + " tokenid:" + activeToken;
         cmd(send, r -> {
             JSONObject resp = r.optJSONObject("response");
             cb.ok(resp == null ? "" : resp.optString("txpowid", ""));
@@ -176,7 +188,7 @@ public final class MinimaHtlc {
                               int timelockBlock, String otc, PostCb cb) {
         if (!ready()) { cb.err("Minima wallet not ready"); return; }
         if (coinids == null || coinids.isEmpty()) { cb.err("no coins to lock"); return; }
-        amount = grain(amount);                          // 6dp trade grain — the change output below follows from it
+        amount = maybeGrain(amount);                     // active-currency trade grain — the change output below follows from it
         String change = subtract(totalSelected, amount);
         String id = txnId();
         List<String> seq = new ArrayList<>();
@@ -190,8 +202,8 @@ public final class MinimaHtlc {
         seq.add("txnstate id:" + id + " port:5 value:" + hashlock);
         seq.add("txnstate id:" + id + " port:6 value:" + ownerEthKey);
         seq.add("txnstate id:" + id + " port:7 value:" + otc);
-        seq.add("txnoutput id:" + id + " amount:" + amount + " address:" + HTLC_ADDRESS + " tokenid:" + USDT_TOKENID + " storestate:true");
-        if (positive(change)) seq.add("txnoutput id:" + id + " amount:" + change + " address:" + myAddress + " tokenid:" + USDT_TOKENID + " storestate:false");
+        seq.add("txnoutput id:" + id + " amount:" + amount + " address:" + HTLC_ADDRESS + " tokenid:" + activeToken + " storestate:true");
+        if (positive(change)) seq.add("txnoutput id:" + id + " amount:" + change + " address:" + myAddress + " tokenid:" + activeToken + " storestate:false");
         seq.add("txnsign id:" + id + " publickey:auto");
         // Split the broadcast (txnpost) from the build: a build failure PROVABLY didn't broadcast (caller may
         // retry); a txnpost failure MAY have broadcast with a lost response, so it's tagged "POSTED:" and the
@@ -207,7 +219,7 @@ public final class MinimaHtlc {
     public void myFreeCoins(Consumer<org.json.JSONArray> ok, Consumer<String> err) {
         // coinage:1 → confirmed coins only, matching splitCoins' coinage:1 inputs: the target we compute here is
         // always fundable by the split, so it never fails insufficient-funds on freshly-received (coinage:0) coins.
-        cmd("coins relevant:true sendable:true tokenid:" + USDT_TOKENID + " coinage:1", r -> {
+        cmd("coins relevant:true sendable:true tokenid:" + activeToken + " coinage:1", r -> {
             Object resp = r.opt("response");
             ok.accept(resp instanceof org.json.JSONArray ? (org.json.JSONArray) resp : new org.json.JSONArray());
         }, err);
@@ -217,7 +229,7 @@ public final class MinimaHtlc {
      *  unconfirmed pool is global, so this is a cross-process check — it stops a second engine (after a
      *  foreground↔background handoff) from re-issuing a split whose coins from the first engine haven't landed yet. */
     public void hasPendingMinima(Consumer<Boolean> ok, Consumer<String> err) {
-        cmd("balance tokenid:" + USDT_TOKENID, r -> {
+        cmd("balance tokenid:" + activeToken, r -> {
             Object resp = r.opt("response");
             org.json.JSONObject t = null;
             if (resp instanceof org.json.JSONArray && ((org.json.JSONArray) resp).length() > 0) t = ((org.json.JSONArray) resp).optJSONObject(0);
@@ -233,7 +245,7 @@ public final class MinimaHtlc {
      *  lock every leg of a sweep concurrently (native {@code send split:} sends to my own address). */
     public void splitCoins(int count, String totalAmount, PostCb cb) {
         String send = "send amount:" + totalAmount + " address:" + myAddress
-                + " tokenid:" + USDT_TOKENID + " split:" + count + " coinage:1 mine:true";
+                + " tokenid:" + activeToken + " split:" + count + " coinage:1 mine:true";
         cmd(send, r -> {
             JSONObject resp = r.optJSONObject("response");
             cb.ok(resp == null ? "" : resp.optString("txpowid", ""));
@@ -294,7 +306,7 @@ public final class MinimaHtlc {
 
     /** Scan the shared HTLC address for coins (claimable orders / my locked coins). */
     public void scanHtlcCoins(int depth, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
-        cmd("coins depth:" + depth + " relevant:false tokenid:" + USDT_TOKENID + " address:" + HTLC_ADDRESS, r -> {
+        cmd("coins depth:" + depth + " relevant:false tokenid:" + activeToken + " address:" + HTLC_ADDRESS, r -> {
             Object resp = r.opt("response");
             ok.accept(resp instanceof org.json.JSONArray ? (org.json.JSONArray) resp : new org.json.JSONArray());
         }, err);
@@ -311,7 +323,7 @@ public final class MinimaHtlc {
     }
 
     private void doScanAllHtlc(int coinageMin, int depth, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
-        cmd("coins coinage:" + coinageMin + " tokenid:" + USDT_TOKENID + " simplestate:true depth:" + depth + " address:" + HTLC_ADDRESS, r -> {
+        cmd("coins coinage:" + coinageMin + " tokenid:" + activeToken + " simplestate:true depth:" + depth + " address:" + HTLC_ADDRESS, r -> {
             Object resp = r.opt("response");
             ok.accept(resp instanceof org.json.JSONArray ? (org.json.JSONArray) resp : new org.json.JSONArray());
         }, err);
@@ -339,7 +351,11 @@ public final class MinimaHtlc {
     }
 
     private void doScanHtlcByState(String value, int coinageMin, int depth, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
-        cmd("coins coinage:" + coinageMin + " tokenid:" + USDT_TOKENID + " simplestate:true state:" + normKey(value)
+        // SETTLEMENT scan: NO tokenid filter. The state: value (a unique hashlock, or my pubkey) already scopes the
+        // reply, so this stays cheap; and dropping the token filter is what lets a claim/refund find an in-flight
+        // swap's coin in EITHER currency after the user switched the active currency. claim()/refund() read the
+        // coin's own tokenid, so both mxUSDT and native-MINIMA legs settle correctly.
+        cmd("coins coinage:" + coinageMin + " simplestate:true state:" + normKey(value)
           + " address:" + HTLC_ADDRESS + " depth:" + depth, r -> {
             Object resp = r.opt("response");
             ok.accept(resp instanceof org.json.JSONArray ? (org.json.JSONArray) resp : new org.json.JSONArray());
@@ -371,7 +387,7 @@ public final class MinimaHtlc {
         // normKey → UPPER-CASE, no 0x — a guaranteed substring of the stored value regardless of the caller's
         // case (SwapDb keys are lower-case). Passing the raw lower-case hash here would match NOTHING and
         // re-strand the maker's USDT — the exact bug coinnotify-add fixed.
-        cmd("coins simplestate:true tokenid:" + USDT_TOKENID + " depth:" + depth + " state:" + normKey(hash) + " address:" + NOTIFY, r -> {
+        cmd("coins simplestate:true depth:" + depth + " state:" + normKey(hash) + " address:" + NOTIFY, r -> {  // SETTLEMENT: no token filter (hash is unique across currencies)
             Object resp = r.opt("response");
             ok.accept(resp instanceof org.json.JSONArray ? (org.json.JSONArray) resp : new org.json.JSONArray());
         }, err);

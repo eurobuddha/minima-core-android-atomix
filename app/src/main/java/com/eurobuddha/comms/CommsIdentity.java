@@ -19,9 +19,11 @@ import java.util.Arrays;
  */
 public final class CommsIdentity {
 
-    /** HKDF domain for THIS app family. usdtSwap uses "usdtswap-*" so the same seed yields a DIFFERENT
-     *  identity than Mail ("minima-comms-*") or miniMall ("minimerch-*") — one node runs all, no key clash. */
-    private static final String APP_CONTEXT = "usdtswap";
+    /** HKDF domain for THIS app family. AtomiX uses "atomix-*" so the same seed yields a DIFFERENT identity than
+     *  Mail ("minima-comms-*") or miniMall ("minimerch-*") — one node runs all, no key clash. ONE AtomiX identity
+     *  serves BOTH trading currencies: the identity is advertised per-order, so interop with the legacy
+     *  minimaSwap/usdtSwap books is carried by the per-currency SENTINEL addresses, not by the identity. */
+    private static final String APP_CONTEXT = "atomix";
 
     public final byte[] boxPk, boxSk;     // X25519 — encryption
     public final byte[] signPk, signSk;   // Ed25519 — signing
