@@ -604,7 +604,14 @@ public final class SwapEngine {
             return;
         }
 
-        // I don't know the secret → I'm a mxUSDT→ERC20 responder; lock the ETH counter-leg.
+        // I don't know the secret → I'm a responder; lock the ETH counter-leg.
+        // FUND-SAFETY (combine): only ever respond to a NEW take in the ACTIVE currency. The Minima settlement
+        // scans are token-agnostic (so an in-flight swap in the OTHER currency is never stranded), which means a
+        // STALE take coin of the non-active currency can surface here after a currency switch — matching it
+        // against my active-currency order/price would misprice the counter-leg. Claiming a coin I'm OWED (secret
+        // known, above) and refunding my own expired coins (checkExpiredMinima) stay token-agnostic; only this
+        // new-liability path is gated.
+        if (!minima.activeToken().equalsIgnoreCase(coin.optString("tokenid", "0x00"))) return;
         if (db.haveSentCounterParty(hash)) return;
         if (timelock - block < CP_BLOCKS_CHECK) return;                    // first leg too close to expiry
         if ("TRUE".equals(MinimaHtlc.stateAt(coin, 7))) {
