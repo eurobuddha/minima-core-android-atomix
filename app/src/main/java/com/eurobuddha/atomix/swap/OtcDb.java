@@ -6,6 +6,8 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 
+import com.eurobuddha.atomix.TradingContext;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -46,6 +48,8 @@ public final class OtcDb {
         public String status;
         public String whoseTurn;         // TURN_ME / TURN_PEER
         public String hash;              // on-chain hashlock once executing (links to SwapDb)
+        public String currency;          // TradingContext.key the deal was negotiated in (fund-safety: an OTC
+                                         // response only fires while THIS currency is active — see otcLpDeal)
         public long created, updated;
     }
 
@@ -71,6 +75,10 @@ public final class OtcDb {
         v.put("peermpk", d.peerMinimaPk); v.put("peereth", d.peerEthAddr);
         v.put("side", d.side); v.put("amount", d.amount); v.put("price", d.price);
         v.put("status", d.status); v.put("whoseturn", d.whoseTurn); v.put("hash", normHash(d.hash));
+        // Stamp the negotiating currency on first write (a deal is negotiated within ONE active-currency session)
+        // so the OTC responder can refuse to act on it after the user switches currency.
+        if (d.currency == null || d.currency.isEmpty()) d.currency = TradingContext.active().key;
+        v.put("currency", d.currency);
         if (d.created == 0) d.created = System.currentTimeMillis();
         v.put("created", d.created); v.put("updated", System.currentTimeMillis());
         helper.getWritableDatabase().insertWithOnConflict("otc_deals", null, v, SQLiteDatabase.CONFLICT_REPLACE);
@@ -158,21 +166,25 @@ public final class OtcDb {
         d.status = c.getString(c.getColumnIndexOrThrow("status"));
         d.whoseTurn = c.getString(c.getColumnIndexOrThrow("whoseturn"));
         d.hash = c.getString(c.getColumnIndexOrThrow("hash"));
+        int ci = c.getColumnIndex("currency");   // tolerate a pre-v2 row with no column
+        d.currency = ci >= 0 ? c.getString(ci) : null;
         d.created = c.getLong(c.getColumnIndexOrThrow("created"));
         d.updated = c.getLong(c.getColumnIndexOrThrow("updated"));
         return d;
     }
 
     private static final class Helper extends SQLiteOpenHelper {
-        Helper(Context ctx) { super(ctx, "otc.db", null, 1); }
+        Helper(Context ctx) { super(ctx, "otc.db", null, 2); }
         @Override public void onCreate(SQLiteDatabase db) {
             db.execSQL("CREATE TABLE otc_deals (ref TEXT PRIMARY KEY, role TEXT, peercid TEXT, peermpk TEXT, "
                     + "peereth TEXT, side TEXT, amount TEXT, price TEXT, status TEXT, whoseturn TEXT, hash TEXT, "
-                    + "created INTEGER, updated INTEGER)");
+                    + "currency TEXT, created INTEGER, updated INTEGER)");
             db.execSQL("CREATE TABLE otc_msgs (randomid TEXT PRIMARY KEY, ref TEXT, type TEXT, sender TEXT, "
                     + "side TEXT, amount TEXT, price TEXT, hash TEXT, date INTEGER)");
             db.execSQL("CREATE INDEX idx_otcmsgs_ref ON otc_msgs(ref)");
         }
-        @Override public void onUpgrade(SQLiteDatabase db, int o, int n) {}
+        @Override public void onUpgrade(SQLiteDatabase db, int o, int n) {
+            if (o < 2) try { db.execSQL("ALTER TABLE otc_deals ADD COLUMN currency TEXT"); } catch (Exception ignore) {}
+        }
     }
 }

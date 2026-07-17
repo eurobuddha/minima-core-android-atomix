@@ -1106,6 +1106,13 @@ public final class SwapEngine {
         if (otcDb == null) return null;
         OtcDb.Deal d = otcDb.dealByHash(hash);
         if (d == null || !OtcDb.ROLE_LP.equals(d.role)) return null;
+        // FUND-SAFETY (combine): an AGREED/EXECUTING OTC deal persists across a currency switch. Never respond to
+        // (lock the counter-leg for) a deal negotiated in a currency that is not the ACTIVE one — its amount/price
+        // are that currency's, so locking the now-active token against them would misprice. This is the single
+        // chokepoint for BOTH otcVerifyBuy (ETH-leg-first) and otcVerifySell (Minima-leg-first). (A pre-stamp
+        // legacy row has null currency → treated as active, matching old single-currency behaviour.)
+        if (d.currency != null && !d.currency.isEmpty()
+                && !com.eurobuddha.atomix.TradingContext.active().key.equals(d.currency)) return null;
         if (!OtcDb.ST_AGREED.equals(d.status) && !OtcDb.ST_EXECUTING.equals(d.status)) return null;
         String ss = swapStatus(hash);   // never re-respond to a hash whose swap already finished
         if (SwapDb.ST_COMPLETE.equals(ss) || SwapDb.ST_REFUNDED.equals(ss) || SwapDb.ST_ERROR.equals(ss)) return null;

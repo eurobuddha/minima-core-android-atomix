@@ -111,6 +111,19 @@ public final class PriceOracle {
         }
     }
 
+    /** Currency switch: wipe the cached price + freshness AND the persisted last-good stamp/price. These statics
+     *  are process-global and survive the Activity recreate(), and the persisted P_LAST_* would otherwise be
+     *  RESTORED by init() — so without this a MINIMA peg could price off the mxUSDT parity 1.0 (or vice-versa)
+     *  until the first real fetch lands. After reset, fresh()/applyPeg see "no price" (PEG_STALE → won't publish)
+     *  until a price for the NEW currency is confirmed. Call from the currency-switch handler BEFORE recreate. */
+    public static void resetForSwitch(SharedPreferences prefs) {
+        synchronized (LOCK) {
+            price = 0; bid = 0; ask = 0; goodAtMs = 0; suspect = 0;
+            firstTryMs = 0; lastTryMs = 0; appliedMid = 0; lastError = null;
+            if (prefs != null) prefs.edit().remove(P_LAST_OK).remove(P_LAST_PRICE).apply();
+        }
+    }
+
     // ---- cached snapshot ----
 
     public static double mid() { synchronized (LOCK) { return price; } }

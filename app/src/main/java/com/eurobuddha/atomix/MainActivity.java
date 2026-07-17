@@ -360,11 +360,29 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /** Persist the new currency and restart cleanly so every scanner/engine/theme re-reads it. The background
-     *  settlement is currency-agnostic, so in-flight swaps in the other currency continue to completion. */
+     *  settlement is currency-agnostic, so in-flight swaps in the other currency continue to completion.
+     *
+     *  FUND-SAFETY: the priced market state (ladder, peg config, oracle price) is NOT per-currency, so we QUIESCE
+     *  the market before flipping — otherwise the previous currency's ladder/price would bleed into the new
+     *  currency's book and auto-fill at a ~100–200× mispriced rate (the two price scales differ). After a switch
+     *  the market is OFF: you deliberately configure + publish a fresh market in the new currency. This fails safe
+     *  (a switch can only ever leave the market off, never mispriced). Clearing these prefs also stops the
+     *  still-dying old service instance from republishing — it reads auto_publish + the order live each cycle. */
     private void doSwitchCurrency(TradingContext target) {
+        // 1) turn the market OFF and clear the priced state that isn't currency-namespaced
+        prefs.edit()
+                .remove("order_config")                        // the ladder
+                .putBoolean("auto_publish", false)             // background republisher gate (read live each cycle)
+                .putBoolean(PriceOracle.P_ENABLE, false)       // peg off
+                .putBoolean(PriceOracle.P_WITHDRAWN, true)     // any live pegged order is treated as withdrawn
+                .remove("last_publish_ok")
+                .apply();
+        PriceOracle.resetForSwitch(prefs);                     // wipe the cached/persisted price (no stale peg)
+        try { engine.setMyOrder(new com.eurobuddha.atomix.swap.Order()); } catch (Exception ignored) {}  // disarm the responder now
+        // 2) flip the active currency (drives token/sentinels/pricing/theme on the rebuild)
         TradingContext.setActive(target, prefs);
-        // Stop the foreground watcher so it re-reads the new currency (sentinels/token/pricing) on its next start;
-        // the recreate() below re-runs onCreate → startSwapService() with a fresh SwapService instance.
+        // 3) stop the foreground watcher so it re-reads the new currency on its next start; recreate() re-runs
+        //    onCreate → startSwapService() with a fresh SwapService instance in the target currency's identity.
         try { stopService(new android.content.Intent(this, SwapService.class)); } catch (Exception ignored) {}
         serviceStarted = false;
         recreate();   // rebuild the whole UI + scanners in the target currency's identity (full re-theme)
