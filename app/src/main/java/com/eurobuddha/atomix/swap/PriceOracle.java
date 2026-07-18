@@ -343,8 +343,9 @@ public final class PriceOracle {
         boolean stale = age > FRESH_MS;
         double effStep = step * wideningFactor(age);
         double quoted = m * (1 + bias / 100.0);
-        // How many tranches/side the maker wants (default MAX_LEVELS for back-compat; 1 = a single tight level).
-        int levels = (int) prefD(prefs, P_LEVELS, Order.MAX_LEVELS);
+        // How many tranches/side the maker wants. DEFAULT = 1 (a single tight level); a multi-leg ladder is opt-in
+        // up to MAX_LEVELS. (Was MAX_LEVELS — a 6-leg default made no sense, especially at parity.)
+        int levels = (int) prefD(prefs, P_LEVELS, 1);
         if (levels < 1) levels = 1; else if (levels > Order.MAX_LEVELS) levels = Order.MAX_LEVELS;
         p.bids.clear(); p.asks.clear();
         for (int i = 1; i <= levels; i++) {

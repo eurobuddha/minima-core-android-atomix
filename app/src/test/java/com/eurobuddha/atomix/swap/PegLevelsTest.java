@@ -61,7 +61,7 @@ public class PegLevelsTest {
 
     @Test public void oneLevel()    { assertEquals(1, pegLevels("1")); }
     @Test public void threeLevels() { assertEquals(3, pegLevels("3")); }
-    @Test public void defaultsToMaxWhenUnset() { assertEquals(Order.MAX_LEVELS, pegLevels(null)); }
+    @Test public void defaultsToOneWhenUnset() { assertEquals(1, pegLevels(null)); }
     @Test public void clampsAboveMax() { assertEquals(Order.MAX_LEVELS, pegLevels("99")); }
     @Test public void clampsBelowOne() { assertEquals(1, pegLevels("0")); }
 

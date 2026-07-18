@@ -1041,7 +1041,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout gen = new LinearLayout(this); gen.setOrientation(LinearLayout.HORIZONTAL); gen.setGravity(Gravity.CENTER_VERTICAL); gen.setPadding(0, dp(4), 0, dp(2));
         final EditText midE = genField("mid"), stepE = genField("step %"), sizeE = genField("size"), levelsE = genField("levels");
         levelsE.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-        levelsE.setText(prefs.getString(PriceOracle.P_LEVELS, String.valueOf(Order.MAX_LEVELS)));   // 1..6 tranches/side
+        levelsE.setText(prefs.getString(PriceOracle.P_LEVELS, "1"));   // default 1 tranche/side; up to MAX_LEVELS opt-in
         if (pegSw.isChecked()) {   // step/size double as the peg's ladder parameters — show the saved ones
             stepE.setText(prefs.getString(PriceOracle.P_STEP, ""));
             sizeE.setText(prefs.getString(PriceOracle.P_SIZE, ""));
@@ -1108,7 +1108,7 @@ public class MainActivity extends AppCompatActivity {
                 midE.setText(trimSig(quoted));
                 double step = parseD(stepE.getText().toString(), 0), size = parseD(sizeE.getText().toString(), 0);
                 if (step <= 0 || size <= 0) return;   // mid shown; rows need step + size
-                int n = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), Order.MAX_LEVELS)));
+                int n = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), 1)));
                 for (int i = 0; i < Order.MAX_LEVELS; i++) {
                     if (i < n) {
                         askRows[i][0].setText(trimSig(quoted * (1 + (i + 1) * step / 100.0))); askRows[i][1].setText(trimSig(size));
@@ -1156,7 +1156,7 @@ public class MainActivity extends AppCompatActivity {
             if (mid <= 0 || step <= 0 || size <= 0) return;
             filling[0] = true;
             try {
-                int n = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), Order.MAX_LEVELS)));
+                int n = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), 1)));
                 for (int i = 0; i < Order.MAX_LEVELS; i++) {
                     if (i < n) {
                         askRows[i][0].setText(trimSig(mid * (1 + (i + 1) * step / 100.0))); askRows[i][1].setText(trimSig(size));
@@ -1207,7 +1207,7 @@ public class MainActivity extends AppCompatActivity {
                     if (pegOn && (pStep <= 0 || pSize <= 0)) { pegOn = false; toast("Peg needs a step % and size — saved with peg OFF"); }
                     double pBias = Math.max(-20, Math.min(20, parseD(biasE.getText().toString(), 0)));
                     double pRep = Math.max(0.1, parseD(repE.getText().toString(), 1));
-                    int pLevels = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), Order.MAX_LEVELS)));
+                    int pLevels = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), 1)));
                     prefs.edit().putBoolean(PriceOracle.P_ENABLE, pegOn)
                             .putString(PriceOracle.P_STEP, pStep > 0 ? trimSig(pStep) : "")
                             .putString(PriceOracle.P_SIZE, pSize > 0 ? trimSig(pSize) : "")
