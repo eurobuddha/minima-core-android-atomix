@@ -121,8 +121,23 @@ public final class PriceOracle {
         synchronized (LOCK) {
             price = 0; bid = 0; ask = 0; goodAtMs = 0; suspect = 0;
             firstTryMs = 0; lastTryMs = 0; appliedMid = 0; lastError = null;
-            if (prefs != null) prefs.edit().remove(P_LAST_OK).remove(P_LAST_PRICE).apply();
+            // Also drop the reprice BASELINE (P_LAST_MID) and the widened-spread flag (P_WIDE): both are the OTHER
+            // currency's runtime state and would otherwise be read by shouldReprice/armSafe after the switch.
+            if (prefs != null) prefs.edit().remove(P_LAST_OK).remove(P_LAST_PRICE)
+                    .remove(P_LAST_MID).remove(P_WIDE).apply();
         }
+    }
+
+    /**
+     * FUND GUARD: a fetch's price model no longer matches the ACTIVE currency — the user switched currency WHILE
+     * this fetch was in flight. Committing it would stamp one currency's mid into the shared price static that
+     * {@link #applyPeg} reads for the OTHER currency (mxUSDT parity 1.0 vs MINIMA ~0.02 differ ~50×), producing a
+     * grossly mispriced auto-fill. The commit points in {@link #fetchMexc}/{@link #fetchParity} drop such a stale
+     * cross-currency result. (There is exactly one parity currency and one MEXC currency, so the model uniquely
+     * identifies the currency.)
+     */
+    static boolean staleForActive(boolean resultIsParity) {
+        return resultIsParity != TradingContext.active().pricingParity;
     }
 
     // ---- cached snapshot ----
@@ -219,6 +234,7 @@ public final class PriceOracle {
      *  always-available. Skew (P_BIAS) + spread (P_STEP) are applied downstream in applyPeg, unchanged. */
     private static void fetchParity() {
         synchronized (LOCK) {
+            if (staleForActive(true)) return;   // switched away from the parity currency mid-fetch → drop
             suspect = 0;
             price = PARITY_MID; bid = PARITY_MID; ask = PARITY_MID;
             goodAtMs = System.currentTimeMillis();
@@ -254,6 +270,7 @@ public final class PriceOracle {
             double m = (a + b) / 2;
             if (!(m > 0) || Double.isInfinite(m)) throw new IOException("bad price");
             synchronized (LOCK) {
+                if (staleForActive(false)) return;   // switched away from the MINIMA/MEXC currency mid-fetch → drop
                 if (price > 0 && Math.abs(m - price) / price > JUMP_FRACTION) {
                     // Suspect glitch: only accept once a SECOND consecutive read lands within 10% of it.
                     if (!(suspect > 0 && Math.abs(m - suspect) / suspect < 0.10)) {

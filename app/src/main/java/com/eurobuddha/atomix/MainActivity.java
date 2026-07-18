@@ -368,24 +368,91 @@ public class MainActivity extends AppCompatActivity {
      *  the market is OFF: you deliberately configure + publish a fresh market in the new currency. This fails safe
      *  (a switch can only ever leave the market off, never mispriced). Clearing these prefs also stops the
      *  still-dying old service instance from republishing — it reads auto_publish + the order live each cycle. */
-    private void doSwitchCurrency(TradingContext target) {
-        // 1) turn the market OFF and clear the priced state that isn't currency-namespaced
-        prefs.edit()
-                .remove("order_config")                        // the ladder
-                .putBoolean("auto_publish", false)             // background republisher gate (read live each cycle)
-                .putBoolean(PriceOracle.P_ENABLE, false)       // peg off
-                .putBoolean(PriceOracle.P_WITHDRAWN, true)     // any live pegged order is treated as withdrawn
-                .remove("last_publish_ok")
-                .apply();
-        PriceOracle.resetForSwitch(prefs);                     // wipe the cached/persisted price (no stale peg)
-        try { engine.setMyOrder(new com.eurobuddha.atomix.swap.Order()); } catch (Exception ignored) {}  // disarm the responder now
-        // 2) flip the active currency (drives token/sentinels/pricing/theme on the rebuild)
-        TradingContext.setActive(target, prefs);
-        // 3) stop the foreground watcher so it re-reads the new currency on its next start; recreate() re-runs
-        //    onCreate → startSwapService() with a fresh SwapService instance in the target currency's identity.
-        try { stopService(new android.content.Intent(this, SwapService.class)); } catch (Exception ignored) {}
-        serviceStarted = false;
-        recreate();   // rebuild the whole UI + scanners in the target currency's identity (full re-theme)
+    private void doSwitchCurrency(final TradingContext target) {
+        final TradingContext current = TradingContext.active();
+        // Remember THIS currency's market so a flick back restores it (config only — never the runtime/price state).
+        snapshotMarket(prefs, current.key);
+
+        // The rest of the switch — runs exactly ONCE, after the tombstone is dispatched (or immediately if none).
+        final boolean[] done = {false};
+        final Runnable[] proceedRef = new Runnable[1];   // holder so proceed can cancel its own pending watchdog
+        final Runnable proceed = () -> {
+            if (done[0]) return; done[0] = true;
+            ui.removeCallbacks(proceedRef[0]);   // callback won the race → cancel the pending 4s watchdog
+            // Quiesce the priced state (fund-safe: the active prefs are always the ACTIVE currency's, no bleed).
+            prefs.edit()
+                    .remove("order_config")
+                    .putBoolean("auto_publish", false)
+                    .putBoolean(PriceOracle.P_ENABLE, false)
+                    .putBoolean(PriceOracle.P_WITHDRAWN, true)
+                    .remove("last_publish_ok")
+                    .apply();
+            PriceOracle.resetForSwitch(prefs);                 // wipe cached/persisted price (no stale peg)
+            try { engine.setMyOrder(new com.eurobuddha.atomix.swap.Order()); } catch (Exception ignored) {}  // disarm now
+            TradingContext.setActive(target, prefs);           // flip currency (drives token/sentinels/pricing/theme)
+            restoreMarket(prefs, target.key);                  // bring back the target currency's own saved market (if any)
+            try { stopService(new android.content.Intent(this, SwapService.class)); } catch (Exception ignored) {}
+            serviceStarted = false;
+            recreate();                                        // rebuild UI + scanners in the target currency's identity
+        };
+        proceedRef[0] = proceed;
+
+        // Tombstone the CURRENT market FIRST (current identity + current sentinel — both read before setActive) so
+        // peers drop my order next block instead of it lingering ~1h and causing failed fills. Reuses the proven
+        // maybePegWithdraw withdrawal: publish my order with every pair disabled (no liquidity, freshest-per-signer).
+        boolean liveMarket = false;
+        try { liveMarket = loadOrder().hasLiquidity() || prefs.getBoolean("auto_publish", false); } catch (Exception ignored) {}
+        if (liveMarket && node != null && ls != null && identity != null && myMinimaPk != null && wallet.ready()) {
+            orderStatus = "Withdrawing your " + ccy() + " market…"; render();
+            try {
+                Order o = loadOrder();
+                for (Order.Pair p : o.pairs.values()) p.enable = false;
+                o.minimaPublicKey = myMinimaPk;
+                o.ethAddress = wallet.address();
+                SwapOrderBook.publish(node, ls, identity, o, new CommsTransport.SendCb() {
+                    @Override public void onSent(String txpowid) { SwapLog.d("switch: tombstoned " + current.key + " market " + txpowid); ui.post(proceed); }
+                    @Override public void onFailed(String message) { SwapLog.w("switch: tombstone FAIL (" + current.key + "): " + message + " — ages out"); ui.post(proceed); }
+                });
+                ui.postDelayed(proceed, 4000);   // watchdog: never block the switch on a hung post
+            } catch (Exception e) { proceed.run(); }
+        } else {
+            proceed.run();   // no live market — switch immediately, no delay
+        }
+    }
+
+    // Per-currency market memory: the SINGLE active prefs are always the active currency's (fund-safe — no
+    // key-by-key namespacing that could bleed). On switch we PARK the leaving currency's config under its own key
+    // and RESTORE the arriving currency's, so a flick doesn't wipe your ladder. Only CONFIG keys are carried; the
+    // runtime/price state (P_LAST_*, withdrawn/tombstoned/wide, last_publish_ok) starts fresh so the peg re-fetches
+    // the target currency's own price (resetForSwitch clears them).
+    private static final String[] MKT_STR = { "order_config", PriceOracle.P_STEP, PriceOracle.P_SIZE,
+            PriceOracle.P_BIAS, PriceOracle.P_REPRICE, PriceOracle.P_LEVELS };
+    private static final String[] MKT_BOOL = { "auto_publish", PriceOracle.P_ENABLE };
+
+    /** Park the ACTIVE currency's market CONFIG under its own key (static + prefs-only so it's unit-testable). */
+    static void snapshotMarket(android.content.SharedPreferences prefs, String curKey) {
+        try {
+            org.json.JSONObject j = new org.json.JSONObject();
+            for (String k : MKT_STR) { String v = prefs.getString(k, null); if (v != null) j.put(k, v); }
+            for (String k : MKT_BOOL) j.put(k, prefs.getBoolean(k, false));
+            prefs.edit().putString("market_" + curKey, j.toString()).apply();
+        } catch (Exception ignored) {}
+    }
+
+    /** Restore a currency's parked market CONFIG into the active keys (no-op if none saved). Runtime/price state
+     *  is deliberately NOT restored — the peg re-fetches the target currency's own price. */
+    static void restoreMarket(android.content.SharedPreferences prefs, String targetKey) {
+        String raw = prefs.getString("market_" + targetKey, null);
+        if (raw == null) return;   // nothing saved for this currency — leave the market off (already reset)
+        android.content.SharedPreferences.Editor e = prefs.edit();
+        try {
+            org.json.JSONObject j = new org.json.JSONObject(raw);
+            for (String k : MKT_STR) if (j.has(k)) e.putString(k, j.getString(k));
+            for (String k : MKT_BOOL) if (j.has(k)) e.putBoolean(k, j.getBoolean(k));
+            // a restored market is live-able again (the price re-fetches fresh); clear the withdrawn/tombstone flags.
+            e.putBoolean(PriceOracle.P_WITHDRAWN, false).putBoolean(PriceOracle.P_TOMBSTONED, false);
+        } catch (Exception ignored) {}
+        e.apply();
     }
 
     /** AlertDialog builder whose chrome follows the in-app theme (dark/light). */
