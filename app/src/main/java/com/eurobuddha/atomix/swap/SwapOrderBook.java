@@ -120,6 +120,30 @@ public final class SwapOrderBook {
         return !(sellMinima ? cur.effectiveBids(sym) : cur.effectiveAsks(sym)).isEmpty();
     }
 
+    /** Balance-clamped take cap of a single level, in mxUSDT — how much a taker can actually lift from THIS level
+     *  given the maker's advertised balance. A sell (taker sells mxUSDT → maker BUYS with USDT) caps by
+     *  {@code usdtAvail/price}; a buy (maker SELLS mxUSDT) caps by {@code minimaAvail}. 0 for a non-positive price.
+     *  Used to rank equal-price makers largest-first so a fillable amount uses the fewest swap legs. */
+    public static double levelCap(Order o, Order.Level l, boolean sell) {
+        if (o == null || l == null || l.price <= 0) return 0;
+        return sell ? Math.min(l.amount, o.usdtAvail / l.price) : Math.min(l.amount, o.minimaAvail);
+    }
+
+    /** Quantized price key (8dp) so makers quoting the SAME price tie exactly — the basis for ranking equal-price
+     *  makers by depth, and it keeps {@link #compareForFill} transitive against float-noise near-ties. */
+    public static long pxKey(double price) { return Math.round(price * 1e8); }
+
+    /** Taker's fill order for two book levels: best price first (sell → highest bid, buy → lowest ask), then the
+     *  DEEPEST maker first at an EQUAL price so a fillable amount uses the fewest swap legs. Price is never
+     *  sacrificed for size. Negative → {@code (oa,la)} ranks before {@code (ob,lb)}. */
+    public static int compareForFill(Order oa, Order.Level la, Order ob, Order.Level lb, boolean sell) {
+        long ka = la == null ? 0 : pxKey(la.price);   // null-safe like levelCap — a null level ranks worst
+        long kb = lb == null ? 0 : pxKey(lb.price);
+        int byPrice = sell ? Long.compare(kb, ka) : Long.compare(ka, kb);
+        if (byPrice != 0) return byPrice;
+        return Double.compare(levelCap(ob, lb, sell), levelCap(oa, la, sell));   // larger cap first
+    }
+
     /** Parse + verify a single order coin. Returns null if missing fields or the signature is invalid. */
     public static Order verifyCoin(LazySodium ls, JSONObject coin) {
         if (coin == null) return null;

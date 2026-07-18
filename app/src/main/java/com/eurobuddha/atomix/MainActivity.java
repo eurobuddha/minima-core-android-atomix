@@ -210,10 +210,16 @@ public class MainActivity extends AppCompatActivity {
                     engine.maintainLadderCoins(!SWEEP_ACTIVE);   // replenish coins consumed by fills (rate-limited)
             }
             refreshBalances(false);                 // keep balances current without a restart (read-only, always safe)
-            scanOrderBook();                        // refresh the LIVE book every poll — else the taker trades a
-                                                    // stale app-start snapshot and a maker that has since withdrawn
-                                                    // (published a no-liquidity tombstone) still shows tradeable.
-                                                    // Read-only (coinnotify add + coins query) → safe even mid-sweep.
+            if (currentTab == TAB_SWAP || currentTab == TAB_MARKET) scanOrderBook();   // refresh the LIVE book only
+                                                    // while a book-rendering tab is open (Swap takes / Market depth)
+                                                    // — else the taker trades a stale app-start snapshot and a maker
+                                                    // that has since withdrawn (a no-liquidity tombstone) still shows
+                                                    // tradeable. Gated to those tabs so we DON'T query the shared
+                                                    // sentinel from Wallet/Activity/OTC: trims node traffic and
+                                                    // shrinks exposure to a flooded-book `coins` response (the known
+                                                    // unbounded-response node crash — not app-fixable, bounded here
+                                                    // only by depth:SCAN_DEPTH). Entering a book tab triggers an
+                                                    // immediate scan (see setTab). Read-only → safe even mid-sweep.
             ui.postDelayed(this, WATCH_INTERVAL_MS);
         }
     };
@@ -1500,8 +1506,8 @@ public class MainActivity extends AppCompatActivity {
         // the ~2h HTLC refund. (A maker that stays live but reprices or drains is caught by its own responder
         // decline + refund, not here.) Chokepoint for BOTH the single-swap path and every sweep leg.
         if (!SwapOrderBook.makerLive(orderBook.get(maker.signerPk), symbol, sellMinima)) {
-            scanOrderBook();   // pull the fresh book so the UI drops the withdrawn maker
-            legCb.err("that market was just withdrawn — book refreshed, please try again");
+            scanOrderBook();   // pull the fresh book (async) so the UI drops the withdrawn maker
+            legCb.err("that market was just withdrawn — refreshing the book, try again in a moment");
             return;
         }
         if (sellMinima) {
@@ -1697,6 +1703,10 @@ public class MainActivity extends AppCompatActivity {
         if (t == currentTab) return;
         swapInputFocused = false;   // leaving the Swap tab clears the typing guard
         currentTab = t;
+        // Entering a book-rendering tab (Swap / Market) → refresh the book NOW. The periodic poll only scans while
+        // one of these tabs is open, so this is what keeps the taker/depth view from showing a book that went stale
+        // while the user was on Wallet/Activity/OTC.
+        if (t == TAB_SWAP || t == TAB_MARKET) scanOrderBook();
         animateTab = true;   // cross-fade the new tab in (navigation only, not background refreshes)
         updateTabBarSelection();
         render();
@@ -2300,22 +2310,31 @@ public class MainActivity extends AppCompatActivity {
         return n;
     }
 
-    private static final class Best { Order bidMaker, askMaker; double bestBid = 0, bestAsk = Double.MAX_VALUE; double bidCap = 0, askCap = 0; }
+    private static final class Best { Order bidMaker, askMaker; Order.Level bidLevel, askLevel; double bestBid = 0, bestAsk = Double.MAX_VALUE; double bidCap = 0, askCap = 0; }
 
-    /** Best non-own bid/ask LEVEL across the live order book (guided Swap tab; never picks my own order).
-     *  Walks each maker's ladder (legacy makers contribute one synthetic level) and keeps the single best
-     *  price per side plus that level's balance-clamped take cap. */
+    /** Best non-own bid/ask LEVEL across the live order book (guided Swap tab; never picks my own order). Walks each
+     *  maker's ladder (legacy makers contribute one synthetic level) and keeps the single best price per side; among
+     *  makers at the SAME price it keeps the DEEPEST (largest balance-clamped cap) so a fillable amount takes the
+     *  fewest swap legs. Price is never sacrificed for size — a strictly better price always wins. */
     private Best bestMakers(String sym) {
         Best r = new Best();
         for (Order o : orderBook.values()) {
             if (isMine(o)) continue;
+            // Single source of the ranking: compareForFill(candidate, current) < 0 ⟺ candidate has a strictly
+            // better price, OR an equal price with a larger cap. Keeps bestMakers and the sweep sort in lockstep.
             for (Order.Level l : o.effectiveBids(sym)) {
-                double cap = l.price > 0 ? Math.min(l.amount, o.usdtAvail / l.price) : 0;
-                if (l.price > r.bestBid && cap > 0) { r.bestBid = l.price; r.bidMaker = o; r.bidCap = cap; }
+                double cap = SwapOrderBook.levelCap(o, l, true);
+                if (cap <= 0) continue;
+                if (r.bidMaker == null || SwapOrderBook.compareForFill(o, l, r.bidMaker, r.bidLevel, true) < 0) {
+                    r.bestBid = l.price; r.bidMaker = o; r.bidLevel = l; r.bidCap = cap;
+                }
             }
             for (Order.Level l : o.effectiveAsks(sym)) {
-                double cap = Math.min(l.amount, o.minimaAvail);
-                if ((r.askMaker == null || l.price < r.bestAsk) && cap > 0) { r.bestAsk = l.price; r.askMaker = o; r.askCap = cap; }
+                double cap = SwapOrderBook.levelCap(o, l, false);
+                if (cap <= 0) continue;
+                if (r.askMaker == null || SwapOrderBook.compareForFill(o, l, r.askMaker, r.askLevel, false) < 0) {
+                    r.bestAsk = l.price; r.askMaker = o; r.askLevel = l; r.askCap = cap;
+                }
             }
         }
         if (r.askMaker == null) r.bestAsk = 0;   // normalize "none" to 0 for callers
@@ -3005,9 +3024,10 @@ public class MainActivity extends AppCompatActivity {
             if (excludeMine && isMine(o)) continue;
             for (Order.Level l : (sell ? o.effectiveBids(sym) : o.effectiveAsks(sym))) agg.add(new Object[]{o, l});
         }
-        java.util.Collections.sort(agg, (a, b) -> sell
-                ? Double.compare(((Order.Level) b[1]).price, ((Order.Level) a[1]).price)
-                : Double.compare(((Order.Level) a[1]).price, ((Order.Level) b[1]).price));
+        // Best price first (sell → highest bid, buy → lowest ask); at an EQUAL price, the deepest maker first so
+        // buildSweepPlan fills the largest maker before splitting into another leg — fewest swaps.
+        java.util.Collections.sort(agg, (a, b) ->
+                SwapOrderBook.compareForFill((Order) a[0], (Order.Level) a[1], (Order) b[0], (Order.Level) b[1], sell));
         return agg;
     }
 

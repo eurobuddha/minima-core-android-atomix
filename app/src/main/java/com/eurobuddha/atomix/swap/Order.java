@@ -207,6 +207,11 @@ public final class Order {
         return o;
     }
 
+    /** A maker self-signs its own order, so its advertised balance is untrusted input: a NaN/Infinity would poison
+     *  {@code SwapOrderBook.levelCap} (NaN sorts as the LARGEST cap under Double.compare, so a griefer's order would
+     *  route first and crash the sweep planner). Clamp anything non-finite or negative to 0. */
+    private static double finite(double v) { return (Double.isFinite(v) && v > 0) ? v : 0; }
+
     public static Order fromJson(JSONObject o) {
         Order r = new Order();
         r.minimaPublicKey = o.optString("mpk", "");
@@ -214,7 +219,7 @@ public final class Order {
         r.commsPublicId = o.optString("cid", "");
         r.ts = o.optLong("ts", 0);
         JSONObject bal = o.optJSONObject("bal");
-        if (bal != null) { r.minimaAvail = bal.optDouble("m", 0); r.usdtAvail = bal.optDouble("u", 0); }
+        if (bal != null) { r.minimaAvail = finite(bal.optDouble("m", 0)); r.usdtAvail = finite(bal.optDouble("u", 0)); }
         JSONObject p = o.optJSONObject("pairs");
         if (p != null) {
             for (Iterator<String> it = p.keys(); it.hasNext(); ) {
