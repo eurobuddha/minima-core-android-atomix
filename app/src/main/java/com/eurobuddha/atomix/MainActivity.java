@@ -379,6 +379,12 @@ public class MainActivity extends AppCompatActivity {
         final Runnable proceed = () -> {
             if (done[0]) return; done[0] = true;
             ui.removeCallbacks(proceedRef[0]);   // callback won the race → cancel the pending 4s watchdog
+            // Flip currency FIRST so the price-model guard (PriceOracle.staleForActive) rejects any in-flight
+            // OLD-currency fetch that commits during the clear/reset below — airtight against the microsecond
+            // commit-vs-reset race. Safe to reorder: the tombstone's sentinel was captured synchronously before
+            // proceed was posted, and the clear-block/resetForSwitch operate on the single active prefs (currency-
+            // agnostic keys) while restoreMarket takes an explicit target key — none depend on active being old.
+            TradingContext.setActive(target, prefs);           // flip currency (drives token/sentinels/pricing/theme)
             // Quiesce the priced state (fund-safe: the active prefs are always the ACTIVE currency's, no bleed).
             prefs.edit()
                     .remove("order_config")
@@ -389,7 +395,6 @@ public class MainActivity extends AppCompatActivity {
                     .apply();
             PriceOracle.resetForSwitch(prefs);                 // wipe cached/persisted price (no stale peg)
             try { engine.setMyOrder(new com.eurobuddha.atomix.swap.Order()); } catch (Exception ignored) {}  // disarm now
-            TradingContext.setActive(target, prefs);           // flip currency (drives token/sentinels/pricing/theme)
             restoreMarket(prefs, target.key);                  // bring back the target currency's own saved market (if any)
             try { stopService(new android.content.Intent(this, SwapService.class)); } catch (Exception ignored) {}
             serviceStarted = false;
