@@ -250,7 +250,7 @@ public class SwapService extends Service {
                 new Thread(() -> {
                     try {
                         byte[] seed = ikm.startsWith("0x") ? Hex.from(ikm) : ikm.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                        CommsIdentity id = CommsIdentity.fromSeed(ls, seed);
+                        CommsIdentity id = CommsIdentity.fromSeed(ls, seed, TradingContext.active().hkdfContext);
                         h.post(() -> { identity = id; crypto = new LocalEcCryptoProvider(ls, id); identityDeriving = false; SwapLog.d("svc comms identity ready"); });
                     } catch (Exception e) {
                         h.post(() -> { identityDeriving = false; SwapLog.w("svc identity derive failed: " + e.getClass().getSimpleName()); });

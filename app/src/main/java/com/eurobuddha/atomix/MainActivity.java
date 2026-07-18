@@ -502,7 +502,7 @@ public class MainActivity extends AppCompatActivity {
         io.execute(() -> {
             try {
                 byte[] seed = ikm.startsWith("0x") ? Hex.from(ikm) : ikm.getBytes(StandardCharsets.UTF_8);
-                CommsIdentity id = CommsIdentity.fromSeed(ls, seed);
+                CommsIdentity id = CommsIdentity.fromSeed(ls, seed, TradingContext.active().hkdfContext);
                 ui.post(() -> { identity = id; crypto = new LocalEcCryptoProvider(ls, id); identityRequesting = false; SwapLog.d("fg comms identity ready"); render(); scanOrderBook(); scanOtc(); });
             } catch (Exception e) {
                 ui.post(() -> { identityRequesting = false; toast("Identity error: " + e.getMessage()); });

@@ -219,7 +219,7 @@ public final class SwapEngine {
     /** A taker told us (via the sealed handshake) the hashlock of a USDT lock addressed to us. We discover it
      *  by deterministic contractId via getContract (free-RPC-safe) instead of eth_getLogs, then respond. */
     public void addIncomingHashlock(String hash) {
-        if (hash != null && !hash.isEmpty()) incoming.add(MinimaHtlc.normKey(hash));
+        if (hash != null && !hash.isEmpty()) { incoming.add(MinimaHtlc.normKey(hash)); SwapLog.d("RX buy handshake hash=" + hash); }
     }
     public SwapDb db() { return db; }
     public void shutdown() { io.shutdownNow(); }
@@ -754,9 +754,10 @@ public final class SwapEngine {
         if (db.getSwap(hash) != null || db.haveSentCounterParty(hash)) return true;   // already known — drop
         try {
             EthHtlc.Contract c = eth.getContract(EthHtlc.contractId(hash));
-            if (c == null) return false;                                  // buyer's USDT leg not visible yet — retry
+            if (c == null) { SwapLog.d("buy " + hash + ": getContract NULL (USDT lock not visible on RPC yet) — retry"); return false; }
             if (c.withdrawn || c.refunded) return true;                   // terminal — stop polling it
-            if (c.receiver != null && c.receiver.equalsIgnoreCase(myEth)) checkCanCollectEth(eth, c, minimaBlock);
+            if (c.receiver != null && c.receiver.equalsIgnoreCase(myEth)) { SwapLog.d("buy " + hash + ": USDT lock visible, receiver=me → evaluate"); checkCanCollectEth(eth, c, minimaBlock); }
+            else SwapLog.w("buy " + hash + ": USDT lock receiver=" + (c.receiver == null ? "null" : c.receiver) + " ≠ my eth " + myEth + " (took a stale/foreign order?)");
         } catch (Exception ignore) {}
         return false;
     }

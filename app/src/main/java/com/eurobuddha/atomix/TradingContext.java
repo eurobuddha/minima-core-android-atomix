@@ -31,7 +31,8 @@ public enum TradingContext {
             /* accent       */ 0xFFF7931A,                          // Minima orange
             /* accentSoftDk */ 0x33F7931A, /* accentSoftLt */ 0x1FF7931A,
             /* gradStart    */ 0xFFFFAB3D,
-            /* onAccentDk    */ 0xFF0B0D12, /* onAccentLt   */ 0xFF201400   // dark ink on orange
+            /* onAccentDk    */ 0xFF0B0D12, /* onAccentLt   */ 0xFF201400,  // dark ink on orange
+            /* hkdfContext  */ "minimaswap"                                 // == legacy minimaSwap comms identity
     ),
 
     /** Bridged native-USDT (mxUSDT) ↔ ERC20 USDT (usdtSwap's market). Tether-green identity, parity pricing. */
@@ -46,7 +47,8 @@ public enum TradingContext {
             /* accent       */ 0xFF26A17B,                          // Tether green
             /* accentSoftDk */ 0x3326A17B, /* accentSoftLt */ 0x1F26A17B,
             /* gradStart    */ 0xFF3DBF93,
-            /* onAccentDk    */ 0xFFFFFFFF, /* onAccentLt   */ 0xFFFFFFFF   // white ink on green (both modes)
+            /* onAccentDk    */ 0xFFFFFFFF, /* onAccentLt   */ 0xFFFFFFFF,  // white ink on green (both modes)
+            /* hkdfContext  */ "usdtswap"                                   // == legacy usdtSwap comms identity
     );
 
     public final String key;            // persistence + logs
@@ -55,16 +57,23 @@ public enum TradingContext {
     public final boolean pricingParity; // true → parity 1.0 model; false → MEXC feed
     public final String orderBookAddr, otcBoardAddr, otcChatAddr, takeAddr;
     public final int accent, accentSoftDark, accentSoftLight, gradStart, onAccentDark, onAccentLight;
+    /** HKDF domain for the comms identity — MUST equal the legacy per-currency app's context ("usdtswap" /
+     *  "minimaswap") so AtomiX derives the SAME box/sign keys usdtSwap/minimaSwap did. Handshakes are sealed to
+     *  the maker's identity FROM the order, so AtomiX can only service an order it can decrypt for — i.e. one
+     *  published under the identity AtomiX itself holds. Matching the legacy context rejoins the whole existing
+     *  order-book ecosystem (a single "atomix" identity orphaned it — the combine regression). */
+    public final String hkdfContext;
 
     TradingContext(String key, String coinLabel, String tokenId, boolean pricingParity,
                    String orderBookAddr, String otcBoardAddr, String otcChatAddr, String takeAddr,
                    int accent, int accentSoftDark, int accentSoftLight, int gradStart,
-                   int onAccentDark, int onAccentLight) {
+                   int onAccentDark, int onAccentLight, String hkdfContext) {
         this.key = key; this.coinLabel = coinLabel; this.tokenId = tokenId; this.pricingParity = pricingParity;
         this.orderBookAddr = orderBookAddr; this.otcBoardAddr = otcBoardAddr;
         this.otcChatAddr = otcChatAddr; this.takeAddr = takeAddr;
         this.accent = accent; this.accentSoftDark = accentSoftDark; this.accentSoftLight = accentSoftLight;
         this.gradStart = gradStart; this.onAccentDark = onAccentDark; this.onAccentLight = onAccentLight;
+        this.hkdfContext = hkdfContext;
     }
 
     // ---- the single active selection ----

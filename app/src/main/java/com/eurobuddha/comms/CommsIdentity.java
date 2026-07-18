@@ -19,12 +19,6 @@ import java.util.Arrays;
  */
 public final class CommsIdentity {
 
-    /** HKDF domain for THIS app family. AtomiX uses "atomix-*" so the same seed yields a DIFFERENT identity than
-     *  Mail ("minima-comms-*") or miniMall ("minimerch-*") — one node runs all, no key clash. ONE AtomiX identity
-     *  serves BOTH trading currencies: the identity is advertised per-order, so interop with the legacy
-     *  minimaSwap/usdtSwap books is carried by the per-currency SENTINEL addresses, not by the identity. */
-    private static final String APP_CONTEXT = "atomix";
-
     public final byte[] boxPk, boxSk;     // X25519 — encryption
     public final byte[] signPk, signSk;   // Ed25519 — signing
 
@@ -32,10 +26,17 @@ public final class CommsIdentity {
         this.boxPk = boxPk; this.boxSk = boxSk; this.signPk = signPk; this.signSk = signSk;
     }
 
-    /** Deterministically derive the identity from the Minima seed bytes (e.g. from `vault action:seed`). */
-    public static CommsIdentity fromSeed(LazySodium ls, byte[] minimaSeed) {
-        byte[] boxSeed  = Hkdf.derive(minimaSeed, APP_CONTEXT + "-box-v1",  Box.SEEDBYTES);
-        byte[] signSeed = Hkdf.derive(minimaSeed, APP_CONTEXT + "-sign-v1", Sign.SEEDBYTES);
+    /**
+     * Deterministically derive the identity from the Minima seed bytes, under a per-app HKDF {@code context}
+     * (e.g. "usdtswap" / "minimaswap"). The context is what makes the same seed yield a DIFFERENT identity than
+     * Mail ("minima-comms") or miniMall ("minimerch") — one node runs all, no key clash. CRITICAL for AtomiX:
+     * handshakes are sealed to the maker's identity FROM the order, so to service an order published by usdtSwap /
+     * minimaSwap (the whole existing book) AtomiX must derive the SAME identity — i.e. pass the SAME per-currency
+     * context those apps used. A single custom context isolates the app from the entire ecosystem.
+     */
+    public static CommsIdentity fromSeed(LazySodium ls, byte[] minimaSeed, String context) {
+        byte[] boxSeed  = Hkdf.derive(minimaSeed, context + "-box-v1",  Box.SEEDBYTES);
+        byte[] signSeed = Hkdf.derive(minimaSeed, context + "-sign-v1", Sign.SEEDBYTES);
 
         byte[] boxPk = new byte[Box.PUBLICKEYBYTES], boxSk = new byte[Box.SECRETKEYBYTES];
         byte[] signPk = new byte[Sign.PUBLICKEYBYTES], signSk = new byte[Sign.SECRETKEYBYTES];
