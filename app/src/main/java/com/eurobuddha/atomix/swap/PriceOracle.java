@@ -73,6 +73,7 @@ public final class PriceOracle {
     public static final String P_LAST_OK = "peg_last_ok";    // long: when the last good read landed (survives restarts)
     public static final String P_LAST_PRICE = "peg_last_price"; // string double: last-good oracle price (survives restart → stay-live)
     public static final String P_WIDE = "peg_wide";          // boolean: last publish used a widened (stale) spread
+    public static final String P_LEVELS = "peg_levels";      // string int 1..MAX_LEVELS: how many tranches/side the peg generates
 
     public static final int PEG_OFF = 0;      // not pegged (or unconfigured) — order left untouched
     public static final int PEG_APPLIED = 1;  // ladder regenerated from a FRESH oracle price (tight)
@@ -342,8 +343,11 @@ public final class PriceOracle {
         boolean stale = age > FRESH_MS;
         double effStep = step * wideningFactor(age);
         double quoted = m * (1 + bias / 100.0);
+        // How many tranches/side the maker wants (default MAX_LEVELS for back-compat; 1 = a single tight level).
+        int levels = (int) prefD(prefs, P_LEVELS, Order.MAX_LEVELS);
+        if (levels < 1) levels = 1; else if (levels > Order.MAX_LEVELS) levels = Order.MAX_LEVELS;
         p.bids.clear(); p.asks.clear();
-        for (int i = 1; i <= Order.MAX_LEVELS; i++) {
+        for (int i = 1; i <= levels; i++) {
             p.asks.add(new Order.Level(quoted * (1 + i * effStep / 100.0), size));
             p.bids.add(new Order.Level(quoted * (1 - i * effStep / 100.0), size));
         }

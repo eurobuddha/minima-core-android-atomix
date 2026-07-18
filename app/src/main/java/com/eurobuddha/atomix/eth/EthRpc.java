@@ -19,11 +19,20 @@ import java.nio.charset.StandardCharsets;
  */
 public final class EthRpc {
 
-    /** Keyless mainnet endpoints to fall back to when the primary is down/rate-limited (verified live).
-     *  A single public node returning a 5xx/HTML body must not block reads or broadcasts. */
+    /** Keyless mainnet endpoints to fall back to when the primary is down/rate-limited (all verified live
+     *  2026-07-18). A single public node returning a 5xx/HTML body, a rate-limit error, or a dead connection
+     *  must not block reads or broadcasts — the more independent providers here, the less likely the ETH leg
+     *  ever stalls (the exhaustion that stranded a swap: publicnode+drpc down and 1rpc rate-limited at once).
+     *  General-purpose full nodes first; the historically rate-limited 1rpc is LAST. */
     private static final String[] FALLBACKS = {
             "https://ethereum-rpc.publicnode.com",
             "https://eth.drpc.org",
+            "https://eth-mainnet.public.blastapi.io",
+            "https://eth-pokt.nodies.app",
+            "https://eth.api.onfinality.io/public",
+            "https://api.zan.top/eth-mainnet",
+            "https://eth.rpc.blxrbdn.com",
+            "https://gateway.tenderly.co/public/mainnet",
             "https://1rpc.io/eth",
     };
 
@@ -72,8 +81,8 @@ public final class EthRpc {
             c.setRequestMethod("POST");
             c.setRequestProperty("Content-Type", "application/json");
             c.setDoOutput(true);
-            c.setConnectTimeout(15000);
-            c.setReadTimeout(30000);
+            c.setConnectTimeout(8000);    // a live CDN endpoint connects fast; a slow connect = dead node → fail over quickly
+            c.setReadTimeout(30000);      // reads (eth_getLogs can be heavy) get longer
             try (OutputStream os = c.getOutputStream()) {
                 os.write(payload.toString().getBytes(StandardCharsets.UTF_8));
             }

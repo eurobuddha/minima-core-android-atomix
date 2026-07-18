@@ -1035,18 +1035,22 @@ public class MainActivity extends AppCompatActivity {
         pegRow.addView(biasE, pr1); pegRow.addView(repE, pr2);
         box.addView(pegRow);
 
-        // ladder params — the 6+6 rows regenerate automatically as these change (no Generate button)
-        box.addView(fieldLabel("LADDER (mid · step % · size — fills the rows as you type)"));
+        // ladder params — the rows regenerate automatically as these change (no Generate button). "levels" =
+        // how many tranches/side to build (1 = a single tight level); the peg reuses the same count.
+        box.addView(fieldLabel("LADDER (mid · step % · size · levels — fills the rows as you type)"));
         LinearLayout gen = new LinearLayout(this); gen.setOrientation(LinearLayout.HORIZONTAL); gen.setGravity(Gravity.CENTER_VERTICAL); gen.setPadding(0, dp(4), 0, dp(2));
-        final EditText midE = genField("mid"), stepE = genField("step %"), sizeE = genField("size");
+        final EditText midE = genField("mid"), stepE = genField("step %"), sizeE = genField("size"), levelsE = genField("levels");
+        levelsE.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        levelsE.setText(prefs.getString(PriceOracle.P_LEVELS, String.valueOf(Order.MAX_LEVELS)));   // 1..6 tranches/side
         if (pegSw.isChecked()) {   // step/size double as the peg's ladder parameters — show the saved ones
             stepE.setText(prefs.getString(PriceOracle.P_STEP, ""));
             sizeE.setText(prefs.getString(PriceOracle.P_SIZE, ""));
         }
         LinearLayout.LayoutParams g1 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); g1.rightMargin = dp(6);
         LinearLayout.LayoutParams g2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); g2.rightMargin = dp(6);
-        LinearLayout.LayoutParams g3 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        gen.addView(midE, g1); gen.addView(stepE, g2); gen.addView(sizeE, g3);
+        LinearLayout.LayoutParams g3 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); g3.rightMargin = dp(6);
+        LinearLayout.LayoutParams g4 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.6f);
+        gen.addView(midE, g1); gen.addView(stepE, g2); gen.addView(sizeE, g3); gen.addView(levelsE, g4);
         box.addView(gen);
 
         // Live balances — used to seed a pre-ladder (0.8.x) order's synthetic size so a no-op Save keeps it live.
@@ -1104,9 +1108,15 @@ public class MainActivity extends AppCompatActivity {
                 midE.setText(trimSig(quoted));
                 double step = parseD(stepE.getText().toString(), 0), size = parseD(sizeE.getText().toString(), 0);
                 if (step <= 0 || size <= 0) return;   // mid shown; rows need step + size
+                int n = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), Order.MAX_LEVELS)));
                 for (int i = 0; i < Order.MAX_LEVELS; i++) {
-                    askRows[i][0].setText(trimSig(quoted * (1 + (i + 1) * step / 100.0))); askRows[i][1].setText(trimSig(size));
-                    bidRows[i][0].setText(trimSig(quoted * (1 - (i + 1) * step / 100.0))); bidRows[i][1].setText(trimSig(size));
+                    if (i < n) {
+                        askRows[i][0].setText(trimSig(quoted * (1 + (i + 1) * step / 100.0))); askRows[i][1].setText(trimSig(size));
+                        bidRows[i][0].setText(trimSig(quoted * (1 - (i + 1) * step / 100.0))); bidRows[i][1].setText(trimSig(size));
+                    } else {   // blank rows beyond the chosen count so a lower level count REMOVES the extras
+                        askRows[i][0].setText(""); askRows[i][1].setText("");
+                        bidRows[i][0].setText(""); bidRows[i][1].setText("");
+                    }
                 }
                 pegAwaitFill[0] = false;
             } finally { filling[0] = false; }
@@ -1146,9 +1156,15 @@ public class MainActivity extends AppCompatActivity {
             if (mid <= 0 || step <= 0 || size <= 0) return;
             filling[0] = true;
             try {
+                int n = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), Order.MAX_LEVELS)));
                 for (int i = 0; i < Order.MAX_LEVELS; i++) {
-                    askRows[i][0].setText(trimSig(mid * (1 + (i + 1) * step / 100.0))); askRows[i][1].setText(trimSig(size));
-                    bidRows[i][0].setText(trimSig(mid * (1 - (i + 1) * step / 100.0))); bidRows[i][1].setText(trimSig(size));
+                    if (i < n) {
+                        askRows[i][0].setText(trimSig(mid * (1 + (i + 1) * step / 100.0))); askRows[i][1].setText(trimSig(size));
+                        bidRows[i][0].setText(trimSig(mid * (1 - (i + 1) * step / 100.0))); bidRows[i][1].setText(trimSig(size));
+                    } else {   // blank rows beyond the chosen count so a lower level count REMOVES the extras
+                        askRows[i][0].setText(""); askRows[i][1].setText("");
+                        bidRows[i][0].setText(""); bidRows[i][1].setText("");
+                    }
                 }
             } finally { filling[0] = false; }
             upd.run();
@@ -1167,6 +1183,7 @@ public class MainActivity extends AppCompatActivity {
         TextWatcher gw = onChange(autoGen);
         midE.addTextChangedListener(gw); stepE.addTextChangedListener(gw);
         sizeE.addTextChangedListener(gw); biasE.addTextChangedListener(gw);
+        levelsE.addTextChangedListener(gw);   // changing the level count re-fills the rows (blanks the extras)
 
         modalOpen = true;
         dialog()
@@ -1190,9 +1207,11 @@ public class MainActivity extends AppCompatActivity {
                     if (pegOn && (pStep <= 0 || pSize <= 0)) { pegOn = false; toast("Peg needs a step % and size — saved with peg OFF"); }
                     double pBias = Math.max(-20, Math.min(20, parseD(biasE.getText().toString(), 0)));
                     double pRep = Math.max(0.1, parseD(repE.getText().toString(), 1));
+                    int pLevels = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), Order.MAX_LEVELS)));
                     prefs.edit().putBoolean(PriceOracle.P_ENABLE, pegOn)
                             .putString(PriceOracle.P_STEP, pStep > 0 ? trimSig(pStep) : "")
                             .putString(PriceOracle.P_SIZE, pSize > 0 ? trimSig(pSize) : "")
+                            .putString(PriceOracle.P_LEVELS, String.valueOf(pLevels))
                             .putString(PriceOracle.P_BIAS, pBias != 0 ? trimSig(pBias) : "")
                             .putString(PriceOracle.P_REPRICE, trimSig(pRep))
                             .putBoolean(PriceOracle.P_WITHDRAWN, pegOn && prefs.getBoolean(PriceOracle.P_WITHDRAWN, false))
