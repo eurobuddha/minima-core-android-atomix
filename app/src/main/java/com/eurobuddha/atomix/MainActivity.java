@@ -210,6 +210,10 @@ public class MainActivity extends AppCompatActivity {
                     engine.maintainLadderCoins(!SWEEP_ACTIVE);   // replenish coins consumed by fills (rate-limited)
             }
             refreshBalances(false);                 // keep balances current without a restart (read-only, always safe)
+            scanOrderBook();                        // refresh the LIVE book every poll — else the taker trades a
+                                                    // stale app-start snapshot and a maker that has since withdrawn
+                                                    // (published a no-liquidity tombstone) still shows tradeable.
+                                                    // Read-only (coinnotify add + coins query) → safe even mid-sweep.
             ui.postDelayed(this, WATCH_INTERVAL_MS);
         }
     };
@@ -1489,6 +1493,17 @@ public class MainActivity extends AppCompatActivity {
      * The handshake's status messages are suppressed during a sweep so they don't clobber the sweep progress.
      */
     private void startLeg(Order maker, String symbol, boolean sellMinima, String minima, String usdt, SwapEngine.StartCb legCb) {
+        // TAKE-TIME GUARD (fund-safety): don't lock a leg against a maker that has WITHDRAWN from the book. The
+        // displayed book can lag up to one poll, so re-check the CURRENT book right before the lock — a maker that
+        // switched currency / pulled its market publishes a no-liquidity tombstone (all pairs disabled), so
+        // effectiveBids/Asks return empty and makerLive() is false; locking against it would strand the leg until
+        // the ~2h HTLC refund. (A maker that stays live but reprices or drains is caught by its own responder
+        // decline + refund, not here.) Chokepoint for BOTH the single-swap path and every sweep leg.
+        if (!SwapOrderBook.makerLive(orderBook.get(maker.signerPk), symbol, sellMinima)) {
+            scanOrderBook();   // pull the fresh book so the UI drops the withdrawn maker
+            legCb.err("that market was just withdrawn — book refreshed, please try again");
+            return;
+        }
         if (sellMinima) {
             // give mxUSDT (minima), receive USDT (usdt) → mxUSDT→ERC20
             engine.startMinimaToErc20(maker, minima, symbol, usdt, legCb);
@@ -2037,6 +2052,8 @@ public class MainActivity extends AppCompatActivity {
     private void onSwapCta(boolean sell, String minimaStr, Best best) {
         swapInputFocused = false;   // leaving the amount field — panel re-renders live from here (0.8.1 lesson)
         if (minimaStr.isEmpty()) { toast("Enter how much " + ccy() + " to " + (sell ? "sell" : "buy")); return; }
+        scanOrderBook();   // kick a fresh book scan now (async) so it's current by the time the user confirms the
+                           // review dialog — the startLeg liveness guard then re-checks against that fresh book.
         final Order bestMaker = sell ? best.bidMaker : best.askMaker;
         final double bestPrice = sell ? best.bestBid : best.bestAsk;
         final double bestCap = sell ? best.bidCap : best.askCap;   // mxUSDT

@@ -96,13 +96,28 @@ public final class SwapOrderBook {
                     JSONObject coin = coins.optJSONObject(i);
                     Order o = verifyCoin(ls, coin);
                     if (o == null) continue;
-                    Order prev = book.get(o.signerPk);
-                    if (prev == null || o.ts > prev.ts) book.put(o.signerPk, o);
+                    mergeFreshest(book, o);
                 }
                 ok.accept(book);
             }
             @Override public void onError(String m) { err.accept(m); }
         });
+    }
+
+    /** Freshest-per-signer merge: keep {@code o} only if it's newer (by {@code ts}) than the order already held
+     *  for its signer. A withdrawal tombstone (no liquidity) published with the newest ts therefore SUPPRESSES
+     *  the maker's older live orders — that is exactly how a maker withdraws from the shared book. */
+    static void mergeFreshest(Map<String, Order> book, Order o) {
+        Order prev = book.get(o.signerPk);
+        if (prev == null || o.ts > prev.ts) book.put(o.signerPk, o);
+    }
+
+    /** True iff a maker's CURRENT freshest order still advertises effective liquidity on the side a taker needs
+     *  ({@code sellMinima} → the maker's BIDS; a buy → its ASKS). False for a missing or withdrawn/tombstoned
+     *  maker. The take-time guard uses this to refuse locking a leg against a maker that has left the book. */
+    public static boolean makerLive(Order cur, String sym, boolean sellMinima) {
+        if (cur == null) return false;
+        return !(sellMinima ? cur.effectiveBids(sym) : cur.effectiveAsks(sym)).isEmpty();
     }
 
     /** Parse + verify a single order coin. Returns null if missing fields or the signature is invalid. */
