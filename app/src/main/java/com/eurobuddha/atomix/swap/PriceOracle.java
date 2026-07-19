@@ -64,7 +64,9 @@ public final class PriceOracle {
     // peg config — shared "atomix" prefs so MainActivity + SwapService read one source of truth
     public static final String P_ENABLE = "peg_enable";      // boolean: ladder pegged to the oracle
     public static final String P_STEP = "peg_step_pct";      // string double: level spacing, % of mid (>0)
-    public static final String P_SIZE = "peg_size";          // string double: mxUSDT per level (>0)
+    public static final String P_SIZE = "peg_size";          // string double: mxUSDT per level (>0) — legacy shared size, still the fallback
+    public static final String P_ASK_SIZE = "peg_ask_size";  // string double: mxUSDT per ASK level (0 = don't publish asks → single-sided)
+    public static final String P_BID_SIZE = "peg_bid_size";  // string double: mxUSDT per BID level (0 = don't publish bids → single-sided)
     public static final String P_BIAS = "peg_bias_pct";      // string double: skew, ±% shift of the quoted mid
     public static final String P_REPRICE = "peg_reprice_pct";// string double: republish when moved ≥ this %
     public static final String P_LAST_MID = "peg_last_mid";  // string double: oracle mid at the last pegged publish
@@ -349,8 +351,9 @@ public final class PriceOracle {
         Order.Pair p = o.pairs.get(Order.PAIR_TOKENS[0]);
         if (p == null || !p.enable) return PEG_OFF;
         double step = prefD(prefs, P_STEP, 0), size = prefD(prefs, P_SIZE, 0);
+        double askSize = prefD(prefs, P_ASK_SIZE, size), bidSize = prefD(prefs, P_BID_SIZE, size);   // independent per-side sizes (fallback to legacy P_SIZE); a side with size 0 is not published → single-sided market
         double bias = Math.max(-20, Math.min(20, prefD(prefs, P_BIAS, 0)));
-        if (!(step > 0) || !(size > 0)) return PEG_OFF;   // unconfigured peg behaves like a manual ladder
+        if (!(step > 0) || !(askSize > 0 || bidSize > 0)) return PEG_OFF;   // need a step + at least ONE side sized
         double m; long age;
         synchronized (LOCK) { m = price; age = ageMs(); }
         if (!(m > 0)) return PEG_STALE;   // NO usable price at all (never fetched, none persisted) → don't publish
@@ -366,8 +369,8 @@ public final class PriceOracle {
         if (levels < 1) levels = 1; else if (levels > Order.MAX_LEVELS) levels = Order.MAX_LEVELS;
         p.bids.clear(); p.asks.clear();
         for (int i = 1; i <= levels; i++) {
-            p.asks.add(new Order.Level(quoted * (1 + i * effStep / 100.0), size));
-            p.bids.add(new Order.Level(quoted * (1 - i * effStep / 100.0), size));
+            if (askSize > 0) p.asks.add(new Order.Level(quoted * (1 + i * effStep / 100.0), askSize));
+            if (bidSize > 0) p.bids.add(new Order.Level(quoted * (1 - i * effStep / 100.0), bidSize));
         }
         p.buy = 0; p.sell = 0;   // re-derived from the fresh levels (editor-authoritative pattern)
         Order.sanitize(p);       // drops any bid a huge step pushed ≤ 0

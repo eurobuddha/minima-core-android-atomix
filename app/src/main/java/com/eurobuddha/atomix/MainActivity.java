@@ -444,7 +444,7 @@ public class MainActivity extends AppCompatActivity {
     // runtime/price state (P_LAST_*, withdrawn/tombstoned/wide, last_publish_ok) starts fresh so the peg re-fetches
     // the target currency's own price (resetForSwitch clears them).
     private static final String[] MKT_STR = { "order_config", PriceOracle.P_STEP, PriceOracle.P_SIZE,
-            PriceOracle.P_BIAS, PriceOracle.P_REPRICE, PriceOracle.P_LEVELS };
+            PriceOracle.P_ASK_SIZE, PriceOracle.P_BID_SIZE, PriceOracle.P_BIAS, PriceOracle.P_REPRICE, PriceOracle.P_LEVELS };
     private static final String[] MKT_BOOL = { "auto_publish", PriceOracle.P_ENABLE };
 
     /** Park the ACTIVE currency's market CONFIG under its own key (static + prefs-only so it's unit-testable). */
@@ -1128,21 +1128,27 @@ public class MainActivity extends AppCompatActivity {
 
         // ladder params — the rows regenerate automatically as these change (no Generate button). "levels" =
         // how many tranches/side to build (1 = a single tight level); the peg reuses the same count.
-        box.addView(fieldLabel("LADDER (mid · step % · size · levels — fills the rows as you type)"));
+        box.addView(fieldLabel("AUTO-FILL (mid · step % · levels, then ask/bid size — seeds the rungs; edit any rung after)"));
         LinearLayout gen = new LinearLayout(this); gen.setOrientation(LinearLayout.HORIZONTAL); gen.setGravity(Gravity.CENTER_VERTICAL); gen.setPadding(0, dp(4), 0, dp(2));
-        final EditText midE = genField("mid"), stepE = genField("step %"), sizeE = genField("size"), levelsE = genField("levels");
+        final EditText midE = genField("mid"), stepE = genField("step %"), levelsE = genField("levels");
         levelsE.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         levelsE.setText(prefs.getString(PriceOracle.P_LEVELS, "1"));   // default 1 tranche/side; up to MAX_LEVELS opt-in
-        if (pegSw.isChecked()) {   // step/size double as the peg's ladder parameters — show the saved ones
-            stepE.setText(prefs.getString(PriceOracle.P_STEP, ""));
-            sizeE.setText(prefs.getString(PriceOracle.P_SIZE, ""));
-        }
+        if (pegSw.isChecked()) stepE.setText(prefs.getString(PriceOracle.P_STEP, ""));   // step doubles as the peg's spacing
         LinearLayout.LayoutParams g1 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); g1.rightMargin = dp(6);
         LinearLayout.LayoutParams g2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); g2.rightMargin = dp(6);
-        LinearLayout.LayoutParams g3 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); g3.rightMargin = dp(6);
         LinearLayout.LayoutParams g4 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.6f);
-        gen.addView(midE, g1); gen.addView(stepE, g2); gen.addView(sizeE, g3); gen.addView(levelsE, g4);
+        gen.addView(midE, g1); gen.addView(stepE, g2); gen.addView(levelsE, g4);
         box.addView(gen);
+        // independent per-side sizes — a blank/zero side is NOT seeded or published (one-sided market)
+        LinearLayout genS = new LinearLayout(this); genS.setOrientation(LinearLayout.HORIZONTAL); genS.setGravity(Gravity.CENTER_VERTICAL); genS.setPadding(0, dp(2), 0, dp(2));
+        final EditText askSizeE = genField("ask size"), bidSizeE = genField("bid size");
+        String legacySize = prefs.getString(PriceOracle.P_SIZE, "");
+        askSizeE.setText(prefs.getString(PriceOracle.P_ASK_SIZE, legacySize));
+        bidSizeE.setText(prefs.getString(PriceOracle.P_BID_SIZE, legacySize));
+        LinearLayout.LayoutParams gs1 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); gs1.rightMargin = dp(6);
+        LinearLayout.LayoutParams gs2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        genS.addView(askSizeE, gs1); genS.addView(bidSizeE, gs2);
+        box.addView(genS);
 
         // Live balances — used to seed a pre-ladder (0.8.x) order's synthetic size so a no-op Save keeps it live.
         final double liveMinima = parseD(minimaBal, 0);
@@ -1197,17 +1203,14 @@ public class MainActivity extends AppCompatActivity {
             filling[0] = true;
             try {
                 midE.setText(trimSig(quoted));
-                double step = parseD(stepE.getText().toString(), 0), size = parseD(sizeE.getText().toString(), 0);
-                if (step <= 0 || size <= 0) return;   // mid shown; rows need step + size
+                double step = parseD(stepE.getText().toString(), 0);
+                double askSize = parseD(askSizeE.getText().toString(), 0), bidSize = parseD(bidSizeE.getText().toString(), 0);
+                if (step <= 0 || !(askSize > 0 || bidSize > 0)) return;   // mid shown; rows need step + at least one side sized
                 int n = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), 1)));
                 for (int i = 0; i < Order.MAX_LEVELS; i++) {
-                    if (i < n) {
-                        askRows[i][0].setText(trimSig(quoted * (1 + (i + 1) * step / 100.0))); askRows[i][1].setText(trimSig(size));
-                        bidRows[i][0].setText(trimSig(quoted * (1 - (i + 1) * step / 100.0))); bidRows[i][1].setText(trimSig(size));
-                    } else {   // blank rows beyond the chosen count so a lower level count REMOVES the extras
-                        askRows[i][0].setText(""); askRows[i][1].setText("");
-                        bidRows[i][0].setText(""); bidRows[i][1].setText("");
-                    }
+                    boolean askOn = i < n && askSize > 0, bidOn = i < n && bidSize > 0;   // blank a side whose size is 0 → single-sided
+                    askRows[i][0].setText(askOn ? trimSig(quoted * (1 + (i + 1) * step / 100.0)) : ""); askRows[i][1].setText(askOn ? trimSig(askSize) : "");
+                    bidRows[i][0].setText(bidOn ? trimSig(quoted * (1 - (i + 1) * step / 100.0)) : ""); bidRows[i][1].setText(bidOn ? trimSig(bidSize) : "");
                 }
                 pegAwaitFill[0] = false;
             } finally { filling[0] = false; }
@@ -1243,18 +1246,17 @@ public class MainActivity extends AppCompatActivity {
         // pause row updates rather than toasting on every character.
         final Runnable genManual = () -> {
             double mid = parseD(midE.getText().toString(), 0);
-            double step = parseD(stepE.getText().toString(), 0), size = parseD(sizeE.getText().toString(), 0);
-            if (mid <= 0 || step <= 0 || size <= 0) return;
+            double step = parseD(stepE.getText().toString(), 0);
+            double askSize = parseD(askSizeE.getText().toString(), 0), bidSize = parseD(bidSizeE.getText().toString(), 0);
+            if (mid <= 0 || step <= 0 || !(askSize > 0 || bidSize > 0)) return;
             filling[0] = true;
             try {
                 int n = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), 1)));
                 for (int i = 0; i < Order.MAX_LEVELS; i++) {
-                    if (i < n) {
-                        askRows[i][0].setText(trimSig(mid * (1 + (i + 1) * step / 100.0))); askRows[i][1].setText(trimSig(size));
-                        bidRows[i][0].setText(trimSig(mid * (1 - (i + 1) * step / 100.0))); bidRows[i][1].setText(trimSig(size));
-                    } else {   // blank rows beyond the chosen count so a lower level count REMOVES the extras
-                        askRows[i][0].setText(""); askRows[i][1].setText("");
-                        bidRows[i][0].setText(""); bidRows[i][1].setText("");
+                    boolean askOn = i < n && askSize > 0, bidOn = i < n && bidSize > 0;   // blank a side whose size is 0 → single-sided
+                    {
+                        askRows[i][0].setText(askOn ? trimSig(mid * (1 + (i + 1) * step / 100.0)) : ""); askRows[i][1].setText(askOn ? trimSig(askSize) : "");
+                        bidRows[i][0].setText(bidOn ? trimSig(mid * (1 - (i + 1) * step / 100.0)) : ""); bidRows[i][1].setText(bidOn ? trimSig(bidSize) : "");
                     }
                 }
             } finally { filling[0] = false; }
@@ -1273,7 +1275,7 @@ public class MainActivity extends AppCompatActivity {
         };
         TextWatcher gw = onChange(autoGen);
         midE.addTextChangedListener(gw); stepE.addTextChangedListener(gw);
-        sizeE.addTextChangedListener(gw); biasE.addTextChangedListener(gw);
+        askSizeE.addTextChangedListener(gw); bidSizeE.addTextChangedListener(gw); biasE.addTextChangedListener(gw);
         levelsE.addTextChangedListener(gw);   // changing the level count re-fills the rows (blanks the extras)
 
         modalOpen = true;
@@ -1294,14 +1296,18 @@ public class MainActivity extends AppCompatActivity {
                     // Persist the auto-MM peg config (SwapService republishes from the same prefs). Step/size are
                     // the quick-generate fields — the peg reuses them as its ladder parameters.
                     boolean pegOn = pegSw.isChecked();
-                    double pStep = parseD(stepE.getText().toString(), 0), pSize = parseD(sizeE.getText().toString(), 0);
-                    if (pegOn && (pStep <= 0 || pSize <= 0)) { pegOn = false; toast("Peg needs a step % and size — saved with peg OFF"); }
+                    double pStep = parseD(stepE.getText().toString(), 0);
+                    double pAskSize = parseD(askSizeE.getText().toString(), 0), pBidSize = parseD(bidSizeE.getText().toString(), 0);
+                    if (pegOn && (pStep <= 0 || !(pAskSize > 0 || pBidSize > 0))) { pegOn = false; toast("Peg needs a step % and an ask or bid size — saved with peg OFF"); }
                     double pBias = Math.max(-20, Math.min(20, parseD(biasE.getText().toString(), 0)));
                     double pRep = Math.max(0.1, parseD(repE.getText().toString(), 1));
                     int pLevels = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), 1)));
+                    double pSize = Math.max(pAskSize, pBidSize);   // legacy P_SIZE fallback (older builds read one shared size)
                     prefs.edit().putBoolean(PriceOracle.P_ENABLE, pegOn)
                             .putString(PriceOracle.P_STEP, pStep > 0 ? trimSig(pStep) : "")
                             .putString(PriceOracle.P_SIZE, pSize > 0 ? trimSig(pSize) : "")
+                            .putString(PriceOracle.P_ASK_SIZE, pAskSize > 0 ? trimSig(pAskSize) : "")
+                            .putString(PriceOracle.P_BID_SIZE, pBidSize > 0 ? trimSig(pBidSize) : "")
                             .putString(PriceOracle.P_LEVELS, String.valueOf(pLevels))
                             .putString(PriceOracle.P_BIAS, pBias != 0 ? trimSig(pBias) : "")
                             .putString(PriceOracle.P_REPRICE, trimSig(pRep))
@@ -2409,7 +2415,7 @@ public class MainActivity extends AppCompatActivity {
      */
     private SweepPlan buildSweepPlan(boolean sell, String targetStr, double slippage) {
         final String sym = "USDT";
-        final double EPS = 1e-9;
+        final double EPS = 1e-9, GRAIN = 1e-6;
         SweepPlan plan = new SweepPlan(sell);
         plan.slippagePct = slippage * 100;
         double target = parseD(targetStr, 0);   // mxUSDT to sell (sell) or mxUSDT to buy (buy)
@@ -2421,6 +2427,7 @@ public class MainActivity extends AppCompatActivity {
         java.util.Map<Order, Double> remMinima = new java.util.HashMap<>();   // maker's remaining mxUSDT balance
         double remaining = target;                                           // mxUSDT left to fill
         double bestPrice = 0;                                                // first leg actually taken = the slippage anchor
+        boolean skippedForMin = false;                                       // ≥1 maker skipped ONLY because the amount was below its min
 
         for (Object[] row : aggSide(sym, sell, true)) {
             if (plan.legs.size() >= Order.MAX_LEVELS) { plan.stopReason = "leg-cap"; plan.partial = true; break; }
@@ -2451,9 +2458,9 @@ public class MainActivity extends AppCompatActivity {
             double takeMinima = Math.min(capMinima, remaining);
             if (takeMinima <= EPS) continue;
 
-            if (mn > 0 && takeMinima < mn - EPS) {   // never emit a sub-min leg (the maker would auto-decline)
-                if (remaining < mn - EPS) { plan.stopReason = "below-min"; plan.partial = true; break; }
-                continue;   // this level can't honor its own maker's min → skip it, try deeper
+            if (mn > 0 && takeMinima < mn - GRAIN) {   // this maker's min can't be met here → skip only IT, NEVER break the
+                skippedForMin = true;                  // sweep: rows are best-price-first, so a front maker with a big min
+                continue;                              // must not veto deeper, lower-min makers who'd happily fill the taker.
             }
 
             String minimaStr = legMinima(takeMinima);
@@ -2463,7 +2470,7 @@ public class MainActivity extends AppCompatActivity {
             if (usdtStr == null) continue;
             SweepLeg leg = new SweepLeg(maker, price, minimaStr, usdtStr);
             if (leg.minimaD <= EPS || leg.usdtD <= EPS) continue;
-            if (mn > 0 && leg.minimaD < mn - EPS) continue;   // rounding pushed this sliver below the maker's min — skip
+            if (mn > 0 && leg.minimaD < mn - EPS) { skippedForMin = true; continue; }   // grain floor slipped below min — skip (strict: never emit a leg the maker auto-declines)
 
             if (bestPrice <= 0) bestPrice = price;   // anchor slippage on the FIRST leg actually taken (best fillable)
             plan.legs.add(leg);
@@ -2476,6 +2483,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         if (remaining > dust) plan.partial = true;
+        if (plan.legs.isEmpty() && skippedForMin && "filled".equals(plan.stopReason)) plan.stopReason = "below-min";   // nothing filled ONLY because every maker's min exceeded the amount
         if (plan.partial && "filled".equals(plan.stopReason)) plan.stopReason = "book-exhausted";
         plan.avgPrice = plan.filledMinima > 0 ? plan.totalUsdt / plan.filledMinima : 0;
         return plan;
