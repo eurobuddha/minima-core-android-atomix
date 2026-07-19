@@ -260,7 +260,7 @@ public final class SwapEngine {
                         db.insertSecret(hash, secret);
                         db.insertMyHtlc(hash, buyTokenAmount, reqToken);
                         SwapDb.Swap s = baseSwap(hash, "INITIATOR", "MINIMA_TO_ERC20",
-                                "mxUSDT", sellMinima, tokenSymbol, buyTokenAmount, maker.ethAddress);
+                                com.eurobuddha.atomix.TradingContext.active().coinLabel, sellMinima, tokenSymbol, buyTokenAmount, maker.ethAddress);
                         s.myTimelock = timelock; s.myLegIsMinima = true; s.status = SwapDb.ST_STARTED;
                         db.upsertSwap(s);
                         notifier.onSwapsChanged();
@@ -329,7 +329,7 @@ public final class SwapEngine {
                             db.insertSecret(hash, secret);
                             db.insertMyHtlc(hash, reqMinima, "minima");
                             SwapDb.Swap s = baseSwap(hash, "INITIATOR", "ERC20_TO_MINIMA",
-                                    tokenSymbol, sellTokenAmount, "mxUSDT", reqMinima, maker.minimaPublicKey);
+                                    tokenSymbol, sellTokenAmount, com.eurobuddha.atomix.TradingContext.active().coinLabel, reqMinima, maker.minimaPublicKey);
                             s.myTimelock = timelock; s.myLegIsMinima = false; s.status = SwapDb.ST_STARTED;
                             s.contractId = EthHtlc.contractId(hash);
                             db.upsertSwap(s);
@@ -562,8 +562,8 @@ public final class SwapEngine {
         return out;
     }
 
-    /** Port of _checkCanSwapCoin: I am the receiver(state[4]) of a Minima HTLC coin. */
-    private void checkCanSwapCoin(JSONObject coin, int block) {
+    /** Port of _checkCanSwapCoin: I am the receiver(state[4]) of a Minima HTLC coin. (package-private for tests) */
+    void checkCanSwapCoin(JSONObject coin, int block) {
         String hash = MinimaHtlc.stateAt(coin, 5);
         if (hash.isEmpty()) return;
         int timelock = parseInt(MinimaHtlc.stateAt(coin, 3));
@@ -572,9 +572,18 @@ public final class SwapEngine {
 
         if (secret != null) {
             // I know the secret → claim this coin (reveals it via the notify coin).
+            // FUND-SAFETY (backport from atomix-mds): the coin locked to me MUST be the currency I'm buying — a
+            // taker's reqToken is the currency-agnostic literal 'minima', so amountTokenOk can't catch a maker
+            // who locks a WORTHLESS coloured token of the right AMOUNT. Verify the coin's OWN tokenid against
+            // the swap's buy-currency before revealing my secret (an honest maker always locks the right token).
+            String expTok = expectedTokenId(db.getSwap(hash));
+            if (!expTok.equalsIgnoreCase(coin.optString("tokenid", "0x00"))) {
+                logMismatchOnce(hash, "minima", "wrong token locked to me");
+                return;
+            }
             String[] req = db.getRequest(hash);
             if (req != null && !amountTokenOk(req, MinimaHtlc.coinAmount(coin), reqTokenAddr, false)) {
-                db.logEvent(hash, SwapDb.EV_COLLECT, "minima", "0", "counterparty amount/token mismatch");
+                logMismatchOnce(hash, "minima", "counterparty amount/token mismatch");
                 return;
             }
             // H1: SELF-HEALING gate (reuses the generic ethAttempt/ethRetryDue retry-window from F1, keyed
@@ -665,7 +674,7 @@ public final class SwapEngine {
             // genuine pre-mine failure still retries; a mined-but-lost lock is dup-guarded by the contract.
             ui.post(() -> {
                 SwapDb.Swap s = baseSwap(hash, "RESPONDER", "MINIMA_TO_ERC20",
-                        token.symbol, tokenHuman, "mxUSDT", reqMinimaHuman, receiverEth);
+                        token.symbol, tokenHuman, com.eurobuddha.atomix.TradingContext.active().coinLabel, reqMinimaHuman, receiverEth);
                 s.myTimelock = timelock; s.myLegIsMinima = false; s.contractId = EthHtlc.contractId(hash);
                 s.status = SwapDb.ST_LOCKED;
                 db.upsertSwap(s);
@@ -803,7 +812,7 @@ public final class SwapEngine {
             if (req != null) {
                 String tokenHuman = EthWallet.format(gc.amount, decimalsOf(gc.tokenContract), 18);
                 if (!amountTokenOk(req, tokenHuman, gc.tokenContract, true)) {
-                    db.logEvent(hash, SwapDb.EV_COLLECT, "ETH:" + gc.tokenContract, "0", "counterparty amount/token mismatch");
+                    logMismatchOnce(hash, "ETH:" + gc.tokenContract, "counterparty amount/token mismatch");
                     return;
                 }
             }
@@ -911,6 +920,18 @@ public final class SwapEngine {
         return chain;
     }
 
+    // ETH chain time for the ADVISORY responder half-window guard (backport from atomix-mds 0.1.2): prefer the
+    // clock the vault actually enforces; a slow DEVICE clock inflated the taker's apparent remaining window and
+    // eroded the 2× safety margin. Cached ~30s (the guard runs per contract per poll); device-clock fallback on
+    // an RPC failure — never worse than the old behavior. NOT for lock timelocks (those use ethChainNowStrict).
+    private long ethNowCache = 0, ethNowCacheAt = 0;
+    private long ethNowSoft() {
+        long dev = nowUnix();
+        if (ethNowCacheAt > 0 && dev - ethNowCacheAt < 30) return ethNowCache + (dev - ethNowCacheAt);
+        try { long chain = rpc.latestBlockTimestamp(); ethNowCache = chain; ethNowCacheAt = dev; return chain; }
+        catch (Exception e) { return dev; }
+    }
+
 
     /** Port of _checkCanCollectETHCoin: I am the receiver of an ETH HTLC contract. */
     private void checkCanCollectEth(EthHtlc eth, EthHtlc.Contract c, int minimaBlock) throws Exception {
@@ -922,7 +943,7 @@ public final class SwapEngine {
             if (req != null) {
                 String tokenHuman = EthWallet.format(c.amount, decimalsOf(c.tokenContract), 18);
                 if (!amountTokenOk(req, tokenHuman, c.tokenContract, true)) {
-                    db.logEvent(hash, SwapDb.EV_COLLECT, "ETH:" + c.tokenContract, "0", "counterparty amount/token mismatch");
+                    logMismatchOnce(hash, "ETH:" + c.tokenContract, "counterparty amount/token mismatch");
                     return;
                 }
             }
@@ -939,7 +960,7 @@ public final class SwapEngine {
         // lockMinimaCounterLeg records the swap row BEFORE broadcast, so a row here means this hash is already
         // being (or was) locked — never re-lock it (the mxUSDT leg has no on-chain hash-uniqueness).
         if (db.getSwap(hash) != null) return;
-        if (c.timelock - nowUnix() < CP_SECS_CHECK) { if (!c.otc) declineNote(hash, "their USDT lock is too close to its timeout"); return; }
+        if (c.timelock - ethNowSoft() < CP_SECS_CHECK) { if (!c.otc) declineNote(hash, "their USDT lock is too close to its timeout"); return; }
         if (c.otc) {
             // OTC: the ladder gate doesn't apply. Respond ONLY if I'm the LP of an AGREED deal whose on-chain lock
             // EXACTLY matches the agreed terms (otcVerifyBuy = the fund-safety boundary). Then use the SAME dedup +
@@ -1020,7 +1041,7 @@ public final class SwapEngine {
             EthNet.Token tk = net.tokenByAddress(c.tokenContract);
             String sym = tk == null ? "token" : tk.symbol;
             SwapDb.Swap s = baseSwap(hash, "RESPONDER", "ERC20_TO_MINIMA",
-                    "mxUSDT", reqMinimaHuman, sym, EthWallet.format(c.amount, decimalsOf(c.tokenContract), 18),
+                    com.eurobuddha.atomix.TradingContext.active().coinLabel, reqMinimaHuman, sym, EthWallet.format(c.amount, decimalsOf(c.tokenContract), 18),
                     receiverPubkey);
             s.myTimelock = timelock; s.myLegIsMinima = true; s.contractId = c.contractId;
             s.status = SwapDb.ST_LOCKED;
@@ -1172,6 +1193,25 @@ public final class SwapEngine {
         EthNet.Token tk = net.tokenByAddress(tokenAddr);
         if (o == null || tk == null) return null;
         return o.pairs.get(tk.symbol);
+    }
+
+    /** Log a counterparty amount/token mismatch ONCE, as EV_MISMATCH — NEVER as EV_COLLECT (backport from
+     *  atomix-mds 0.1.3). The claim gates on {@code haveCollect}, so the old EV_COLLECT log here let ANY third
+     *  party permanently poison a victim's REAL claim with one hostile dust coin carrying the victim's active
+     *  hash + receiver key and a wrong amount/token — a guaranteed mutual-refund grief for pennies. The
+     *  once-guard also stops the per-poll event-table spam the old unguarded log produced. */
+    void logMismatchOnce(String hash, String leg, String note) {
+        if (!db.haveMismatch(hash)) db.logEvent(hash, SwapDb.EV_MISMATCH, leg, "0", note);
+    }
+
+    /** The tokenid of the currency a swap BOUGHT (from its buyToken label) — verifies the received Minima coin
+     *  (backport from atomix-mds; fund gate: a maker could otherwise lock a WORTHLESS coloured token of the
+     *  right AMOUNT, and amountTokenOk's currency-agnostic 'minima' literal would pass it). */
+    static String expectedTokenId(SwapDb.Swap sw) {
+        if (sw != null && sw.buyToken != null)
+            for (com.eurobuddha.atomix.TradingContext c : com.eurobuddha.atomix.TradingContext.values())
+                if (c.coinLabel.equals(sw.buyToken)) return c.tokenId;
+        return com.eurobuddha.atomix.TradingContext.active().tokenId;
     }
 
     /** Initiator's check that the counterparty locked at least what I asked, in the right token. */
