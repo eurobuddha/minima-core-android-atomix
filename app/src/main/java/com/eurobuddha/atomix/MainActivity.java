@@ -53,6 +53,7 @@ import com.eurobuddha.comms.QrUtil;
 import com.eurobuddha.comms.Sodium;
 import com.eurobuddha.atomix.eth.EthNet;
 import com.eurobuddha.atomix.eth.EthRpc;
+import com.eurobuddha.atomix.eth.EthSend;
 import com.eurobuddha.atomix.eth.EthWallet;
 import com.eurobuddha.atomix.swap.MinimaHtlc;
 import com.eurobuddha.atomix.swap.Order;
@@ -150,6 +151,8 @@ public class MainActivity extends AppCompatActivity {
     private String ethAddr = null;
     private String ethErr = null;
     private String ethBal = "…";
+    private BigInteger ethWeiRaw = BigInteger.ZERO;    // RAW wei — manual-send validation (never display strings)
+    private BigInteger usdtRawBal = BigInteger.ZERO;   // RAW USDT (6dp units)
     private final LinkedHashMap<String, String> tokenBals = new LinkedHashMap<>();
 
     // Balance-pulse feedback: bounce the headline balances when a swap NEWLY completes (incl. while backgrounded).
@@ -723,19 +726,25 @@ public class MainActivity extends AppCompatActivity {
         io.execute(() -> {
             String wei, err = null;
             LinkedHashMap<String, String> toks = new LinkedHashMap<>();
+            BigInteger rawWei = null, rawUsdt = null;   // RAW balances — send validation never uses display strings
             try {
                 BigInteger w = wallet.ethBalanceWei(r);
+                rawWei = w;
                 wei = EthWallet.format(w, 18, 6) + " ETH";
                 for (EthNet.Token tk : n.tokens) {
                     try {
                         BigInteger raw = wallet.erc20BalanceRaw(r, tk.address);
+                        if ("USDT".equals(tk.symbol)) rawUsdt = raw;
                         toks.put(tk.symbol, EthWallet.format(raw, tk.decimals, 6));
                     } catch (Exception e) { toks.put(tk.symbol, "—"); }
                 }
             } catch (Exception e) { wei = "—"; err = e.getMessage(); }
             final String fwei = wei, ferr = err;
+            final BigInteger fRawWei = rawWei, fRawUsdt = rawUsdt;
             ui.post(() -> {
                 if (n != net) return;
+                if (fRawWei != null) ethWeiRaw = fRawWei;
+                if (fRawUsdt != null) usdtRawBal = fRawUsdt;
                 ethBal = fwei;
                 tokenBals.clear(); tokenBals.putAll(toks);
                 String usdt = toks.get("USDT");
@@ -2545,12 +2554,15 @@ public class MainActivity extends AppCompatActivity {
             refreshBal.setOnClickListener(v -> { toast("Refreshing balances…"); refreshBalances(true); });
             TextView fund = Design.pill(this, "⤓  Fund / QR", Design.SURFACE2(), Design.TEXT());
             fund.setOnClickListener(v -> receiveDialog());
+            TextView send = Design.pill(this, "↑  Send", Design.SURFACE2(), Design.TEXT());
+            send.setOnClickListener(v -> sendDialog());
             TextView exportKey = Design.pill(this, "🔑  Export key", Design.SURFACE2(), Design.DIM());
             exportKey.setOnClickListener(v -> exportKeyDialog());
             LinearLayout.LayoutParams gap = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             gap.rightMargin = dp(8);
             walletActions.addView(refreshBal, gap);
             walletActions.addView(fund, gap);
+            walletActions.addView(send, gap);
             walletActions.addView(exportKey);
             col.addView(walletActions);
         }
@@ -2646,10 +2658,10 @@ public class MainActivity extends AppCompatActivity {
     private void showWelcome() {
         prefs.edit().putBoolean("seen_welcome", true).apply();
         dialog()
-                .setTitle("Welcome to usdtSwap")
+                .setTitle("Welcome to AtomiX")
                 .setMessage("Swap " + ccy() + " ⇄ USDT trustlessly across chains — no middleman ever holds your funds.\n\n"
                         + "To trade you'll need:\n"
-                        + "•  Minima Core running, with usdtSwap enabled in Apps\n"
+                        + "•  Minima Core running, with AtomiX enabled in Apps\n"
                         + "•  Some " + ccy() + " to sell — or USDT plus a little ETH (for gas) to buy " + ccy() + "\n\n"
                         + "Your keys are derived from your Minima node seed, so it's the same wallet on any device.\n\n"
                         + "Tabs:  Swap (quick trade)  ·  Wallet (your money)  ·  Activity (your swaps)  ·  "
@@ -2778,7 +2790,7 @@ public class MainActivity extends AppCompatActivity {
         col.addView(stats);
 
         if (recent.isEmpty()) {
-            col.addView(dimNote("No market trades observed yet. usdtSwap records USDT swaps network-wide as they happen — it can't backfill, so history builds from now on."));
+            col.addView(dimNote("No market trades observed yet. AtomiX records " + ccy() + " swaps network-wide as they happen — it can't backfill, so history builds from now on."));
             return;
         }
         for (SwapDb.MarketTrade t : recent) col.addView(tradeRow(t));
@@ -3258,6 +3270,108 @@ public class MainActivity extends AppCompatActivity {
                 .setView(wrapScroll(box))
                 .setPositiveButton("Copy address", (d, w) -> copy(ethAddr, "ETH address copied"))
                 .setNegativeButton("Close", null)
+                .show();
+    }
+
+    // ---- manual Send (parity twin of the MDS wallet's Send — user decision 2026-07-19: both apps have it) ----
+    private void sendDialog() {
+        if (!wallet.ready()) { toast("ETH wallet not ready yet"); return; }
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(12), dp(20), dp(4));
+
+        final boolean[] ethSel = { true };
+        LinearLayout toggles = new LinearLayout(this);
+        toggles.setOrientation(LinearLayout.HORIZONTAL);
+        final TextView ethPill = Design.pill(this, "ETH", Design.ACCENT(), Design.ON_ACCENT());
+        final TextView usdtPill = Design.pill(this, "USDT", Design.SURFACE2(), Design.DIM());
+        Runnable restyle = () -> {
+            ((android.graphics.drawable.GradientDrawable) ethPill.getBackground()).setColor(ethSel[0] ? Design.ACCENT() : Design.SURFACE2());
+            ethPill.setTextColor(ethSel[0] ? Design.ON_ACCENT() : Design.DIM());
+            ((android.graphics.drawable.GradientDrawable) usdtPill.getBackground()).setColor(!ethSel[0] ? Design.ACCENT() : Design.SURFACE2());
+            usdtPill.setTextColor(!ethSel[0] ? Design.ON_ACCENT() : Design.DIM());
+        };
+        ethPill.setOnClickListener(v -> { ethSel[0] = true; restyle.run(); });
+        usdtPill.setOnClickListener(v -> { ethSel[0] = false; restyle.run(); });
+        LinearLayout.LayoutParams tgap = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        tgap.rightMargin = dp(8);
+        toggles.addView(ethPill, tgap);
+        toggles.addView(usdtPill);
+        box.addView(toggles);
+
+        final EditText toE = new EditText(this);
+        toE.setHint("0x… recipient"); toE.setTextColor(Design.TEXT()); toE.setTextSize(13f); toE.setTypeface(Design.mono());
+        toE.setSingleLine(true);
+        box.addView(toE);
+
+        LinearLayout amtRow = new LinearLayout(this);
+        amtRow.setOrientation(LinearLayout.HORIZONTAL); amtRow.setGravity(Gravity.CENTER_VERTICAL);
+        final EditText amtE = new EditText(this);
+        decimalInput(amtE);
+        amtE.setHint("0.00"); amtE.setTextColor(Design.TEXT()); amtE.setTextSize(17f); amtE.setTypeface(Design.mono());
+        TextView maxB = Design.pill(this, "Max", Design.SURFACE2(), Design.TEXT());
+        maxB.setOnClickListener(v -> io.execute(() -> {
+            try {
+                if (ethSel[0]) {
+                    BigInteger gp = EthRpc.hexToBig(rpc.callStr("eth_gasPrice", new org.json.JSONArray()));
+                    final String m = EthWallet.format(EthSend.maxEthSendWei(ethWeiRaw, gp), 18, 8);
+                    ui.post(() -> amtE.setText(m));
+                } else {
+                    final String m = EthWallet.format(usdtRawBal, net.tokens[0].decimals, 6);
+                    ui.post(() -> amtE.setText(m));
+                }
+            } catch (Exception e) { ui.post(() -> toast("Could not read gas price — try again")); }
+        }));
+        amtRow.addView(amtE, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        amtRow.addView(maxB);
+        box.addView(amtRow);
+
+        TextView warn = new TextView(this);
+        warn.setText("Sends are irreversible. Double-check the address.");
+        warn.setTextColor(Design.DIM()); warn.setTextSize(12f); warn.setPadding(0, dp(8), 0, 0);
+        box.addView(warn);
+
+        // Review handler attached post-show so an invalid form shows its error WITHOUT dismissing the dialog.
+        final android.app.AlertDialog d = dialog()
+                .setTitle("Send from this wallet")
+                .setView(wrapScroll(box))
+                .setPositiveButton("Review", null)
+                .setNegativeButton("Cancel", null)
+                .show();
+        d.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            final boolean eth = ethSel[0];
+            final String to = toE.getText().toString().trim(), amt = amtE.getText().toString().trim();
+            io.execute(() -> {
+                try {
+                    BigInteger gp = EthRpc.hexToBig(rpc.callStr("eth_gasPrice", new org.json.JSONArray()));
+                    final String err = EthSend.checkSend(eth, to, amt, ethWeiRaw, usdtRawBal, net.tokens[0].decimals, gp);
+                    if (err != null) { ui.post(() -> toast(err)); return; }
+                    final String fee = EthWallet.format(
+                            EthSend.gasReserveWei(gp, eth ? EthSend.GAS_ETH : EthSend.GAS_ERC20), 18, 8);
+                    ui.post(() -> { d.dismiss(); sendReviewDialog(eth, to, amt, fee); });
+                } catch (Exception e) { ui.post(() -> toast("Could not read gas price — try again")); }
+            });
+        });
+    }
+
+    private void sendReviewDialog(boolean eth, String to, String amt, String feeEth) {
+        dialog()
+                .setTitle("Review — Send " + (eth ? "ETH" : "USDT"))
+                .setMessage("Send  " + amt + " " + (eth ? "ETH" : "USDT") + "\nTo  " + to
+                        + "\n\nNetwork fee  ≈ " + feeEth + " ETH\nThis cannot be undone.")
+                .setPositiveButton("Send now", (dd, w) -> io.execute(() -> {
+                    try {
+                        String tx = eth
+                                ? EthSend.sendEth(rpc, wallet.creds(), net.chainId, to, EthSend.parseUnits(amt, 18))
+                                : EthSend.sendErc20(rpc, wallet.creds(), net.chainId, net.tokens[0].address, to,
+                                        EthSend.parseUnits(amt, net.tokens[0].decimals));
+                        SwapLog.d("manual send " + (eth ? "ETH" : "USDT") + " " + amt + " tx=" + tx);
+                        ui.post(() -> { toast("Sent — tx " + shortAddr(tx) + " (balance updates once mined)"); fetchEthBalances(true); });
+                    } catch (Exception e) {
+                        ui.post(() -> toast("Send failed: " + e.getMessage()));
+                    }
+                }))
+                .setNegativeButton("Back", (dd, w) -> sendDialog())
                 .show();
     }
 
