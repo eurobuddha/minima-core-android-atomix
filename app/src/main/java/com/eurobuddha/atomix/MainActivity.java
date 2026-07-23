@@ -31,6 +31,13 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.SwitchCompat;
 import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import android.net.Uri;
+import java.io.OutputStream;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -127,6 +134,7 @@ public class MainActivity extends AppCompatActivity {
     private String orderStatus = null;
     private CommsScanner takeScanner;   // maker side: receives buyers' hashlock handshakes
     private int historyTab = 0;         // Activity sub-tab: 0 = my swaps, 1 = market
+    private ActivityResultLauncher<String> csvLauncher;   // Activity → Export CSV (SAF CreateDocument; no FileProvider/permission)
     // ---- tabs ----
     private static final int TAB_SWAP = 0, TAB_WALLET = 1, TAB_ACTIVITY = 2, TAB_MARKET = 3, TAB_OTC = 4;
     private static final String[] TAB_LABELS = {"Swap", "Wallet", "Activity", "Market", "OTC"};
@@ -248,6 +256,9 @@ public class MainActivity extends AppCompatActivity {
         net = EthNet.MAINNET;
         rpc = new EthRpc(rpcUrl(net));
         db = new SwapDb(this);
+        // SAF file-picker for the Activity → Export CSV button (registered in onCreate, before the activity starts).
+        csvLauncher = registerForActivityResult(new ActivityResultContracts.CreateDocument("text/csv"),
+                uri -> { if (uri != null) doExportCsv(uri); });
 
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -2732,6 +2743,12 @@ public class MainActivity extends AppCompatActivity {
         TextView t1 = Design.pill(this, "Market history", historyTab == 1 ? Design.ACCENT() : Design.SURFACE2(), historyTab == 1 ? Design.ON_ACCENT() : Design.DIM());
         t1.setOnClickListener(v -> openHistory(1));
         tabs.addView(t0, gap); tabs.addView(t1);
+        // Export CSV — all your swaps (maker + taker), one file. Sits with the My-swaps history.
+        LinearLayout.LayoutParams gapx = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        gapx.leftMargin = dp(8);
+        TextView tex = Design.pill(this, "⬇ Export CSV", Design.SURFACE2(), Design.DIM());
+        tex.setOnClickListener(v -> exportSwapsCsv());
+        tabs.addView(tex, gapx);
         col.addView(tabs);
 
         if (historyTab == 0) mySwapsList(col); else marketView(col);
@@ -3718,6 +3735,81 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private int dp(int v) { return Design.dp(this, v); }
+    // ===================== Export trading history to CSV (maker + taker) =====================
+    private void exportSwapsCsv() {
+        if (db == null || db.allSwaps().isEmpty()) { toast("No swaps to export"); return; }
+        csvLauncher.launch("atomix-trades.csv");
+    }
+
+    /** One CSV of ALL my swaps, each row tagged Maker (RESPONDER) / Taker (INITIATOR), with the on-chain leg tx ids
+     *  joined from the events log. Same columns/format as the desktop + MDS peers. Runs off the UI thread. */
+    private void doExportCsv(Uri uri) {
+        new Thread(() -> {
+            try {
+                java.util.List<SwapDb.Swap> all = db.allSwaps();
+                SimpleDateFormat fmt = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ENGLISH);
+                fmt.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                StringBuilder sb = new StringBuilder(
+                    "Date,Role,Direction,Sold Amount,Sold Token,Bought Amount,Bought Token,Price (USDT/MINIMA),Counterparty,Status,Contract Id,Minima Tx,Eth Tx\r\n");
+                for (SwapDb.Swap s : all) {
+                    java.util.List<SwapDb.Event> ev = db.getEvents(s.hash);
+                    String date = s.created > 0 ? fmt.format(new Date(s.created)) : "";
+                    String[] cells = {
+                        date, roleLabel(s.role), dirLabel(s.direction),
+                        s.sellAmount, tokLabel(s.sellToken), s.buyAmount, tokLabel(s.buyToken), priceUsdtPerMinima(s),
+                        s.counterparty, s.status == null ? "" : s.status.toLowerCase(Locale.ENGLISH),
+                        s.contractId, pickTx(ev, true), pickTx(ev, false)
+                    };
+                    for (int i = 0; i < cells.length; i++) { if (i > 0) sb.append(','); sb.append(csvCell(cells[i])); }
+                    sb.append("\r\n");
+                }
+                try (OutputStream os = getContentResolver().openOutputStream(uri)) {
+                    os.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+                }
+                final int n = all.size();
+                ui.post(() -> toast("Exported " + n + " trades to CSV"));
+            } catch (Exception e) {
+                ui.post(() -> toast("CSV export failed: " + (e.getMessage() == null ? "error" : e.getMessage())));
+            }
+        }).start();
+    }
+
+    private static String roleLabel(String r) { return "RESPONDER".equals(r) ? "Maker" : ("INITIATOR".equals(r) ? "Taker" : (r == null ? "" : r)); }
+    private static String dirLabel(String d) { return "MINIMA_TO_ERC20".equals(d) ? "Sell MINIMA" : ("ERC20_TO_MINIMA".equals(d) ? "Buy MINIMA" : (d == null ? "" : d)); }
+    private static String tokLabel(String t) {
+        if (t == null) return "";
+        String l = t.toLowerCase(Locale.ENGLISH);
+        if (l.equals("0x00")) return "MINIMA";
+        if (l.contains("7d39745")) return "mxUSDT";
+        return t;
+    }
+    /** USDT per MINIMA, comparable across both directions; blank if a leg amount is missing/zero. */
+    private static String priceUsdtPerMinima(SwapDb.Swap s) {
+        double sell, buy;
+        try { sell = Double.parseDouble(s.sellAmount); buy = Double.parseDouble(s.buyAmount); } catch (Exception e) { return ""; }
+        if (!(sell > 0) || !(buy > 0)) return "";
+        double p = "MINIMA_TO_ERC20".equals(s.direction) ? buy / sell : ("ERC20_TO_MINIMA".equals(s.direction) ? sell / buy : 0);
+        if (!(p > 0)) return "";
+        return new java.math.BigDecimal(p).round(new java.math.MathContext(8)).stripTrailingZeros().toPlainString();
+    }
+    private static boolean isTxId(String v) { return v != null && v.matches("0x[0-9a-fA-F]{16,}"); }
+    /** Join the real on-chain tx ids for one leg: minima leg logs token 'minima'; ETH leg logs 'ETH:<addr>'.
+     *  settle logs the ETH collect/expire with note "confirmed on-chain" (not a hash) — filtered out by isTxId. */
+    private static String pickTx(java.util.List<SwapDb.Event> ev, boolean minimaLeg) {
+        java.util.List<String> seen = new ArrayList<>();
+        for (SwapDb.Event e : ev) {
+            boolean match = minimaLeg ? "minima".equals(e.token) : (e.token != null && e.token.startsWith("ETH"));
+            if (match && isTxId(e.note) && !seen.contains(e.note)) seen.add(e.note);
+        }
+        return android.text.TextUtils.join(";", seen);
+    }
+    /** CSV cell: always double-quoted; neutralize spreadsheet formula-injection (leading = + - @ TAB CR → prefix '). */
+    private static String csvCell(String s) {
+        if (s == null) s = "";
+        if (s.length() > 0 && "=+-@\t\r".indexOf(s.charAt(0)) >= 0) s = "'" + s;
+        return "\"" + s.replace("\"", "\"\"") + "\"";
+    }
+
     private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
 
     // ---- notifications ----
