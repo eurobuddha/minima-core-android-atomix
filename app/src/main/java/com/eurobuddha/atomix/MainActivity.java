@@ -760,7 +760,7 @@ public class MainActivity extends AppCompatActivity {
                 tokenBals.clear(); tokenBals.putAll(toks);
                 String usdt = toks.get("USDT");
                 if (usdt != null) prefs.edit().putString("usdt_avail", usdt).apply();   // for the background republish
-                if (ferr != null) ethErr = ferr;
+                ethErr = ferr;   // set AND clear — a transient RPC/DNS blip must not pin the banner until restart
                 render();   // fires any pending balance pulse via firePendingPulses() when the Wallet tab is showing
             });
         });
