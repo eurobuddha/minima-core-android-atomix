@@ -91,14 +91,22 @@ public final class SwapEngine {
     private volatile OtcDb otcDb;                   // OTC deal store — the OTC responder's agreed-terms gate
 
     private volatile long lastEthScanned = -1;      // ETH block bookmark (New-contract discovery)
-    private final Set<String> inflight = Collections.synchronizedSet(new HashSet<>());
+    // STATIC, like CP_LOCKING below. MainActivity and SwapService each construct their OWN SwapEngine in
+    // the SAME process, so an instance-scoped guard let both engines drive the same swap at once — two
+    // refunds/claims of one coin, built as two DIFFERENT transactions, both signed. CP_LOCKING was made
+    // process-wide for exactly this reason on the counter-leg path; the rest of the markers ("refundM:",
+    // "claimM:", "cpEth:", "wdEth:") need the same treatment.
+    private static final Set<String> inflight = Collections.synchronizedSet(new HashSet<>());
     private final Map<String, Long> approvePending = Collections.synchronizedMap(new HashMap<>());
     private final Set<String> incoming = Collections.synchronizedSet(new HashSet<>());   // hashlocks announced by a buyer's handshake
     private final Set<String> declined = Collections.synchronizedSet(new HashSet<>());   // handshake buys we've already notified as declined
     // F1: last broadcast time (unix secs) of an ETH terminal action, keyed "wdEth:"/"refundE:"+hash. Gates
     // re-broadcast to ≥ ETH_RETRY_SECS apart. In-memory only: a restart re-drives terminal state from the
     // on-chain withdrawn/refunded flags anyway, so losing these timestamps just allows an immediate retry.
-    private final Map<String, Long> ethAttempt = new java.util.concurrent.ConcurrentHashMap<>();
+    // STATIC for the same reason as `inflight`: with one map per engine the effective retry interval
+    // HALVED whenever the foreground and background engines were both alive, so a persistently failing
+    // claim re-signed twice as often. Each retry burns a one-time key leaf permanently.
+    private static final Map<String, Long> ethAttempt = new java.util.concurrent.ConcurrentHashMap<>();
     // H2: throttle the heavy market-history HTLC scan to at most every 5 min, and pause it while a claim is
     // pending (see poll()), so the single node command thread isn't starved when a claim is racing a timelock.
     private static final long MARKET_MIN_INTERVAL_MS = 5 * 60 * 1000;

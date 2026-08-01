@@ -67,9 +67,15 @@ public final class CommsTransport {
         }
     }
 
+    /**
+     * Behind {@link SignGate}: `send` signs internally, so it burns a one-time key leaf exactly like a
+     * txnsign sequence does. These publishes are the app's highest-frequency signer — one per order
+     * publish, OTC publish and tombstone — so leaving them ungated would have defeated the gate.
+     */
     private static void post(NodeApi node, String cmd, SendCb cb) {
-        node.cmd(cmd, new NodeApi.Cb() {
+        SignGate.submit(gate -> node.cmd(cmd, new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
+                gate.free();
                 // status:true = accepted; pending:true = queued via the pending app (node locked)
                 if (j.optBoolean("status", false) || j.optBoolean("pending", false)) {
                     JSONObject r = j.optJSONObject("response");
@@ -78,8 +84,8 @@ public final class CommsTransport {
                     cb.onFailed(j.optString("error", "the node rejected the send"));
                 }
             }
-            @Override public void onError(String message) { cb.onFailed(message); }
-        });
+            @Override public void onError(String message) { gate.free(); cb.onFailed(message); }
+        }));
     }
 
     private CommsTransport() {}

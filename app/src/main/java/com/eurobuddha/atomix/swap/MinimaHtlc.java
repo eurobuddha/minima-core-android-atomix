@@ -423,8 +423,20 @@ public final class MinimaHtlc {
         });
     }
 
+    /**
+     * Run a command sequence behind the {@link com.eurobuddha.comms.SignGate}, so this app never has two
+     * signing sequences in flight at once.
+     *
+     * Every sequence routed through here ends in a txnsign. Signing one key concurrently makes the node
+     * issue the SAME one-time leaf for two different transactions, which leaks that leaf's private key —
+     * confirmed on a live node, 7 of 64 keys. AtomiX is especially exposed: MainActivity and SwapService
+     * each build their own engine and MinimaHtlc, and the swap identity is deliberately pinned to a
+     * single key so the maker's published key stays constant.
+     */
     private void runSeq(List<String> cmds, Consumer<JSONObject> finalOk, Consumer<String> err) {
-        runSeqAt(cmds, 0, finalOk, err);
+        com.eurobuddha.comms.SignGate.submit(gate -> runSeqAt(cmds, 0,
+                r -> { gate.free(); finalOk.accept(r); },
+                e -> { gate.free(); err.accept(e); }));
     }
     private void runSeqAt(List<String> cmds, int i, Consumer<JSONObject> finalOk, Consumer<String> err) {
         cmd(cmds.get(i), resp -> {
