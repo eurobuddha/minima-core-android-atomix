@@ -56,6 +56,17 @@ public final class SwapEngine {
     public static final long CP_SECS                    = (TIMELOCK_SECS / 2) / 2;           // 1800
     private static final int  NOTIFY_SCAN_DEPTH         = 256;                               // bounded notify scan
     private static final int  HTLC_SCAN_DEPTH           = 256;                               // bounded HTLC coin scan
+    /** REFUND discovery only. The node's `coins depth:` is a walk-back over BLOCKS from the tip
+     *  (TxPoWSearcher.searchCoins: `if(depth++>zDepth) break;`), so HTLC_SCAN_DEPTH=256 made a coin invisible
+     *  ~3h33m after it was created — while the responder leg only becomes refundable 36 blocks in. Miss that
+     *  window (app closed, phone off, a wedged retry) and the coin was stranded for good: the engine never saw
+     *  it again, and there is no manual refund anywhere in the UI. Cost a real 35.014005 MINIMA lock.
+     *
+     *  1024 is the practical ceiling — MINIMA_CASCADE_START_DEPTH, past which the tree cascades and
+     *  `tip.getParent()` returns null, so a larger number buys nothing without MegaMMR (see scanExpired). The
+     *  hot path keeps 256: this depth is used ONLY by the DB-driven expired sweep, which fires per-hash and
+     *  only for a swap already known to be past its timelock, so the reply stays small and it is rare. */
+    static final int  REFUND_SCAN_DEPTH                 = 1024;   // package-private: asserted by RefundRetryTest
     // F1: an ETH withdraw/refund broadcast is only an ACK, not a mined receipt. We treat a swap as settled
     // ONLY when the contract's own withdrawn/refunded flag confirms it (read every cycle via getContract);
     // between broadcast and that confirmation we re-attempt no more often than this. Chosen > EthTx's 120 s
@@ -440,13 +451,22 @@ public final class SwapEngine {
 
             // ---- my leg ----
             if (s.myLegIsMinima) {
+                String myLeg = "• Your " + s.sellAmount + " " + s.sellToken + ": ";
                 if (myMin != null) {
                     int tl = parseInt(MinimaHtlc.stateAt(myMin, 3));
-                    L.add("• Your " + s.sellAmount + " mxUSDT: LOCKED — refundable at block " + tl
+                    L.add(myLeg + "LOCKED — refundable at block " + tl
                             + (block > 0 ? " (~" + Math.max(0, (tl - block)) * 50 / 60 + " min)" : ""));
+                } else if (SwapDb.ST_REFUNDED.equals(s.status)) {
+                    L.add(myLeg + "refunded");
+                } else if (SwapDb.ST_COMPLETE.equals(s.status)) {
+                    L.add(myLeg + "claimed by the counterparty (complete)");
                 } else {
-                    L.add("• Your " + s.sellAmount + " mxUSDT: not locked on-chain now — "
-                            + (SwapDb.ST_REFUNDED.equals(s.status) ? "refunded" : SwapDb.ST_COMPLETE.equals(s.status) ? "claimed by the counterparty (complete)" : "spent/claimed"));
+                    // NOT proof the coin is gone. This scan only walks back HTLC_SCAN_DEPTH blocks, so a coin
+                    // that is still fully locked reads as "not found" once it is older than that. Saying
+                    // "spent/claimed" here told a user their funds had moved when they had not.
+                    L.add(myLeg + "not found in the last " + HTLC_SCAN_DEPTH + " blocks — this does NOT mean it was"
+                            + " spent. A lock older than that is outside the scan; check the coin directly before"
+                            + " assuming anything.");
                 }
             } else {
                 boolean stillLocked = eth.canCollect(s.contractId);
@@ -555,6 +575,44 @@ public final class SwapEngine {
                 } catch (Exception ignore) {}
             }
         }, e -> {});
+        // The scan above only reaches HTLC_SCAN_DEPTH blocks back, so it stops finding my own expired locks long
+        // before they stop being refundable. Drive those from the DB instead — it has no depth window at all.
+        sweepExpiredMinima(block);
+    }
+
+    /** REFUND backstop, driven from the DB rather than from a bounded chain scan.
+     *
+     *  The `coins depth:` walk-back meant a coin I locked vanished from runMinimaChecks ~3h33m after creation,
+     *  while the refund only opens 36 blocks (responder) or 144 blocks (initiator) in. Anything that consumed
+     *  that window — phone off, app closed, a wedged retry — stranded the coin permanently, because discovery
+     *  and eligibility were both tied to the same short scan.
+     *
+     *  `swaps` knows every leg I locked and its absolute timelock, so eligibility is decided WITHOUT the chain,
+     *  exactly as runEthChecks already decides the ETH side from db.allSwaps(). Only once a swap is known to be
+     *  past its timelock do we go to the chain, per-hash and deep. That keeps the common case free: no active
+     *  expired lock means not a single extra node command.
+     *
+     *  This is a backstop, not a replacement — the shallow scan above still handles the fast path. */
+    void sweepExpiredMinima(int block) {   // (package-private for tests)
+        for (SwapDb.Swap s : db.allSwaps()) {
+            if (s == null || s.hash == null || !s.myLegIsMinima) continue;
+            if (SwapDb.ST_COMPLETE.equals(s.status) || SwapDb.ST_REFUNDED.equals(s.status)
+                    || SwapDb.ST_ERROR.equals(s.status)) continue;
+            if (s.myTimelock <= 0 || block <= s.myTimelock) continue;          // not refundable yet
+            if (db.haveCollectExpired(s.hash)) continue;                        // already refunded
+            if (!ethRetryDue("refundM:" + s.hash)) continue;                    // same self-healing window as the refund itself
+            final String hh = s.hash;
+            minima.scanHtlcByHashDeep(hh, 2, REFUND_SCAN_DEPTH, coins -> {
+                for (int i = 0; i < coins.length(); i++) {
+                    JSONObject coin = coins.optJSONObject(i);
+                    if (coin == null) continue;
+                    try {
+                        if (isMyOwnedKey(MinimaHtlc.stateAt(coin, 0)) && sameHash(MinimaHtlc.stateAt(coin, 5), hh))
+                            checkExpiredMinima(coin, block);
+                    } catch (Exception ignore) {}
+                }
+            }, e -> {});
+        }
     }
 
     /** Hashes of active swaps where I must CLAIM a mxUSDT counter-leg (my own leg is the ETH one): I hold the
@@ -641,20 +699,43 @@ public final class SwapEngine {
         io.execute(() -> lockEthCounterLeg(coin, hash, reqTokenAddr));
     }
 
-    private void checkExpiredMinima(JSONObject coin, int block) {
+    /** TEST SEAM: the retry window is ETH_RETRY_SECS of real time, so a test proves the self-healing re-fire by
+     *  ageing the marker rather than sleeping. Package-private — never called from app code. */
+    static void ageRetryMarkerForTest(String key, long secondsAgo) {
+        Long t = ethAttempt.get(key);
+        if (t != null) ethAttempt.put(key, t - secondsAgo);
+    }
+    static void clearRetryMarkersForTest() { ethAttempt.clear(); }
+
+    /** (package-private for tests) */
+    void checkExpiredMinima(JSONObject coin, int block) {
         int timelock = parseInt(MinimaHtlc.stateAt(coin, 3));
         if (block <= timelock) return;
         String hash = MinimaHtlc.stateAt(coin, 5);
-        if (db.haveCollectExpired(hash) || !inflight.add("refundM:" + hash)) return;
+        // SELF-HEALING gate, identical to the claim path above. The old guard was `inflight.add("refundM:")`
+        // cleared ONLY inside ok()/err() — so when a node command's callback was lost (NodeApi drops pending
+        // callbacks once the hosting Activity is finishing) the marker was never released and the refund NEVER
+        // retried for the life of the process. `inflight` is static, so one lost callback wedged the foreground
+        // AND background engines at once. The claim path was moved off this exact pattern; the refund path was
+        // not, and a real 35.014005 MINIMA lock sat refundable-but-unrefunded because of it. A timestamp cannot
+        // leak: worst case a lost callback costs one ETH_RETRY_SECS window before the next attempt.
+        if (db.haveCollectExpired(hash) || !ethRetryDue("refundM:" + hash)) return;
+        markEthAttempt("refundM:" + hash);
         minima.refund(coin, new MinimaHtlc.PostCb() {
             @Override public void ok(String txpowid) {
-                db.logEvent(hash, SwapDb.EV_EXPIRED, "minima", MinimaHtlc.coinAmount(coin), txpowid);
+                // Status FIRST: haveCollectExpired is a permanent veto on any future refund, so if the process
+                // dies between these two writes the swap would be un-refundable AND still read "locked".
                 db.setSwapStatus(hash, SwapDb.ST_REFUNDED);
+                db.logEvent(hash, SwapDb.EV_EXPIRED, "minima", MinimaHtlc.coinAmount(coin), txpowid);
                 notifier.notify("Swap refunded", "Timelock passed — reclaimed your " + com.eurobuddha.atomix.TradingContext.labelFor(coin.optString("tokenid", "0x00")));
                 notifier.onSwapsChanged();
-                inflight.remove("refundM:" + hash);
+                ethAttempt.remove("refundM:" + hash);
+                SwapLog.d("refund OK " + hash + " tx=" + txpowid);
             }
-            @Override public void err(String m) { inflight.remove("refundM:" + hash); }
+            @Override public void err(String m) {
+                SwapLog.w("refund ERR " + hash + ": " + m + " (retries after the window)");
+                // leave the attempt timestamp → the next poll after ETH_RETRY_SECS retries it
+            }
         });
     }
 

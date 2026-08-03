@@ -355,6 +355,17 @@ public final class MinimaHtlc {
         scanHtlcByState(hash, coinageMin, depth, ok, err);
     }
 
+    /** Per-hash scan for the REFUND sweep: same filter, but asks the node to fall through into the MegaMMR once
+     *  the TxPoW tree runs out. `coins` accepts megammr and downgrades it itself — coins.java does
+     *  {@code checkmegammr = GeneralParams.IS_MEGAMMR} — so a node not run with -megammr silently ignores it and
+     *  this behaves exactly like scanHtlcByHash. On a MegaMMR node a coin I locked is findable at ANY age, which
+     *  is the only way to refund a lock older than the ~1024-block tree. */
+    public void scanHtlcByHashDeep(String hash, int coinageMin, int depth, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
+        cmd("coinnotify action:add address:" + HTLC_ADDRESS,
+            r -> doScanHtlcByState(hash, coinageMin, depth, true, ok, err),
+            e -> doScanHtlcByState(hash, coinageMin, depth, true, ok, err));
+    }
+
     /** All open HTLC coins carrying MY key (owner state[0] for coins I locked, or receiver state[4] for coins
      *  locked to me) — the bounded, relevance-independent replacement for the old relevant:true scan. The
      *  server-side state: filter keeps the reply small even though the HTLC address is a global shared sink. */
@@ -364,17 +375,17 @@ public final class MinimaHtlc {
 
     private void scanHtlcByState(String value, int coinageMin, int depth, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
         cmd("coinnotify action:add address:" + HTLC_ADDRESS,
-            r -> doScanHtlcByState(value, coinageMin, depth, ok, err),
-            e -> doScanHtlcByState(value, coinageMin, depth, ok, err));
+            r -> doScanHtlcByState(value, coinageMin, depth, false, ok, err),
+            e -> doScanHtlcByState(value, coinageMin, depth, false, ok, err));
     }
 
-    private void doScanHtlcByState(String value, int coinageMin, int depth, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
+    private void doScanHtlcByState(String value, int coinageMin, int depth, boolean megammr, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
         // SETTLEMENT scan: NO tokenid filter. The state: value (a unique hashlock, or my pubkey) already scopes the
         // reply, so this stays cheap; and dropping the token filter is what lets a claim/refund find an in-flight
         // swap's coin in EITHER currency after the user switched the active currency. claim()/refund() read the
         // coin's own tokenid, so both mxUSDT and native-MINIMA legs settle correctly.
         cmd("coins coinage:" + coinageMin + " simplestate:true state:" + normKey(value)
-          + " address:" + HTLC_ADDRESS + " depth:" + depth, r -> {
+          + " address:" + HTLC_ADDRESS + " depth:" + depth + (megammr ? " megammr:true" : ""), r -> {
             Object resp = r.opt("response");
             ok.accept(resp instanceof org.json.JSONArray ? (org.json.JSONArray) resp : new org.json.JSONArray());
         }, err);
