@@ -59,6 +59,8 @@ public class SwapService extends Service {
     private static final String CH_OFFLINE = "swap_offline";   // HIGH-priority "market offline" alert
     private static final int FG_ID = 4101;
     private static final int OFFLINE_ID = 4102;          // fixed id — one offline alert, updated in place
+    private static final int MISS_ORDER_ID = 4103;       // fixed ids — book-presence warnings update in place
+    private static final int MISS_OTC_ID = 4104;         //   and are retracted when publishing recovers
     private static final long INTERVAL_MS = 90_000;
     private static final long DISCOVERY_INTERVAL_MS = 30_000;   // fast, LIGHT handshake-discovery scan (heavy poll stays 90s)
     private static final long REREGISTER_GAP_MS = 30_000;       // pairing retry cadence while the node is unreachable
@@ -561,12 +563,20 @@ public class SwapService extends Service {
         if (stamp == 0 || now - stamp >= MainActivity.REPUBLISH_INTERVAL_MS) return;   // republish already due
         if (now - stamp < 5 * 60_000) return;   // a just-confirmed publish takes ~1 block to appear — not a miss
         boolean present = coinTs > 0 && now - coinTs < MainActivity.REPUBLISH_INTERVAL_MS + 10 * 60_000;
-        if (present) { if (isOrder) orderMisses = 0; else otcMisses = 0; return; }
+        final int missId = isOrder ? MISS_ORDER_ID : MISS_OTC_ID;
+        if (present) {
+            if (isOrder) orderMisses = 0; else otcMisses = 0;
+            clearAlert(missId);   // landing again — RETRACT the warning; a self-incrementing id left it in the shade forever
+            return;
+        }
         int misses = isOrder ? ++orderMisses : ++otcMisses;
         prefs.edit().putLong(stampKey, 0).apply();   // force a republish on the next tick
         SwapLog.w((isOrder ? "order" : "otc") + " book-miss #" + misses + " — publish claimed OK but isn't on the book; forcing republish");
-        if (misses == 2) alert("Publishes aren't landing on-chain",
-                "Your market updates may be stuck in the node's Pending list — is the vault locked? Open Minima Core and check Pending.");
+        // Name the CURRENCY and the STREAM: an unattributed "publishes aren't landing" under a mis-branded title
+        // is unreadable, and the order + OTC alerts were previously two identical-looking notifications.
+        final String ccy = TradingContext.active().coinLabel;
+        if (misses == 2) alert(missId, ccy + (isOrder ? " market" : " OTC offer") + " isn't landing on-chain",
+                "Your " + ccy + (isOrder ? " market updates" : " OTC offer") + " may be stuck in the node's Pending list — is the vault locked? Open Minima Core and check Pending.");
     }
 
     // ----- market-offline alert + live foreground-notification text -----
@@ -617,11 +627,12 @@ public class SwapService extends Service {
     private String fgStateText() {
         if (!paired) return unpairedSince > 0 && System.currentTimeMillis() - unpairedSince > OFFLINE_ALERT_AFTER_MS
                 ? "Market offline — waiting for Minima Core" : "Waiting for Minima Core…";
+        final String ccy = TradingContext.active().coinLabel;
         if (prefs.getBoolean(PriceOracle.P_ENABLE, false) && prefs.getBoolean(PriceOracle.P_WITHDRAWN, false))
-            return "Market withdrawn — waiting for the price feed";
+            return ccy + " market withdrawn — waiting for the price feed";
         if (prefs.getBoolean("auto_publish", false) || prefs.getBoolean("otc_auto", false))
-            return "Market live — keeping it published";
-        return "Watching swaps";
+            return ccy + " market live — keeping it published";
+        return "Watching " + ccy + " swaps";
     }
 
     // ----- engine notifier: OS notifications only (no UI here); SwapDb carries state to the Activity -----
@@ -631,14 +642,24 @@ public class SwapService extends Service {
         @Override public void onSwapsChanged() { /* no UI in the service */ }
     };
 
-    private void alert(String title, String body) {
+    /** One-shot event alert — each gets its own id so a burst of swap events all stay readable. */
+    private void alert(String title, String body) { alert(alertId++, title, body); }
+
+    /** STATE warning on a fixed id: re-posting updates it in place, and {@link #clearAlert} retracts it once
+     *  the condition clears — the right shape for "is my market actually live" health warnings. */
+    private void alert(int id, String title, String body) {
         NotificationManager nm = getSystemService(NotificationManager.class);
         if (nm == null) return;
-        nm.notify(alertId++, new NotificationCompat.Builder(this, CH_ALERT)
+        nm.notify(id, new NotificationCompat.Builder(this, CH_ALERT)
                 .setContentTitle(title).setContentText(body)
                 .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
                 .setSmallIcon(android.R.drawable.stat_sys_upload_done)
                 .setAutoCancel(true).build());
+    }
+
+    private void clearAlert(int id) {
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm != null) nm.cancel(id);
     }
 
     // ----- helpers -----
@@ -652,11 +673,17 @@ public class SwapService extends Service {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm == null) return;
-            nm.createNotificationChannel(new NotificationChannel(CH_FG, "Swap watcher", NotificationManager.IMPORTANCE_LOW));
-            nm.createNotificationChannel(new NotificationChannel(CH_ALERT, "Swaps", NotificationManager.IMPORTANCE_DEFAULT));
+            // Channel names are user-visible in system settings — keep them AtomiX's, not a legacy app's.
+            nm.createNotificationChannel(new NotificationChannel(CH_FG, "AtomiX market watcher", NotificationManager.IMPORTANCE_LOW));
+            nm.createNotificationChannel(new NotificationChannel(CH_ALERT, "Swap alerts", NotificationManager.IMPORTANCE_DEFAULT));
             nm.createNotificationChannel(new NotificationChannel(CH_OFFLINE, "Market offline", NotificationManager.IMPORTANCE_HIGH));
         }
     }
+
+    /** Title of the persistent notification: THIS app, and the market it is actually working. Hardcoding a
+     *  legacy per-currency app name here ("usdtSwap") made the shade read as a different app publishing a
+     *  market the user wasn't in — the title must always be resolved from the ACTIVE context. */
+    private static String fgTitle() { return "AtomiX · " + TradingContext.active().coinLabel; }
 
     /** Build the persistent FGS notification with the given status text (tap → open the app). */
     private Notification fgNotification(String text) {
@@ -664,7 +691,7 @@ public class SwapService extends Service {
                 new Intent(this, MainActivity.class),
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
         return new NotificationCompat.Builder(this, CH_FG)
-                .setContentTitle("usdtSwap")
+                .setContentTitle(fgTitle())
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.stat_sys_upload_done)
                 .setContentIntent(pi)

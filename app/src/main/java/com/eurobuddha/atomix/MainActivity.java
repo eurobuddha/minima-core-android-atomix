@@ -416,6 +416,12 @@ public class MainActivity extends AppCompatActivity {
                     .putBoolean(PriceOracle.P_ENABLE, false)
                     .putBoolean(PriceOracle.P_WITHDRAWN, true)
                     .remove("last_publish_ok")
+                    // The OTC side must quiesce with the order side. Left armed, the service kept scanning the
+                    // ARRIVING currency's OTC board against a stamp earned on the LEAVING one's — a guaranteed
+                    // book-miss that fired a false "isn't landing on-chain" warning after every switch.
+                    .putBoolean("otc_enable", false)
+                    .putBoolean("otc_auto", false)
+                    .remove("otc_last_publish_ok")
                     .apply();
             PriceOracle.resetForSwitch(prefs);                 // wipe cached/persisted price (no stale peg)
             try { engine.setMyOrder(new com.eurobuddha.atomix.swap.Order()); } catch (Exception ignored) {}  // disarm now
@@ -455,8 +461,11 @@ public class MainActivity extends AppCompatActivity {
     // runtime/price state (P_LAST_*, withdrawn/tombstoned/wide, last_publish_ok) starts fresh so the peg re-fetches
     // the target currency's own price (resetForSwitch clears them).
     private static final String[] MKT_STR = { "order_config", PriceOracle.P_STEP, PriceOracle.P_SIZE,
-            PriceOracle.P_ASK_SIZE, PriceOracle.P_BID_SIZE, PriceOracle.P_BIAS, PriceOracle.P_REPRICE, PriceOracle.P_LEVELS };
-    private static final String[] MKT_BOOL = { "auto_publish", PriceOracle.P_ENABLE };
+            PriceOracle.P_ASK_SIZE, PriceOracle.P_BID_SIZE, PriceOracle.P_BIAS, PriceOracle.P_REPRICE, PriceOracle.P_LEVELS,
+            "otc_sell_size", "otc_buy_size" };
+    // otc_enable/otc_auto park WITH their sizes: the switch now disarms OTC per currency, so the flags have to be
+    // remembered per currency too, and restoring a flag without its sizes would arm the other market's numbers.
+    private static final String[] MKT_BOOL = { "auto_publish", PriceOracle.P_ENABLE, "otc_enable", "otc_auto" };
 
     /** Park the ACTIVE currency's market CONFIG under its own key (static + prefs-only so it's unit-testable). */
     static void snapshotMarket(android.content.SharedPreferences prefs, String curKey) {
@@ -3248,7 +3257,9 @@ public class MainActivity extends AppCompatActivity {
 
     private TextView buildPairingBanner() {
         TextView t = new TextView(this);
-        t.setText("Enable usdtSwap in Minima Core → Apps to connect to your node.");
+        // The node lists companions by their app LABEL — this one registers as "AtomiX", so naming the legacy
+        // app here sent users hunting Minima Core → Apps for an entry that isn't there.
+        t.setText("Enable AtomiX in Minima Core → Apps to connect to your node.");
         t.setTextColor(Design.ON_ACCENT()); t.setBackgroundColor(Design.ACCENT());
         t.setPadding(dp(16), dp(10), dp(16), dp(10)); t.setTextSize(13f); t.setTypeface(Design.sansBold());
         return t;
@@ -3445,7 +3456,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void copy(String text, String toast) {
         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (cm != null) { cm.setPrimaryClip(ClipData.newPlainText("usdtSwap", text)); toast(toast); }
+        if (cm != null) { cm.setPrimaryClip(ClipData.newPlainText("AtomiX", text)); toast(toast); }   // label shows in the Android 13+ clipboard preview
     }
 
     private static String trim(double v) { return Util.tidyAmount(BigDecimal.valueOf(v).stripTrailingZeros().toPlainString()); }
