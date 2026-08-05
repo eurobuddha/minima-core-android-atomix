@@ -36,6 +36,11 @@ public class NodeApi {
     private static final long READ_TIMEOUT_MS = 30000;
     private static final long WRITE_TIMEOUT_MS = 180000;   // build + proof-of-work + post is slow on mobile
 
+    /** A MegaMMR/deep coin walk (settlement recovery scans) can far outrun a normal read on a phone node,
+     *  and a timed-out scan is worse than a slow one: the response arrives after the handler is purged, so
+     *  the claim/refund it carries simply never happens. */
+    private static final long DEEP_READ_TIMEOUT_MS = 120000;
+
     /** Transaction/PoW commands can take a long time on a phone; reads are quick. */
     private static long timeoutFor(String command) {
         String c = command == null ? "" : command.trim();
@@ -43,6 +48,7 @@ public class NodeApi {
                 || c.startsWith("txnpost") || c.startsWith("tokencreate") || c.startsWith("txnbasics")) {
             return WRITE_TIMEOUT_MS;
         }
+        if (c.contains("megammr:true")) return DEEP_READ_TIMEOUT_MS;
         return READ_TIMEOUT_MS;
     }
 

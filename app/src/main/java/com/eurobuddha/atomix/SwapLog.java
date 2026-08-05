@@ -19,9 +19,9 @@ public final class SwapLog {
 
     private SwapLog() {}
 
-    public static void d(String m) { Log.d(TAG, m); }
+    public static void d(String m) { try { Log.d(TAG, m); } catch (RuntimeException ignore) { /* JVM unit tests: android.util.Log not mocked */ } }
 
-    public static void w(String m) { Log.w(TAG, m); }
+    public static void w(String m) { try { Log.w(TAG, m); } catch (RuntimeException ignore) { /* JVM unit tests: android.util.Log not mocked */ } }
 
     /** For gates evaluated every ~90s: logs {@code key: m} only when {@code m} differs from the last one. */
     public static synchronized void skip(String key, String m) {

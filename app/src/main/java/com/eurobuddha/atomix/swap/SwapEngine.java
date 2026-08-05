@@ -136,8 +136,35 @@ public final class SwapEngine {
         EthTx.resetAll();                 // cold-start the nonce serializer against the new node's "pending"
     }
     public void setMyMinimaPk(String pk) { this.myMinimaPk = pk; }
-    /** The node's full 64-key set, so refunds work for a coin locked under any default key. */
-    public void setMyPubkeys(Set<String> keys) { this.myPubkeys = keys == null ? Collections.emptySet() : keys; }
+
+    /** One alarm per process — both engines route through setMyPubkeys, and this must not renotify per poll. */
+    private static volatile boolean identityAlarmRaised = false;
+
+    /** The node's full 64-key set, so refunds work for a coin locked under any default key.
+     *
+     *  IDENTITY GUARD: the swap identity (address + pubkey) is persisted ONCE and reused forever — but a node
+     *  reset with a different seed silently orphans it. The app then keeps publishing a receiver key the node
+     *  cannot sign for, routes lock-change to an address the wallet no longer owns, and every incoming leg /
+     *  change output lands in coins the wallet cannot see or spend. That is a silent, systemic fund leak
+     *  (2,623 MINIMA of change + 4 unclaimable counter-legs in the field). Detect it HERE — the one point
+     *  where the persisted key and the node's actual key set meet — and alarm loudly. */
+    public void setMyPubkeys(Set<String> keys) {
+        // Normalise on ingestion — membership checks compare normKey forms, so a caller passing 0x-prefixed
+        // or lower-case keys must not silently break ownership matching (or falsely trip the guard below).
+        Set<String> norm = new java.util.HashSet<>();
+        if (keys != null) for (String k : keys) { String n = MinimaHtlc.normKey(k); if (!n.isEmpty()) norm.add(n); }
+        this.myPubkeys = norm.isEmpty() ? Collections.emptySet() : norm;
+        if (myMinimaPk != null && !myMinimaPk.isEmpty() && !this.myPubkeys.isEmpty()
+                && !this.myPubkeys.contains(MinimaHtlc.normKey(myMinimaPk)) && !identityAlarmRaised) {
+            identityAlarmRaised = true;
+            SwapLog.w("IDENTITY ORPHANED: node does not own persisted swap identity " + myMinimaPk
+                    + " (" + this.myPubkeys.size() + " node keys checked). Node reset with a different seed?"
+                    + " Incoming swap legs and lock-change route to this identity and CANNOT be signed.");
+            notifier.notify("Wallet identity mismatch",
+                    "Your node does not own this app's swap identity — likely after a node reset. "
+                    + "Do NOT trade. Restore the previous seed or reset the app identity.");
+        }
+    }
     public void setMyOrder(Order o) { this.myOrder = o; }
     public void setOtcDb(OtcDb o) { this.otcDb = o; }
     public String swapStatus(String hash) { SwapDb.Swap s = db.getSwap(hash); return s == null ? null : s.status; }
@@ -423,7 +450,9 @@ public final class SwapEngine {
         // Read the Minima side first (async node.cmd), then the ETH side (blocking, on io), then report.
         minima.currentBlock(new MinimaHtlc.BlockCb() {
             @Override public void ok(int block) {
-                minima.scanHtlcByHash(hash, 2, HTLC_SCAN_DEPTH, coins -> {
+                // DEEP: the whole point of inspecting a stuck swap is that it is OLD — a shallow walk-back
+                // would report a fully-locked coin as "not found" (the exact lie that hid the 0.1.16 stall).
+                minima.scanHtlcByHashDeep(hash, 2, REFUND_SCAN_DEPTH, coins -> {
                     JSONObject myMinimaCoin = null, counterMinimaCoin = null;
                     for (int i = 0; i < coins.length(); i++) {
                         JSONObject c = coins.optJSONObject(i);
@@ -474,8 +503,12 @@ public final class SwapEngine {
             }
 
             // ---- counterparty leg ----
-            if (sell) {
-                // counter = ETH USDT to me — read by deterministic contractId (no eth_getLogs)
+            // Keyed on WHOSE leg sits on which chain (myLegIsMinima), NOT on s.direction: direction names the
+            // INITIATOR's flow, so for a RESPONDER row the old `sell` branch read my OWN ETH lock and reported
+            // it as the counterparty's leg — "withdrawn (complete)" on a swap that was stuck. That mislabel is
+            // what made the 4 frozen CLAIMING swaps look settled while 2036 MINIMA sat unclaimed.
+            if (s.myLegIsMinima) {
+                // counter = ERC20 to me — read by deterministic contractId (no eth_getLogs)
                 EthHtlc.Contract gc = eth.getContract(EthHtlc.contractId(hash));
                 if (gc == null) {
                     L.add("• Counterparty " + s.buyToken + " leg: NOT FOUND yet — the maker hasn't locked it.");
@@ -484,15 +517,15 @@ public final class SwapEngine {
                     L.add("• Counterparty " + s.buyToken + " leg: FOUND " + EthWallet.format(gc.amount, decimalsOf(gc.tokenContract), 6)
                             + " " + s.buyToken + (claimable ? " — claimable now" : (gc.withdrawn ? " — withdrawn (complete)" : " — refunded")));
                     if (claimable) L.add("→ Claiming on the next poll — your " + s.buyToken + " arrives shortly.");
-                    else if (gc.refunded) L.add("→ Maker's leg timed out & refunded; your mxUSDT auto-refunds at block " + s.myTimelock + ".");
+                    else if (gc.refunded) L.add("→ Maker's leg timed out & refunded; your " + s.sellToken + " auto-refunds at block " + s.myTimelock + ".");
                 }
             } else {
-                // counter = mxUSDT to me — real on-chain check of the maker's lock
+                // counter = a Minima-chain coin to me — real on-chain check of the counterparty's lock
                 if (cpMin != null) {
-                    L.add("• Counterparty mxUSDT leg: FOUND " + MinimaHtlc.coinAmount(cpMin) + " mxUSDT — "
+                    L.add("• Counterparty " + s.buyToken + " leg: FOUND " + MinimaHtlc.coinAmount(cpMin) + " " + s.buyToken + " — "
                             + (secretKnown ? "claimable now (claiming on the next poll)" : "waiting for the secret"));
                 } else {
-                    L.add("• Counterparty mxUSDT leg: NOT FOUND yet — the maker hasn't locked mxUSDT (or it's <2 confirmations old).");
+                    L.add("• Counterparty " + s.buyToken + " leg: NOT FOUND — not locked yet, <2 confirmations old, or already spent.");
                 }
             }
 
@@ -536,7 +569,7 @@ public final class SwapEngine {
 
     // ---- Minima side (node.cmd; main thread) ----
 
-    private void runMinimaChecks(final int block) {
+    void runMinimaChecks(final int block) {   // (package-private for tests)
         // Harvest the revealed secret for each leg I locked that's still waiting — one hashlock-FILTERED query
         // per pending swap, so we never pull the whole (global, unbounded) notify address.
         for (String h : pendingSecretHashes()) {
@@ -545,16 +578,30 @@ public final class SwapEngine {
         // CLAIM discovery — find each counter mxUSDT leg I'm owed BY ITS HASHLOCK (reliable), not via
         // relevant:true (which can miss a coin I only RECEIVE — the second-leg-of-a-sweep bug). checkCanSwapCoin's
         // own guards (secret-known, haveCollect, inflight, amountTokenOk) are unchanged.
+        // DEEP, like the refund sweep — the secret can be revealed at any time (the counterparty claims my ETH
+        // leg on their own schedule), so by the time I learn it the counter-coin may be older than the shallow
+        // walk-back. The shallow scan then returns nothing forever and the swap freezes in CLAIMING with the
+        // funds sitting claimable on-chain — the claim-side twin of the 0.1.15 stranded-refund bug.
+        // Throttled HARD, unlike the shallow scan it replaces: the deep scan is a heavy per-hash node query
+        // (coinnotify + a 1024-block walk), this loop fires on EVERY ~30s poll from BOTH engines, and the node
+        // runs commands on ONE thread. Unthrottled (4 pending claims = 16 heavy commands/poll) it built a
+        // backlog that outlived every callback timeout — nothing settled and the responses drained as a
+        // hundreds-deep "Invalid ResponseID" flood. So: ONE scan per cycle (the break), one scan per hash per
+        // ETH_RETRY_SECS window (the gate, static → shared by both engines), round-robin across hashes.
         for (String h : pendingClaimMinimaHashes()) {
+            if (!ethRetryDue("claimScan:" + h)) continue;
+            markEthAttempt("claimScan:" + h);
             final String hh = h;
-            minima.scanHtlcByHash(h, 2, HTLC_SCAN_DEPTH, coins -> {
+            minima.scanHtlcByHashDeep(h, 2, REFUND_SCAN_DEPTH, coins -> {
+                SwapLog.d("claimScan " + hh + " -> " + coins.length() + " coin(s)");
                 for (int i = 0; i < coins.length(); i++) {
                     JSONObject coin = coins.optJSONObject(i);
                     if (coin == null) continue;
                     if (isMyPublishKey(MinimaHtlc.stateAt(coin, 4)) && sameHash(MinimaHtlc.stateAt(coin, 5), hh))
                         checkCanSwapCoin(coin, block);      // a mxUSDT leg locked to me — claim it (I hold the secret)
                 }
-            }, e -> {});
+            }, e -> SwapLog.w("claimScan " + hh + " ERR: " + e));
+            break;   // one deep scan per cycle — the next due hash goes next poll
         }
         // RESPONDER (incoming sell-take → lock ETH counter-leg) + REFUND (my expired coins) discovery — via a
         // state-filter scan bounded to MY key (owner state[0] or receiver state[4]): reliable like the per-hash
@@ -706,6 +753,7 @@ public final class SwapEngine {
         if (t != null) ethAttempt.put(key, t - secondsAgo);
     }
     static void clearRetryMarkersForTest() { ethAttempt.clear(); }
+    static void resetIdentityAlarmForTest() { identityAlarmRaised = false; }
 
     /** (package-private for tests) */
     void checkExpiredMinima(JSONObject coin, int block) {
@@ -939,7 +987,10 @@ public final class SwapEngine {
             ui.post(notifier::onSwapsChanged);
             eth.withdraw(contractId, secret);      // ack only; success is confirmed on-chain, not here
         } catch (Exception e) {
-            // pre-mine failure (RPC/nonce) → nothing committed; the next cycle retries after the window
+            // pre-mine failure (RPC/nonce/gas) → nothing committed; the next cycle retries after the window.
+            // LOGGED: a swap can sit in CLAIMING for hours on repeated failures here — silence made that
+            // undiagnosable from logcat.
+            SwapLog.w("wdEth ERR " + hash + ": " + e.getMessage() + " (retries after the window)");
         } finally { inflight.remove("wdEth:" + hash); }
     }
 
@@ -951,6 +1002,7 @@ public final class SwapEngine {
             eth.refund(contractId);
         } catch (Exception e) {
             // pre-mine failure → nothing committed; retry next cycle after the window
+            SwapLog.w("refundE ERR " + hash + ": " + e.getMessage() + " (retries after the window)");
         } finally { inflight.remove("refundE:" + hash); }
     }
 
