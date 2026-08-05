@@ -1,6 +1,7 @@
 package com.eurobuddha.atomix.swap;
 
 import org.json.JSONObject;
+import com.eurobuddha.atomix.SwapLog;
 import com.eurobuddha.comms.NodeApi;
 
 import java.util.ArrayList;
@@ -78,21 +79,62 @@ public final class MinimaHtlc {
      * via {@code cb.ok} for the caller to persist). The chosen key is one of the 64 the node controls
      * forever, so it survives restarts.
      */
+    /** SELF-HEAL (0.1.18): one fresh identity per process. fg + bg engines call setup() concurrently in the
+     *  SAME process; without this each would getaddress its own replacement (it rotates) and the persisted
+     *  identity would flap between two keys. First healer stores here; the second adopts it. */
+    private static String healedAddress, healedPubkey;
+    static void resetHealForTest() { healedAddress = null; healedPubkey = null; }
+
     public void setup(final String savedAddress, final String savedPubkey, final SetupCb cb) {
         cmd("newscript script:\"" + HTLC_SCRIPT + "\" trackall:false", r1 -> {
             if (savedAddress != null && !savedAddress.isEmpty() && savedPubkey != null && !savedPubkey.isEmpty()) {
-                myAddress = savedAddress; myPubkey = savedPubkey;
-                cb.ok(myAddress, myPubkey);
+                // Verify the node still OWNS the persisted identity before adopting it. A node reset with a
+                // different seed orphans it silently — the app then publishes a receiver key the node cannot
+                // sign for and routes lock-change to an address the wallet no longer owns (the 0.1.17 incident:
+                // 4 unclaimable counter-legs + 2,623 MINIMA of invisible change). Orphaned → discard it and
+                // fall through to a FRESH pick from the CURRENT node; both callers persist whatever ok()
+                // returns, so the heal writes itself back. Safe: nothing routed to the dead key is signable
+                // by this node anyway, so abandoning it cannot strand anything new.
+                loadMyKeys(new KeysCb() {
+                    @Override public void ok(java.util.Set<String> keys) {
+                        if (keys.isEmpty() || keys.contains(normKey(savedPubkey))) {
+                            // empty = node busy/locked: trust the saved identity for now — SwapEngine's
+                            // identity guard still alarms if it is genuinely orphaned, and the next setup
+                            // (restart / re-pair) retries this verification.
+                            myAddress = savedAddress; myPubkey = savedPubkey;
+                            cb.ok(myAddress, myPubkey);
+                        } else if (healedPubkey != null) {
+                            myAddress = healedAddress; myPubkey = healedPubkey;
+                            cb.ok(myAddress, myPubkey);
+                        } else {
+                            SwapLog.w("IDENTITY ORPHANED: node does not own persisted identity " + savedPubkey
+                                    + " — re-picking a fresh identity from the current node (self-heal)");
+                            pickFreshIdentity(cb, true);
+                        }
+                    }
+                    @Override public void err(String m) {   // cannot verify now — same trust-and-backstop as empty
+                        myAddress = savedAddress; myPubkey = savedPubkey;
+                        cb.ok(myAddress, myPubkey);
+                    }
+                });
                 return;
             }
-            cmd("getaddress", r2 -> {
-                JSONObject resp = r2.optJSONObject("response");
-                if (resp == null) { cb.err("getaddress returned nothing"); return; }
-                myAddress = resp.optString("miniaddress", resp.optString("address", ""));
-                myPubkey  = resp.optString("publickey", "");
-                if (myAddress.isEmpty() || myPubkey.isEmpty()) { cb.err("Could not resolve my Minima address/key"); return; }
-                cb.ok(myAddress, myPubkey);
-            }, cb::err);
+            pickFreshIdentity(cb, false);
+        }, cb::err);
+    }
+
+    private void pickFreshIdentity(final SetupCb cb, final boolean healed) {
+        cmd("getaddress", r2 -> {
+            JSONObject resp = r2.optJSONObject("response");
+            if (resp == null) { cb.err("getaddress returned nothing"); return; }
+            myAddress = resp.optString("miniaddress", resp.optString("address", ""));
+            myPubkey  = resp.optString("publickey", "");
+            if (myAddress.isEmpty() || myPubkey.isEmpty()) { cb.err("Could not resolve my Minima address/key"); return; }
+            if (healed) {
+                healedAddress = myAddress; healedPubkey = myPubkey;
+                SwapLog.w("IDENTITY HEALED: new identity " + myPubkey + " — market republishes under this key");
+            }
+            cb.ok(myAddress, myPubkey);
         }, cb::err);
     }
 
