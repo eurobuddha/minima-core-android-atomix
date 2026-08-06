@@ -79,61 +79,46 @@ public final class MinimaHtlc {
      * via {@code cb.ok} for the caller to persist). The chosen key is one of the 64 the node controls
      * forever, so it survives restarts.
      */
-    /** SELF-HEAL (0.1.18): one fresh identity per process. fg + bg engines call setup() concurrently in the
-     *  SAME process; without this each would getaddress its own replacement (it rotates) and the persisted
-     *  identity would flap between two keys. First healer stores here; the second adopts it. */
-    private static String healedAddress, healedPubkey;
-    static void resetHealForTest() { healedAddress = null; healedPubkey = null; }
-
     public void setup(final String savedAddress, final String savedPubkey, final SetupCb cb) {
         cmd("newscript script:\"" + HTLC_SCRIPT + "\" trackall:false", r1 -> {
             if (savedAddress != null && !savedAddress.isEmpty() && savedPubkey != null && !savedPubkey.isEmpty()) {
-                // Verify the node still OWNS the persisted identity before adopting it. A node reset with a
-                // different seed orphans it silently — the app then publishes a receiver key the node cannot
-                // sign for and routes lock-change to an address the wallet no longer owns (the 0.1.17 incident:
-                // 4 unclaimable counter-legs + 2,623 MINIMA of invisible change). Orphaned → discard it and
-                // fall through to a FRESH pick from the CURRENT node; both callers persist whatever ok()
-                // returns, so the heal writes itself back. Safe: nothing routed to the dead key is signable
-                // by this node anyway, so abandoning it cannot strand anything new.
+                // Verify the node still OWNS the persisted identity, then ADOPT IT EITHER WAY and let
+                // IdentityWatch halt the app if it is orphaned.
+                //
+                // 0.1.18 re-picked a fresh identity here (self-heal). That is now deliberately gone (0.1.19,
+                // user decision): silently swapping the identity hides the thing that actually matters — that
+                // coins were routed to a key the node can no longer derive, and that only a rescue + clean
+                // reinstall puts every piece (identity, ETH wallet, swap DB) back in line. Adopting the saved
+                // key while HALTED is the safe combination: settlement of in-flight swaps still runs against
+                // the key those swaps were made with, while no new liability can be taken on.
                 loadMyKeys(new KeysCb() {
                     @Override public void ok(java.util.Set<String> keys) {
-                        if (keys.isEmpty() || keys.contains(normKey(savedPubkey))) {
-                            // empty = node busy/locked: trust the saved identity for now — SwapEngine's
-                            // identity guard still alarms if it is genuinely orphaned, and the next setup
-                            // (restart / re-pair) retries this verification.
-                            myAddress = savedAddress; myPubkey = savedPubkey;
-                            cb.ok(myAddress, myPubkey);
-                        } else if (healedPubkey != null) {
-                            myAddress = healedAddress; myPubkey = healedPubkey;
-                            cb.ok(myAddress, myPubkey);
-                        } else {
+                        myAddress = savedAddress; myPubkey = savedPubkey;
+                        // empty = node busy/locked: cannot verify, never treat that as orphaned.
+                        if (!keys.isEmpty() && !keys.contains(normKey(savedPubkey)))
                             SwapLog.w("IDENTITY ORPHANED: node does not own persisted identity " + savedPubkey
-                                    + " — re-picking a fresh identity from the current node (self-heal)");
-                            pickFreshIdentity(cb, true);
-                        }
+                                    + " (" + keys.size() + " node keys checked) — halting; reinstall required");
+                        cb.ok(myAddress, myPubkey);
                     }
-                    @Override public void err(String m) {   // cannot verify now — same trust-and-backstop as empty
+                    @Override public void err(String m) {   // cannot verify now — trust it; IdentityWatch re-checks
                         myAddress = savedAddress; myPubkey = savedPubkey;
                         cb.ok(myAddress, myPubkey);
                     }
                 });
                 return;
             }
-            pickFreshIdentity(cb, false);
+            pickFreshIdentity(cb);
         }, cb::err);
     }
 
-    private void pickFreshIdentity(final SetupCb cb, final boolean healed) {
+    /** First run only (nothing persisted yet): take one of the node's default keys as our identity. */
+    private void pickFreshIdentity(final SetupCb cb) {
         cmd("getaddress", r2 -> {
             JSONObject resp = r2.optJSONObject("response");
             if (resp == null) { cb.err("getaddress returned nothing"); return; }
             myAddress = resp.optString("miniaddress", resp.optString("address", ""));
             myPubkey  = resp.optString("publickey", "");
             if (myAddress.isEmpty() || myPubkey.isEmpty()) { cb.err("Could not resolve my Minima address/key"); return; }
-            if (healed) {
-                healedAddress = myAddress; healedPubkey = myPubkey;
-                SwapLog.w("IDENTITY HEALED: new identity " + myPubkey + " — market republishes under this key");
-            }
             cb.ok(myAddress, myPubkey);
         }, cb::err);
     }

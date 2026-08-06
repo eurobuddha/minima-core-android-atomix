@@ -201,6 +201,11 @@ public class MainActivity extends AppCompatActivity {
                 }
             } else if (identity == null || !wallet.ready() || !minima.ready()) {
                 ensureDerivations();   // retry any derivation that failed transiently (was one-shot before)
+            } else {
+                // Both identities are established — keep ASKING whether they still belong to this node. A
+                // reseed while we run leaves the persisted Minima key orphaned and the (never-persisted) ETH
+                // key stale until the process dies, and the FGS lives for days. Throttled inside.
+                IdentityWatch.check(node, wallet, minima, prefs, ui, notifier);
             }
             if (sweepRun == null || !sweepRun.sell) {  // stand down only mid-SELL-sweep — a poll republish/claim
                                                        // could re-select a sell leg's mxUSDT coins. (A BUY sweep is
@@ -506,6 +511,7 @@ public class MainActivity extends AppCompatActivity {
         pairingBanner.setVisibility(enabled ? View.GONE : View.VISIBLE);
         SwapLog.d("fg paired=" + enabled);
         if (enabled) {
+            IdentityWatch.forceNext();   // a node that just (re)appeared is the likeliest moment for a reseed
             fetchMinimaBalance();
             if (wallet.ready()) fetchEthBalances(true);
             ensureDerivations();
@@ -955,6 +961,7 @@ public class MainActivity extends AppCompatActivity {
      *  Runs off {@code last_publish_ok} (stamped ONLY on a confirmed publish) — a failed attempt retries on
      *  the next 90s tick instead of silently suppressing the keep-alive for 30 min. */
     private void maybeAutoRepublish() {
+        if (IdentityWatch.halted()) { SwapLog.skip("fgpub", "HALTED: app keys do not match the node"); return; }
         if (identity == null || myMinimaPk == null || !wallet.ready()) { SwapLog.skip("fgpub", "waiting: identity/wallet not ready"); return; }
         if (!prefs.getBoolean("auto_publish", false)) return;
         long okStamp = prefs.getLong("last_publish_ok", 0);
@@ -1048,6 +1055,7 @@ public class MainActivity extends AppCompatActivity {
      *  emptied/disabled one publishes an empty order as a TOMBSTONE (freshest-per-signer + empty effectiveBids/
      *  Asks ⇒ peers drop my liquidity on their next scan) and stops auto-publishing. Only runs for a LIVE order. */
     private void pushOrderEdit(Order o) {
+        if (IdentityWatch.halted()) { toast("Halted: app keys don't match your node"); return; }
         if (identity == null || myMinimaPk == null || !wallet.ready()) return;
         final boolean live = o.hasLiquidity();
         final int peg = live ? PriceOracle.applyPeg(o, prefs) : PriceOracle.PEG_OFF;
@@ -1760,6 +1768,12 @@ public class MainActivity extends AppCompatActivity {
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(dp(16), dp(14), dp(16), dp(24));
         buildHeader(col);
+        if (IdentityWatch.halted()) {          // keys don't belong to this node — nothing else may be reached
+            renderMismatchBlocker(col);
+            scroller.removeAllViews();
+            scroller.addView(col);
+            return;
+        }
         switch (currentTab) {
             case TAB_WALLET:   renderWalletTab(col); break;
             case TAB_ACTIVITY: renderActivityTab(col); break;
@@ -1772,6 +1786,118 @@ public class MainActivity extends AppCompatActivity {
         scroller.addView(col);
         if (animateTab) { col.setAlpha(0f); col.animate().alpha(1f).setDuration(120).start(); animateTab = false; }
         if (currentTab == TAB_WALLET) firePendingPulses();
+    }
+
+    /** The halt screen. Reached when this app's Minima key or ETH wallet provably does not belong to the node
+     *  (see IdentityWatch). It replaces the whole UI on purpose: every tab below it either commits money or
+     *  reports balances for a wallet the node can no longer derive, so none of it can be trusted.
+     *
+     *  It must also make the RESCUE possible before the user wipes anything: a reinstall clears the persisted
+     *  identity AND the secrets table AND (because it is never persisted) the stale ETH key itself. So the two
+     *  rescue actions come first and the uninstall last, with a count of what a wipe would destroy. */
+    private void renderMismatchBlocker(LinearLayout col) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(Design.card(this, 18));
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        clp.topMargin = dp(14);
+
+        TextView title = new TextView(this);
+        title.setText("⛔  Wallet mismatch — AtomiX is halted");
+        title.setTextColor(Design.RED()); title.setTextSize(18f); title.setTypeface(Design.sansBold());
+        card.addView(title);
+
+        TextView why = new TextView(this);
+        why.setText("Your node's seed no longer matches the keys this app is holding. Trading, publishing and "
+                + "new swaps are stopped. Swaps already in flight keep settling — that part is safe to leave running.");
+        why.setTextColor(Design.DIM()); why.setTextSize(13f);
+        why.setPadding(0, dp(8), 0, dp(12));
+        card.addView(why);
+
+        StringBuilder detail = new StringBuilder();
+        if (IdentityWatch.minimaMismatch())
+            detail.append("Minima identity: ORPHANED\n  this app  ").append(shortKey(IdentityWatch.orphanedPk()))
+                  .append("\n  your node does not own it\n\n");
+        if (IdentityWatch.ethMismatch())
+            detail.append("ETH wallet: STALE\n  in use   ").append(shortKey(IdentityWatch.staleEth()))
+                  .append("\n  node now ").append(shortKey(IdentityWatch.nodeEth())).append('\n');
+        TextView det = new TextView(this);
+        det.setText(detail.toString().trim());
+        det.setTextColor(Design.TEXT()); det.setTextSize(12f); det.setTypeface(android.graphics.Typeface.MONOSPACE);
+        card.addView(det);
+
+        int unsettled = 0;
+        try {
+            for (SwapDb.Swap s : db.allSwaps())
+                if (s != null && !SwapDb.ST_COMPLETE.equals(s.status) && !SwapDb.ST_REFUNDED.equals(s.status)
+                        && !SwapDb.ST_ERROR.equals(s.status)) unsettled++;
+        } catch (Exception ignore) {}
+        TextView warn = new TextView(this);
+        warn.setText("⚠  Reinstalling wipes this app's data: the claim secrets for "
+                + unsettled + " unsettled swap" + (unsettled == 1 ? "" : "s")
+                + (IdentityWatch.ethMismatch()
+                    ? ", and the stale ETH key itself (it is never stored — only your OLD node seed could rebuild it)."
+                    : ".")
+                + " Rescue anything you need FIRST.");
+        warn.setTextColor(Design.RED()); warn.setTextSize(12f);
+        warn.setPadding(0, dp(14), 0, dp(14));
+        card.addView(warn);
+
+        if (IdentityWatch.ethMismatch()) {
+            TextView exp = Design.pill(this, "🔑  Export the stale ETH key", Design.SURFACE2(), Design.TEXT());
+            exp.setOnClickListener(v -> exportKeyDialog());
+            Design.pressable(exp);
+            card.addView(exp, pillRow());
+
+            TextView sweep = Design.pill(this, "↑  Sweep funds to the node wallet", Design.SURFACE2(), Design.TEXT());
+            sweep.setOnClickListener(v -> sendDialog());
+            Design.pressable(sweep);
+            card.addView(sweep, pillRow());
+        }
+
+        TextView uninstall = Design.pill(this, "Uninstall & reinstall AtomiX", Design.RED(), 0xFFFFFFFF);
+        uninstall.setOnClickListener(v -> uninstallDialog());
+        Design.pressable(uninstall);
+        card.addView(uninstall, pillRow());
+
+        col.addView(card, clp);
+    }
+
+    private LinearLayout.LayoutParams pillRow() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        return lp;
+    }
+
+    private static String shortKey(String k) {
+        if (k == null || k.isEmpty()) return "(unknown)";
+        return k.length() <= 20 ? k : k.substring(0, 10) + "…" + k.substring(k.length() - 8);
+    }
+
+    /** Android cannot uninstall an app from inside itself — ACTION_DELETE opens the system prompt and the user
+     *  confirms. Reinstalling is what actually resets the identity (clears swap_addr/swap_pk) and forces a
+     *  fresh ETH derivation from the current node seed. */
+    private void uninstallDialog() {
+        dialog()
+                .setTitle("Reinstall AtomiX")
+                .setMessage("This removes AtomiX and its data — including the claim secrets for any unsettled "
+                        + "swap and the stale ETH key. Only continue if you have exported or swept anything you "
+                        + "still need.\n\nAfter it is removed, install the AtomiX APK again. It will pick up your "
+                        + "node's current keys cleanly.")
+                .setPositiveButton("Uninstall now", (d, w) -> {
+                    try {
+                        android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_DELETE);
+                        i.setData(android.net.Uri.parse("package:" + getPackageName()));
+                        startActivity(i);
+                    } catch (Exception e) {
+                        toast("Couldn't open the uninstaller — remove AtomiX from Android Settings › Apps");
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void buildHeader(LinearLayout col) {
@@ -3692,6 +3818,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void publishOtcOffer(double sellSize, double buySize) {
+        if (IdentityWatch.halted()) { toast("Halted: app keys don't match your node"); return; }
         if (identity == null || myMinimaPk == null || !wallet.ready()) { toast("Still connecting…"); return; }
         if (!PublishGate.tryAcquire(PublishGate.OTC)) {
             // A keep-alive publish (old sizes) is in flight. Zero the ok-stamp AND bump the gen: the
@@ -3739,6 +3866,7 @@ public class MainActivity extends AppCompatActivity {
      *  the order. Runs off {@code otc_last_publish_ok} (stamped only on a confirmed publish inside
      *  publishOtcOffer) so a failed attempt retries on the next 90s tick instead of waiting 30 min. */
     private void maybeRepublishOtc() {
+        if (IdentityWatch.halted()) return;
         if (identity == null || myMinimaPk == null || !wallet.ready()) return;
         if (!prefs.getBoolean("otc_auto", false)) return;
         if (System.currentTimeMillis() - prefs.getLong("otc_last_publish_ok", 0) < REPUBLISH_INTERVAL_MS) return;

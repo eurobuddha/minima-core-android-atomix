@@ -63,6 +63,27 @@ public final class EthWallet {
         });
     }
 
+    /** What ETH address would this node's seed derive RIGHT NOW? Same command as deriveFromNode, but the key
+     *  is used to compute the address and then dropped — {@code creds} is NOT touched. Lets IdentityWatch ask
+     *  "does my in-use wallet still belong to this node?" without swapping the wallet out from under a swap
+     *  (and without a code path that could silently replace a funded key). Never logs the key. */
+    public void probeNodeAddress(NodeApi node, final Handler ui, final Cb cb) {
+        node.cmd("seedrandom modifier:ethbridge", new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                JSONObject r = j.optJSONObject("response");
+                String sr = r == null ? "" : r.optString("seedrandom", "");
+                if (sr.isEmpty()) { post(ui, () -> cb.err("no seedrandom")); return; }
+                try {
+                    final String a = Credentials.create(sr.startsWith("0x") ? sr : "0x" + sr).getAddress();
+                    post(ui, () -> cb.ok(a));
+                } catch (Exception e) {
+                    post(ui, () -> cb.err("probe failed"));   // never echo the exception: it can carry key material
+                }
+            }
+            @Override public void onError(String m) { post(ui, () -> cb.err(m)); }
+        });
+    }
+
     /** Bring your own key (advanced). Validates by constructing the credentials. */
     public void importKey(String hexPriv) {
         creds = Credentials.create(hexPriv.startsWith("0x") ? hexPriv : "0x" + hexPriv);

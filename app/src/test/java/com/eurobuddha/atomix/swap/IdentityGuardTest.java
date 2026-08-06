@@ -1,5 +1,6 @@
 package com.eurobuddha.atomix.swap;
 
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -38,6 +39,7 @@ public class IdentityGuardTest {
     @Before public void setUp() throws Exception {
         SwapEngine.clearRetryMarkersForTest();
         SwapEngine.resetIdentityAlarmForTest();
+        com.eurobuddha.atomix.IdentityWatch.resetForTest();
         EthWallet wallet = mock(EthWallet.class);
         when(wallet.address()).thenReturn("0x2222222222222222222222222222222222222222");
         notifier = mock(SwapEngine.Notifier.class);
@@ -49,7 +51,9 @@ public class IdentityGuardTest {
 
     @Test public void orphanedIdentityRaisesTheAlarmOnce() {
         engine.setMyPubkeys(Collections.singleton("AAAA"));      // node keys do NOT include 0xBBBB
-        verify(notifier, times(1)).notify(contains("identity mismatch"), anyString());
+        verify(notifier, times(1)).notify(contains("Wallet mismatch"), anyString());
+        assertTrue("the verdict must reach IdentityWatch so the UI blocker and every gate agree",
+                com.eurobuddha.atomix.IdentityWatch.halted());
 
         engine.setMyPubkeys(Collections.singleton("AAAA"));      // second engine / re-init: no re-alarm
         verify(notifier, times(1)).notify(anyString(), anyString());

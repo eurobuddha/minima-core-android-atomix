@@ -188,6 +188,7 @@ public class SwapService extends Service {
     // ----- pairing (state-change handler, NOT a boot latch — the loops already run) -----
 
     private void onPaired(boolean enabled) {
+        if (enabled) IdentityWatch.forceNext();   // node just (re)appeared — likeliest reseed moment
         boolean was = paired;
         paired = enabled;
         SwapLog.d("svc paired=" + enabled);
@@ -239,6 +240,10 @@ public class SwapService extends Service {
             });
         }
         if (identity == null && !identityDeriving) deriveIdentity();
+        // Keep re-asking whether our keys still belong to this node (throttled inside). The service is the
+        // long-lived host — this is precisely where a mid-session reseed used to go unnoticed for days.
+        if (wallet.ready() && minima.ready())
+            IdentityWatch.check(node, wallet, minima, prefs, h, notifier);
     }
 
     /** Derive the comms signing identity from the node seed (only needed to republish the maker's order). */
@@ -376,6 +381,7 @@ public class SwapService extends Service {
      *  FAILED attempt is retried on the next 90s tick instead of silently suppressed for 30 min — and the
      *  moment pairing returns after an outage the stale stamp forces an immediate reinstatement. */
     private void maybeAutoRepublish() {
+        if (IdentityWatch.halted()) { SwapLog.skip("bgpub", "HALTED: app keys do not match the node"); return; }
         if (identity == null || myMinimaPk == null || !wallet.ready()) { SwapLog.skip("bgpub", "waiting: identity/wallet not ready"); return; }
         if (!prefs.getBoolean("auto_publish", false)) return;
         long okStamp = prefs.getLong("last_publish_ok", 0);
@@ -625,6 +631,7 @@ public class SwapService extends Service {
 
     /** What the persistent notification should say right now — the user's at-a-glance market health. */
     private String fgStateText() {
+        if (IdentityWatch.halted()) return IdentityWatch.fgLine();   // the halt outranks every other state
         if (!paired) return unpairedSince > 0 && System.currentTimeMillis() - unpairedSince > OFFLINE_ALERT_AFTER_MS
                 ? "Market offline — waiting for Minima Core" : "Waiting for Minima Core…";
         final String ccy = TradingContext.active().coinLabel;

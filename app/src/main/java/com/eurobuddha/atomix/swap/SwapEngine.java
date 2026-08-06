@@ -137,7 +137,8 @@ public final class SwapEngine {
     }
     public void setMyMinimaPk(String pk) { this.myMinimaPk = pk; }
 
-    /** One alarm per process — both engines route through setMyPubkeys, and this must not renotify per poll. */
+    /** One alarm per process — both engines route through setMyPubkeys, and this must not renotify per poll.
+     *  (Kept as a same-tick guard; the authoritative, continuously re-checked verdict lives in IdentityWatch.) */
     private static volatile boolean identityAlarmRaised = false;
 
     /** The node's full 64-key set, so refunds work for a coin locked under any default key.
@@ -160,11 +161,16 @@ public final class SwapEngine {
             SwapLog.w("IDENTITY ORPHANED: node does not own persisted swap identity " + myMinimaPk
                     + " (" + this.myPubkeys.size() + " node keys checked). Node reset with a different seed?"
                     + " Incoming swap legs and lock-change route to this identity and CANNOT be signed.");
-            notifier.notify("Wallet identity mismatch",
-                    "Your node does not own this app's swap identity — likely after a node reset. "
-                    + "Do NOT trade. Restore the previous seed or reset the app identity.");
+            // Hand the verdict to the single source of truth so the UI blocker, the FGS line and every
+            // new-liability gate agree — and so it survives being re-checked on a cadence.
+            com.eurobuddha.atomix.IdentityWatch.noteMinimaOrphaned(myMinimaPk, notifier);
         }
     }
+
+    /** No NEW liabilities while the app's keys don't belong to the node. Settlement (claim/refund of swaps
+     *  already in flight) deliberately keeps running — freezing that is how funds got stranded twice — but
+     *  anything that commits fresh money must stop dead. */
+    private boolean halted() { return com.eurobuddha.atomix.IdentityWatch.halted(); }
     public void setMyOrder(Order o) { this.myOrder = o; }
     public void setOtcDb(OtcDb o) { this.otcDb = o; }
     public String swapStatus(String hash) { SwapDb.Swap s = db.getSwap(hash); return s == null ? null : s.status; }
@@ -733,6 +739,7 @@ public final class SwapEngine {
         // against my active-currency order/price would misprice the counter-leg. Claiming a coin I'm OWED (secret
         // known, above) and refunding my own expired coins (checkExpiredMinima) stay token-agnostic; only this
         // new-liability path is gated.
+        if (halted()) return;   // node/app key mismatch — take on no new counter-leg liability
         if (!minima.activeToken().equalsIgnoreCase(coin.optString("tokenid", "0x00"))) return;
         if (db.haveSentCounterParty(hash)) return;
         if (timelock - block < CP_BLOCKS_CHECK) return;                    // first leg too close to expiry
@@ -790,6 +797,7 @@ public final class SwapEngine {
     /** [io] lock the ETH counter-leg for a mxUSDT→ERC20 swap I'm responding to (now+1800s). */
     private void lockEthCounterLeg(JSONObject coin, String hash, String reqTokenAddr) {
         try {
+            if (halted()) { inflight.remove("cpEth:" + hash); return; }   // belt: never commit ETH while mismatched
             EthNet.Token token = net.tokenByAddress(reqTokenAddr);
             if (token == null) { inflight.remove("cpEth:" + hash); return; }
             Credentials creds = wallet.creds();
@@ -1096,6 +1104,7 @@ public final class SwapEngine {
         }
 
         // I don't know the secret → I'm an ERC20→mxUSDT responder; lock the mxUSDT counter-leg.
+        if (halted()) return;   // node/app key mismatch — take on no new counter-leg liability
         if (db.haveSentCounterParty(hash)) return;
         // Persistent dedup (survives a restart / a lost txnpost response that the in-memory CP_LOCKING can't):
         // lockMinimaCounterLeg records the swap row BEFORE broadcast, so a row here means this hash is already
