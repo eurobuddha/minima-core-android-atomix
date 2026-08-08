@@ -1840,7 +1840,8 @@ public class MainActivity extends AppCompatActivity {
                 + (IdentityWatch.ethMismatch()
                     ? ", and the stale ETH key itself (it is never stored — only your OLD node seed could rebuild it)."
                     : ".")
-                + " Rescue anything you need FIRST.");
+                + " Rescue anything you need FIRST.\n\nIf this warning returns after a reinstall, Android restored "
+                + "your old settings from a backup — clear app storage instead. That always works.");
         warn.setTextColor(Design.RED()); warn.setTextSize(12f);
         warn.setPadding(0, dp(14), 0, dp(14));
         card.addView(warn);
@@ -1856,6 +1857,15 @@ public class MainActivity extends AppCompatActivity {
             Design.pressable(sweep);
             card.addView(sweep, pillRow());
         }
+
+        // Clearing storage is offered ALONGSIDE the uninstall, not buried in it: a user hit this halt,
+        // uninstalled, reset their node, reinstalled — and the halt came back, because Android's backup/restore
+        // re-planted the old prefs. Clearing storage by hand was the only thing that worked. (0.1.20 turns that
+        // backup off, but a device restored from an older backup can still arrive here carrying stale keys.)
+        TextView storage = Design.pill(this, "🧹  Clear app storage (App info)", Design.SURFACE2(), Design.TEXT());
+        storage.setOnClickListener(v -> appInfoDialog());
+        Design.pressable(storage);
+        card.addView(storage, pillRow());
 
         TextView uninstall = Design.pill(this, "Uninstall & reinstall AtomiX", Design.RED(), 0xFFFFFFFF);
         uninstall.setOnClickListener(v -> uninstallDialog());
@@ -1877,6 +1887,30 @@ public class MainActivity extends AppCompatActivity {
         return k.length() <= 20 ? k : k.substring(0, 10) + "…" + k.substring(k.length() - 8);
     }
 
+    /** The reliable reset. A reinstall SHOULD be enough, but Android's backup/restore can put the old prefs
+     *  straight back (a user did uninstall → node reset → reinstall and the halt returned; only clearing
+     *  storage fixed it). Clearing app storage is the step that always works, so it gets its own door. */
+    private void appInfoDialog() {
+        dialog()
+                .setTitle("Clear AtomiX storage")
+                .setMessage("This is the step that always works.\n\nTap “Open App info”, then Storage → Clear "
+                        + "storage / Clear data. That wipes this app's saved identity so it re-derives cleanly "
+                        + "from your node.\n\nIt also deletes your swap history and the claim secrets for any "
+                        + "unsettled swap, and the ETH key is not stored anywhere — rescue anything you need first.")
+                .setPositiveButton("Open App info", (d, w) -> {
+                    try {
+                        android.content.Intent i = new android.content.Intent(
+                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                        i.setData(android.net.Uri.parse("package:" + getPackageName()));
+                        startActivity(i);
+                    } catch (Exception e) {
+                        toast("Open Android Settings › Apps › AtomiX › Storage › Clear storage");
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
     /** Android cannot uninstall an app from inside itself — ACTION_DELETE opens the system prompt and the user
      *  confirms. Reinstalling is what actually resets the identity (clears swap_addr/swap_pk) and forces a
      *  fresh ETH derivation from the current node seed. */
@@ -1886,7 +1920,9 @@ public class MainActivity extends AppCompatActivity {
                 .setMessage("This removes AtomiX and its data — including the claim secrets for any unsettled "
                         + "swap and the stale ETH key. Only continue if you have exported or swept anything you "
                         + "still need.\n\nAfter it is removed, install the AtomiX APK again. It will pick up your "
-                        + "node's current keys cleanly.")
+                        + "node's current keys cleanly.\n\nIF THIS WARNING COMES BACK after reinstalling: Android "
+                        + "restored your old settings from a phone or cloud backup. Clear app storage (App info → "
+                        + "Storage → Clear storage) — that always works.")
                 .setPositiveButton("Uninstall now", (d, w) -> {
                     try {
                         android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_DELETE);

@@ -37,8 +37,16 @@
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />
 
+    <!-- allowBackup=false is a FUND-SAFETY setting here, not a preference.
+         With the scaffold default (true + empty rules) Android Auto Backup uploaded this app's entire data
+         directory to the user's cloud and RESTORED it on reinstall. Two consequences, both real:
+           1. It defeated the app's own remedy. A user hit the 0.1.19 identity halt, uninstalled, reset their
+              node and reinstalled — and the halt came straight back, because the restore put the ORPHANED
+              swap_addr/swap_pk back. Only clearing app storage by hand fixed it.
+           2. It shipped the `secrets` table (HTLC claim preimages) and the swap identity off-device.
+         A reinstall must be a true reset, so nothing here is backed up or transferred. -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"

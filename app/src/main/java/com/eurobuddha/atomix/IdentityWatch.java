@@ -117,7 +117,9 @@ public final class IdentityWatch {
                 + (minimaMismatch ? " Minima key not owned by node: " + orphanedPk + "." : "")
                 + (ethMismatch ? " ETH wallet in use " + staleEth + " but node derives " + nodeEth + "." : ""));
         if (notifier != null) notifier.notify("Wallet mismatch — AtomiX halted",
-                "Your node's seed no longer matches this app. Trading is stopped. Open AtomiX to rescue funds and reinstall.");
+                "Your node's seed no longer matches this app. Trading is stopped. Open AtomiX to rescue funds, "
+                + "then reinstall AND clear app storage — a reinstall alone can restore the old keys from a "
+                + "phone/cloud backup.");
     }
 
     /** Adopt a verdict discovered elsewhere: SwapEngine.setMyPubkeys already compares the published key
