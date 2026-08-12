@@ -10,8 +10,13 @@ android {
         applicationId "com.eurobuddha.atomix"
         minSdk 28
         targetSdk 35
-        versionCode 22
-        versionName "0.1.21"
+        // versionCode is minor*100 + patch, the family convention (0.2.9 -> 209, 0.4.3 -> 403).
+        // This app used a plain counter instead (0.1.14 -> 15 ... 0.1.21 -> 22). That was monotonic
+        // and never broke, but it left the number far below where the convention puts it, so the
+        // first "correct" numbering would have been a downgrade — which is exactly how Terminal IDE
+        // stranded itself. Realigned here while 122 is still an increase over 22.
+        versionCode 122
+        versionName "0.1.22"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
