@@ -110,12 +110,17 @@ public final class EthWallet {
         String data = FunctionEncoder.encode(fn);
         String ret = rpc.ethCall(tokenAddress, data);
         if (ret == null || ret.length() < 3) return BigInteger.ZERO;
-        List<Type> out = FunctionReturnDecoder.decode(ret, fn.getOutputParameters());
-        if (out.isEmpty()) return BigInteger.ZERO;
-        // MA-8: guard the decoder cast — malformed contract return data would throw an unchecked
-        // ClassCastException that crashes this background balance read (declared only IOException).
-        Object v = out.get(0).getValue();
-        return v instanceof BigInteger ? (BigInteger) v : BigInteger.ZERO;
+        // MA-8 (+review): guard the decode AND the cast — malformed contract return data would otherwise throw
+        // an unchecked NumberFormatException/ClassCastException that crashes this background balance read
+        // (declared only IOException). A balance that can't be read reads as ZERO.
+        try {
+            List<Type> out = FunctionReturnDecoder.decode(ret, fn.getOutputParameters());
+            if (out.isEmpty()) return BigInteger.ZERO;
+            Object v = out.get(0).getValue();
+            return v instanceof BigInteger ? (BigInteger) v : BigInteger.ZERO;
+        } catch (RuntimeException e) {
+            return BigInteger.ZERO;
+        }
     }
 
     /** Format a raw integer amount with the given decimals to a trimmed decimal string. */

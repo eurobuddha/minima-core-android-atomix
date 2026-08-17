@@ -15,8 +15,8 @@ android {
         // and never broke, but it left the number far below where the convention puts it, so the
         // first "correct" numbering would have been a downgrade — which is exactly how Terminal IDE
         // stranded itself. Realigned here while 122 is still an increase over 22.
-        versionCode 132
-        versionName "0.1.32"
+        versionCode 133
+        versionName "0.1.33"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -87,7 +87,10 @@ public final class MarketCollector {
             if (c == null) continue;
             if (MinimaHtlc.normKey(MinimaHtlc.stateAt(c, 101)).equals(want)) {
                 String s = MinimaHtlc.stateAt(c, 100);
-                if (!s.isEmpty()) return s;
+                // Review NIT: verify SHA2(secret)==hash before trusting it — the NOTIFY sink is anyone-can-write,
+                // so a forged coin could carry a matching state[101] but a bogus state[100]. Consistent with
+                // SwapEngine.harvestNotifySecrets; this is display/history only, but shouldn't record a fake secret.
+                if (!s.isEmpty() && MinimaHtlc.verifyPreimage(s, hash)) return s;
             }
         }
         return null;

@@ -125,9 +125,11 @@ public final class EthHtlc {
                         new TypeReference<Bool>() {}, new TypeReference<Bytes32>() {}, new TypeReference<Bool>() {}));
         String ret = rpc.ethCall(net.htlc, FunctionEncoder.encode(f));
         if (ret == null || ret.length() < 3) return null;
-        List<Type> d = FunctionReturnDecoder.decode(ret, f.getOutputParameters());
-        if (d.size() < 12) return null;
         try {
+            // Review MINOR: decode() itself is the likelier thrower on a malformed RPC body (unchecked
+            // NumberFormatException), so it belongs inside the same guard as the casts, not before it.
+            List<Type> d = FunctionReturnDecoder.decode(ret, f.getOutputParameters());
+            if (d.size() < 12) return null;
             String sender = (String) d.get(0).getValue();
             if (sender == null || EthRpc.hexToBig(sender).signum() == 0) return null;   // zero address = no such contract
             Contract c = new Contract();

@@ -121,7 +121,9 @@ public final class SwapEngine {
     // H2: throttle the heavy market-history HTLC scan to at most every 5 min, and pause it while a claim is
     // pending (see poll()), so the single node command thread isn't starved when a claim is racing a timelock.
     private static final long MARKET_MIN_INTERVAL_MS = 5 * 60 * 1000;
-    private volatile long lastMarketPollMs = 0;
+    // Review MINOR: static (like inflight/ethAttempt/CP_LOCKING) so the fg Activity engine and the bg Service
+    // engine share ONE market-poll bookmark — a per-instance one let the heavy whole-address scan run from both.
+    private static volatile long lastMarketPollMs = 0;
 
     public SwapEngine(NodeApi node, MinimaHtlc minima, SwapDb db, EthWallet wallet,
                       Handler ui, Notifier notifier) {
@@ -396,7 +398,7 @@ public final class SwapEngine {
                     } catch (Exception e) {
                         ui.post(() -> cb.err(e.getMessage()));
                     }
-                });
+                }, () -> ui.post(() -> cb.err("Engine stopped — try again")));   // Review MINOR: don't drop cb on shutdown
             }
             @Override public void err(String m) { cb.err(m); }
         });
@@ -453,6 +455,9 @@ public final class SwapEngine {
         if (!ready()) { ui.post(() -> cb.report(java.util.Collections.singletonList("Wallet/node not ready yet — open the app and wait a moment."))); return; }
         final SwapDb.Swap s = db.getSwap(hash);
         if (s == null) { ui.post(() -> cb.report(java.util.Collections.singletonList("No record of this swap."))); return; }
+        // Review MINOR: if the io pool is shut down, report an error rather than silently dropping the task
+        // and leaving the "inspecting…" UI hung forever.
+        final Runnable onStopped = () -> ui.post(() -> cb.report(java.util.Collections.singletonList("Engine stopped — reopen the app to inspect.")));
         // Read the Minima side first (async node.cmd), then the ETH side (blocking, on io), then report.
         minima.currentBlock(new MinimaHtlc.BlockCb() {
             @Override public void ok(int block) {
@@ -467,10 +472,10 @@ public final class SwapEngine {
                         if (isMyPublishKey(MinimaHtlc.stateAt(c, 4))) counterMinimaCoin = c; // a coin locked to me
                     }
                     final JSONObject myMin = myMinimaCoin, cpMin = counterMinimaCoin;
-                    submitIo(() -> reportInspection(s, hash, block, myMin, cpMin, cb));
-                }, err -> submitIo(() -> reportInspection(s, hash, block, null, null, cb)));
+                    submitIo(() -> reportInspection(s, hash, block, myMin, cpMin, cb), onStopped);
+                }, err -> submitIo(() -> reportInspection(s, hash, block, null, null, cb), onStopped));
             }
-            @Override public void err(String m) { submitIo(() -> reportInspection(s, hash, -1, null, null, cb)); }
+            @Override public void err(String m) { submitIo(() -> reportInspection(s, hash, -1, null, null, cb), onStopped); }
         });
     }
 
@@ -861,9 +866,21 @@ public final class SwapEngine {
         // PRIMARY (works on free/keyless RPCs): for every known swap, read its ETH leg by deterministic
         // contractId = sha256(hashlock) via getContract (eth_call) — claim, harvest the revealed preimage,
         // or refund. No eth_getLogs, which free nodes gate as an "archive" request.
+        java.util.Set<String> termRaw = new java.util.HashSet<>(), termNorm = new java.util.HashSet<>();
         for (SwapDb.Swap s : db.allSwaps()) {
-            if (SwapDb.ST_COMPLETE.equals(s.status) || SwapDb.ST_REFUNDED.equals(s.status) || SwapDb.ST_ERROR.equals(s.status)) continue;
+            if (SwapDb.ST_COMPLETE.equals(s.status) || SwapDb.ST_REFUNDED.equals(s.status) || SwapDb.ST_ERROR.equals(s.status)) {
+                if (s.hash != null) { termRaw.add(s.hash); termNorm.add(MinimaHtlc.normKey(s.hash)); }
+                continue;
+            }
             try { checkEthContractFor(eth, s, myEth); } catch (Exception ignore) {}
+        }
+        // Review MINOR: reap per-hash guard entries for terminal swaps so the static ethAttempt (and the
+        // instance dedup sets) don't grow unbounded over a multi-day service — only CP_LOCKING was pruned before.
+        if (!termRaw.isEmpty()) {
+            ethAttempt.keySet().removeIf(k -> { int c = k.lastIndexOf(':'); return c >= 0 && termRaw.contains(k.substring(c + 1)); });
+            cpNoted.removeAll(termRaw);         // keyed by raw hash
+            incoming.removeAll(termNorm);       // keyed by normKey(hash)
+            declined.removeAll(termNorm);
         }
 
         // Re-arm OTC buy-responder hashes from persisted EXECUTING deals. The EXECUTE that first added a hash to the
