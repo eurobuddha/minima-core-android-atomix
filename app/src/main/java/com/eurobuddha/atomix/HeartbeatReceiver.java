@@ -30,7 +30,7 @@ public class HeartbeatReceiver extends BroadcastReceiver {
             ContextCompat.startForegroundService(ctx,
                     new Intent(ctx, SwapService.class).setAction(SwapService.ACTION_HEARTBEAT));
         } catch (Exception e) {
-            SwapLog.w("heartbeat FGS start: " + e.getClass().getSimpleName());   // worker/alarm relaunch retries
+            SwapLog.w("heartbeat FGS start: " + e.getClass().getSimpleName() + ": " + e.getMessage());   // worker/alarm relaunch retries
         }
     }
 
@@ -51,7 +51,7 @@ public class HeartbeatReceiver extends BroadcastReceiver {
                 am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi);
             }
         } catch (Exception e) {
-            SwapLog.w("heartbeat schedule: " + e.getClass().getSimpleName());
+            SwapLog.w("heartbeat schedule: " + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
     }
 }

@@ -30,8 +30,14 @@ public class SwapWorker extends Worker {
         try {
             ContextCompat.startForegroundService(getApplicationContext(),
                     new Intent(getApplicationContext(), SwapService.class));
-        } catch (Exception ignored) {}
-        return Result.success();
+            return Result.success();
+        } catch (Exception e) {
+            // MA-13: on Android 12+ a background FGS start can be refused (ForegroundServiceStartNotAllowedException).
+            // Swallowing it as success() meant WorkManager never retried and the failure was invisible in logcat.
+            // Log it and ask WorkManager to retry so the keeper still gets relaunched.
+            SwapLog.w("SwapWorker FGS start failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            return Result.retry();
+        }
     }
 
     /** Schedule the ~15-minute fallback (WorkManager's minimum period). */

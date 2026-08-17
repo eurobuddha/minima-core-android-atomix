@@ -713,9 +713,9 @@ public class SwapService extends Service {
             if (Build.VERSION.SDK_INT >= 34) {
                 // specialUse is uncapped, unlike dataSync's ~6h/day Android-14 budget that was killing us overnight.
                 startForeground(FG_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-            } else if (Build.VERSION.SDK_INT >= 29) {
-                startForeground(FG_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
             } else {
+                // MA-14: API 28–33 has no specialUse type, and the manifest no longer declares dataSync, so start
+                // as a plain typeless FGS (dataSync's time cap is an Android-14+ concern that doesn't apply here).
                 startForeground(FG_ID, n);
             }
             return true;

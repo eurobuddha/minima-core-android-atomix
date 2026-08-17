@@ -21,12 +21,13 @@ public class BootReceiver extends BroadcastReceiver {
 
     @Override public void onReceive(Context ctx, Intent intent) {
         SwapLog.d("boot/update: " + (intent == null ? "?" : intent.getAction()));
-        try { SwapWorker.schedule(ctx); } catch (Exception ignored) {}
+        try { SwapWorker.schedule(ctx); }
+        catch (Exception e) { SwapLog.w("boot worker schedule failed: " + e.getClass().getSimpleName() + ": " + e.getMessage()); }   // MI-13: the 15-min fallback silently absent otherwise
         HeartbeatReceiver.schedule(ctx);
         try {
             ContextCompat.startForegroundService(ctx, new Intent(ctx, SwapService.class));
         } catch (Exception e) {
-            SwapLog.w("boot FGS start: " + e.getClass().getSimpleName());   // worker/heartbeat retry shortly
+            SwapLog.w("boot FGS start: " + e.getClass().getSimpleName() + ": " + e.getMessage());   // MI-14; worker/heartbeat retry shortly
         }
     }
 }
