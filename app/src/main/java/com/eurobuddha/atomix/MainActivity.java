@@ -3512,7 +3512,8 @@ public class MainActivity extends AppCompatActivity {
             try {
                 if (ethSel[0]) {
                     BigInteger gp = EthRpc.hexToBig(rpc.callStr("eth_gasPrice", new org.json.JSONArray()));
-                    final String m = EthWallet.format(EthSend.maxEthSendWei(ethWeiRaw, gp), 18, 8);
+                    BigInteger bf = rpc.baseFeePerGasOrZero();   // MA-6: reserve at the same effective price EthTx broadcasts at
+                    final String m = EthWallet.format(EthSend.maxEthSendWei(ethWeiRaw, gp, bf), 18, 8);
                     ui.post(() -> amtE.setText(m));
                 } else {
                     final String m = EthWallet.format(usdtRawBal, net.tokens[0].decimals, 6);
@@ -3542,10 +3543,11 @@ public class MainActivity extends AppCompatActivity {
             io.execute(() -> {
                 try {
                     BigInteger gp = EthRpc.hexToBig(rpc.callStr("eth_gasPrice", new org.json.JSONArray()));
-                    final String err = EthSend.checkSend(eth, to, amt, ethWeiRaw, usdtRawBal, net.tokens[0].decimals, gp);
+                    BigInteger bf = rpc.baseFeePerGasOrZero();   // MA-6: same effective price as the broadcast, so validation can't under-reserve
+                    final String err = EthSend.checkSend(eth, to, amt, ethWeiRaw, usdtRawBal, net.tokens[0].decimals, gp, bf);
                     if (err != null) { ui.post(() -> toast(err)); return; }
                     final String fee = EthWallet.format(
-                            EthSend.gasReserveWei(gp, eth ? EthSend.GAS_ETH : EthSend.GAS_ERC20), 18, 8);
+                            EthSend.gasReserveWei(gp, bf, eth ? EthSend.GAS_ETH : EthSend.GAS_ERC20), 18, 8);
                     ui.post(() -> { d.dismiss(); sendReviewDialog(eth, to, amt, fee); });
                 } catch (Exception e) { ui.post(() -> toast("Could not read gas price — try again")); }
             });

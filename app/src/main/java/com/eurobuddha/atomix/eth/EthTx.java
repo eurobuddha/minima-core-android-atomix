@@ -43,6 +43,16 @@ public final class EthTx {
     public static String send(EthRpc rpc, Credentials creds, long chainId,
                               String to, String data, BigInteger value, BigInteger gasLimit) throws Exception {
         NonceState st = NONCE.computeIfAbsent(creds.getAddress(), k -> new NonceState());
+        // MA-5: fetch the gas price + base fee BEFORE the per-address lock — they are nonce-INDEPENDENT, and each
+        // is a full RPC round-trip (up to 9 fallbacks × ~38s). Holding them under the lock serialised every
+        // concurrent send for the same address behind ~2 extra network calls, so a market sweep's later locks
+        // could miss their Minima expiry. getTransactionCount and sendRawTransaction MUST stay inside the lock:
+        // the pending-vs-counter decision and the deferred nonce commit are the whole point of the serializer.
+        // The shared F5 formula (EthSend.effectiveGasPriceWei) also keeps the broadcast price identical to what
+        // the UI reserved (MA-6). baseFeePerGasOrZero returns 0 on failure, so the floor can only RAISE the price.
+        BigInteger rawGp = EthRpc.hexToBig(rpc.callStr("eth_gasPrice", new JSONArray()));
+        if (rawGp.signum() <= 0) rawGp = FALLBACK_GAS_PRICE;
+        final BigInteger gasPrice = EthSend.effectiveGasPriceWei(rawGp, rpc.baseFeePerGasOrZero());
         synchronized (st) {
             long pending = rpc.getTransactionCount(creds.getAddress()).longValue();   // fresh "pending"
             long now = System.currentTimeMillis();
@@ -53,20 +63,6 @@ public final class EthTx {
                 alloc = pending; newNext = pending + 1; newSync = now;
             } else {                                              // pending just lagging our broadcast → keep counting
                 alloc = st.next; newNext = st.next + 1; newSync = st.syncAtMs;
-            }
-
-            BigInteger gasPrice = EthRpc.hexToBig(rpc.callStr("eth_gasPrice", new JSONArray()));
-            if (gasPrice.signum() <= 0) gasPrice = FALLBACK_GAS_PRICE;
-            gasPrice = gasPrice.multiply(BigInteger.valueOf(12)).divide(BigInteger.TEN); // +20% headroom
-            // F5: a legacy tx must pay ≥ the current base fee to be minable. eth_gasPrice usually already includes
-            // it, but a stale value or the 2-gwei fallback can sit below a risen base fee and hang the tx forever
-            // (which, post-F1, would mean endless retries but a swap that never settles). Floor the gasPrice at
-            // 2× base fee for headroom against a rising fee. baseFeePerGasOrZero() returns 0 on failure, so this
-            // can only ever RAISE the price, never block the send.
-            BigInteger baseFee = rpc.baseFeePerGasOrZero();
-            if (baseFee.signum() > 0) {
-                BigInteger floor = baseFee.multiply(BigInteger.valueOf(2));
-                if (gasPrice.compareTo(floor) < 0) gasPrice = floor;
             }
 
             RawTransaction raw = RawTransaction.createTransaction(

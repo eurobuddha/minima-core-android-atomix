@@ -1,5 +1,7 @@
 package com.eurobuddha.atomix.eth;
 
+import com.eurobuddha.atomix.SwapLog;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.web3j.abi.FunctionEncoder;
@@ -125,23 +127,31 @@ public final class EthHtlc {
         if (ret == null || ret.length() < 3) return null;
         List<Type> d = FunctionReturnDecoder.decode(ret, f.getOutputParameters());
         if (d.size() < 12) return null;
-        String sender = (String) d.get(0).getValue();
-        if (sender == null || EthRpc.hexToBig(sender).signum() == 0) return null;   // zero address = no such contract
-        Contract c = new Contract();
-        c.contractId = contractId.startsWith("0x") ? contractId : "0x" + contractId;
-        c.owner = sender;
-        c.minimaPublicKey = Numeric.toHexString((byte[]) d.get(1).getValue());
-        c.receiver = (String) d.get(2).getValue();
-        c.tokenContract = (String) d.get(3).getValue();
-        c.amount = (BigInteger) d.get(4).getValue();
-        c.requestAmount = (BigInteger) d.get(5).getValue();
-        c.hashlock = Numeric.toHexString((byte[]) d.get(6).getValue());
-        c.timelock = ((BigInteger) d.get(7).getValue()).longValue();
-        c.withdrawn = (Boolean) d.get(8).getValue();
-        c.refunded = (Boolean) d.get(9).getValue();
-        c.preimage = Numeric.toHexString((byte[]) d.get(10).getValue());
-        c.otc = (Boolean) d.get(11).getValue();
-        return c;
+        try {
+            String sender = (String) d.get(0).getValue();
+            if (sender == null || EthRpc.hexToBig(sender).signum() == 0) return null;   // zero address = no such contract
+            Contract c = new Contract();
+            c.contractId = contractId.startsWith("0x") ? contractId : "0x" + contractId;
+            c.owner = sender;
+            c.minimaPublicKey = Numeric.toHexString((byte[]) d.get(1).getValue());
+            c.receiver = (String) d.get(2).getValue();
+            c.tokenContract = (String) d.get(3).getValue();
+            c.amount = (BigInteger) d.get(4).getValue();
+            c.requestAmount = (BigInteger) d.get(5).getValue();
+            c.hashlock = Numeric.toHexString((byte[]) d.get(6).getValue());
+            c.timelock = ((BigInteger) d.get(7).getValue()).longValue();
+            c.withdrawn = (Boolean) d.get(8).getValue();
+            c.refunded = (Boolean) d.get(9).getValue();
+            c.preimage = Numeric.toHexString((byte[]) d.get(10).getValue());
+            c.otc = (Boolean) d.get(11).getValue();
+            return c;
+        } catch (RuntimeException e) {
+            // MA-8: malformed decoder output (unexpected type from a broken RPC) — a bare cast would throw an
+            // unchecked ClassCastException on the settlement poll thread. Return null, but LOG it: null otherwise
+            // means "no such contract" and SwapEngine branches refunds on that, so the two must not be conflated.
+            SwapLog.w("getContract decode failed for " + contractId + ": " + e);
+            return null;
+        }
     }
 
     /** A decoded HTLCERC20New event — one locked ETH leg, discovered by scanning. Mirrors parseHTLCContractData. */

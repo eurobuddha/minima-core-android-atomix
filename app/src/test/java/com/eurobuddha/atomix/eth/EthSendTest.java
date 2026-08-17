@@ -30,22 +30,37 @@ public class EthSendTest {
         assertFalse(EthSend.isEthAddr(null));
     }
 
+    private static final BigInteger NO_BASE = BigInteger.ZERO;   // baseFee 0 ⇒ just the +20% headroom (pre-floor behaviour)
+
     @Test public void gasMathMirrorsTheSerializerHeadroom() {
-        assertEquals(BigInteger.valueOf(21000L * 1_200_000_000L), EthSend.gasReserveWei(GP, EthSend.GAS_ETH));
+        assertEquals(BigInteger.valueOf(21000L * 1_200_000_000L), EthSend.gasReserveWei(GP, NO_BASE, EthSend.GAS_ETH));
         assertEquals(new BigInteger("100000000000000000").subtract(BigInteger.valueOf(21000L * 1_200_000_000L)),
-                EthSend.maxEthSendWei(new BigInteger("100000000000000000"), GP));
-        assertEquals(BigInteger.ZERO, EthSend.maxEthSendWei(BigInteger.valueOf(1000), GP));
+                EthSend.maxEthSendWei(new BigInteger("100000000000000000"), GP, NO_BASE));
+        assertEquals(BigInteger.ZERO, EthSend.maxEthSendWei(BigInteger.valueOf(1000), GP, NO_BASE));
+    }
+
+    @Test public void effectiveGasPriceFloorsAtTwiceBaseFee() {
+        // MA-6: when eth_gasPrice (+20%) sits below 2× base fee, the reserve must use the higher floor — the case
+        // where the UI validated a send that then failed at broadcast (EthTx applies the same floor).
+        BigInteger baseFee = BigInteger.valueOf(5_000_000_000L);                      // 5 gwei → floor 10 gwei
+        assertEquals("gp*1.2 (1.2 gwei) is below 2×baseFee (10 gwei) → floored",
+                BigInteger.valueOf(10_000_000_000L), EthSend.effectiveGasPriceWei(GP, baseFee));
+        assertEquals("no base fee → just +20% headroom",
+                BigInteger.valueOf(1_200_000_000L), EthSend.effectiveGasPriceWei(GP, NO_BASE));
+        // and the reserve/validation must reflect the floored price
+        assertEquals(EthSend.GAS_ETH.multiply(BigInteger.valueOf(10_000_000_000L)),
+                EthSend.gasReserveWei(GP, baseFee, EthSend.GAS_ETH));
     }
 
     @Test public void checkSendRefusalPaths() {
-        assertNull(EthSend.checkSend(true, TO, "0.5", ETH_1, USDT_50, 6, GP));
-        assertNotNull(EthSend.checkSend(true, "nope", "0.5", ETH_1, USDT_50, 6, GP));      // bad address
-        assertNotNull(EthSend.checkSend(true, TO, "1e2", ETH_1, USDT_50, 6, GP));          // not plain decimal
-        assertNotNull(EthSend.checkSend(true, TO, "0", ETH_1, USDT_50, 6, GP));            // zero
-        assertNotNull(EthSend.checkSend(true, TO, "1", ETH_1, USDT_50, 6, GP));            // amount+gas > balance
-        assertNull(EthSend.checkSend(false, TO, "25", ETH_1, USDT_50, 6, GP));
-        assertNotNull(EthSend.checkSend(false, TO, "50.000001", ETH_1, USDT_50, 6, GP));   // over USDT balance
-        assertNotNull(EthSend.checkSend(false, TO, "25", BigInteger.ZERO, USDT_50, 6, GP)); // no gas ETH
+        assertNull(EthSend.checkSend(true, TO, "0.5", ETH_1, USDT_50, 6, GP, NO_BASE));
+        assertNotNull(EthSend.checkSend(true, "nope", "0.5", ETH_1, USDT_50, 6, GP, NO_BASE));      // bad address
+        assertNotNull(EthSend.checkSend(true, TO, "1e2", ETH_1, USDT_50, 6, GP, NO_BASE));          // not plain decimal
+        assertNotNull(EthSend.checkSend(true, TO, "0", ETH_1, USDT_50, 6, GP, NO_BASE));            // zero
+        assertNotNull(EthSend.checkSend(true, TO, "1", ETH_1, USDT_50, 6, GP, NO_BASE));            // amount+gas > balance
+        assertNull(EthSend.checkSend(false, TO, "25", ETH_1, USDT_50, 6, GP, NO_BASE));
+        assertNotNull(EthSend.checkSend(false, TO, "50.000001", ETH_1, USDT_50, 6, GP, NO_BASE));   // over USDT balance
+        assertNotNull(EthSend.checkSend(false, TO, "25", BigInteger.ZERO, USDT_50, 6, GP, NO_BASE)); // no gas ETH
     }
 
     @Test public void parseUnitsTruncatesNeverRoundsUp() {

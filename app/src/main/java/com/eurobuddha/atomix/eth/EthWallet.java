@@ -114,7 +114,10 @@ public final class EthWallet {
         if (ret == null || ret.length() < 3) return BigInteger.ZERO;
         List<Type> out = FunctionReturnDecoder.decode(ret, fn.getOutputParameters());
         if (out.isEmpty()) return BigInteger.ZERO;
-        return (BigInteger) out.get(0).getValue();
+        // MA-8: guard the decoder cast — malformed contract return data would throw an unchecked
+        // ClassCastException that crashes this background balance read (declared only IOException).
+        Object v = out.get(0).getValue();
+        return v instanceof BigInteger ? (BigInteger) v : BigInteger.ZERO;
     }
 
     /** Format a raw integer amount with the given decimals to a trimmed decimal string. */

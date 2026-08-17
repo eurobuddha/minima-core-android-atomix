@@ -37,17 +37,30 @@ public final class EthRpc {
     };
 
     private volatile String url;             // the endpoint that last worked (sticky)
-    private final java.util.List<String> endpoints = new java.util.ArrayList<>();
+    // MA-1: an immutable snapshot published to a volatile field, so call() iterates without locking and can
+    // never see a half-built list (ConcurrentModificationException) if setUrl runs concurrently.
+    private volatile java.util.List<String> endpoints = java.util.Collections.emptyList();
 
     public EthRpc(String url) { setUrl(url); }
 
     public synchronized void setUrl(String url) {
-        this.url = url;
-        endpoints.clear();
+        // MA-2/MA-3: force a parseable https URL. A non-http scheme would make callOnce's (HttpURLConnection)
+        // cast throw ClassCastException — NOT an IOException, so it would escape the fallback loop and crash the
+        // caller; plain http would expose balances / timelock reads to MITM. On a bad value fall back to the
+        // built-in mainnet default rather than throw: this runs in the constructor on the UI thread
+        // (MainActivity.onCreate), where a throw would crash app start.
+        String primary = isHttps(url) ? url.trim() : EthNet.MAINNET.defaultRpc;
+        this.url = primary;
         java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>();
-        set.add(url);                                  // configured primary first
+        set.add(primary);                              // configured primary first
         for (String f : FALLBACKS) set.add(f);         // then the known-good keyless nodes
-        endpoints.addAll(set);
+        this.endpoints = java.util.Collections.unmodifiableList(new java.util.ArrayList<>(set));
+    }
+
+    private static boolean isHttps(String u) {
+        if (u == null) return false;
+        try { return "https".equalsIgnoreCase(new URL(u.trim()).getProtocol()); }
+        catch (Exception e) { return false; }
     }
 
     public String url() { return url; }
@@ -180,12 +193,17 @@ public final class EthRpc {
         return callStr("eth_sendRawTransaction", new JSONArray().put(signedHex));
     }
 
-    public static BigInteger hexToBig(String hex) {
+    public static BigInteger hexToBig(String hex) throws IOException {
         if (hex == null) return BigInteger.ZERO;
         hex = hex.trim();
         if (hex.startsWith("0x") || hex.startsWith("0X")) hex = hex.substring(2);
         if (hex.isEmpty()) return BigInteger.ZERO;
-        return new BigInteger(hex, 16);
+        // MA-4: a malformed hex body from a broken/hostile RPC (e.g. "0x1g", "pending") threw an UNCHECKED
+        // NumberFormatException that crashed the background thread — callers declare only IOException. Wrap it so
+        // it surfaces as a normal IOException (the tolerant callers — baseFeePerGasOrZero, EthHtlc.parseNew —
+        // already catch it; do NOT return ZERO, which would corrupt nonce/blockNumber/timelock math).
+        try { return new BigInteger(hex, 16); }
+        catch (NumberFormatException e) { throw new IOException("invalid hex from RPC: " + snippet(hex)); }
     }
 
     private static String readAll(InputStream is) throws IOException {
@@ -195,7 +213,7 @@ public final class EthRpc {
             byte[] buf = new byte[4096];
             int n;
             while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
-            return bos.toString("UTF-8");
+            return new String(bos.toByteArray(), StandardCharsets.UTF_8);   // NI-2: type-safe charset (minSdk 28 < API 33 for toString(Charset))
         }
     }
 }
