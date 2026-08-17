@@ -47,6 +47,7 @@ public class HtlcTxnConstructionTest {
     private final List<String> commands = new ArrayList<>();
 
     @Before public void setUp() {
+        com.eurobuddha.comms.SignGate.resetForTest();   // lock/claim/refund route through the shared static gate
         node = mock(NodeApi.class);
         // Record each command and reply with a generic success carrying everything any step reads back.
         doAnswer(inv -> {
@@ -325,6 +326,44 @@ public class HtlcTxnConstructionTest {
         htlc.refund(coin, errCb(erred));
         assertTrue("refund must call err on a non-decimal coin amount", erred[0]);
         assertTrue("no command may be built", commands.isEmpty());
+    }
+
+    // ---- M1: the fund-locking `send` must serialise through SignGate like claim/refund ----
+
+    @Test public void lockSerialisesThroughSignGate() throws Exception {
+        // A node that CAPTURES the `send` callback instead of firing it, so the first lock stays in-flight in
+        // the gate. Setup commands (newscript/keys) fire immediately so the wallet is ready.
+        com.eurobuddha.comms.SignGate.resetForTest();
+        final List<String> cmds = new ArrayList<>();
+        final List<NodeApi.Cb> pendingSends = new ArrayList<>();
+        NodeApi n2 = mock(NodeApi.class);
+        doAnswer(inv -> {
+            String c = inv.getArgument(0);
+            NodeApi.Cb cb = inv.getArgument(1);
+            cmds.add(c);
+            if (c.startsWith("send")) { pendingSends.add(cb); return null; }   // capture, keep the gate busy
+            cb.onResult(new JSONObject().put("status", true).put("response",
+                    new JSONObject().put("miniaddress", MY_ADDR).put("publickey", MY_PK)));   // setup fires now
+            return null;
+        }).when(n2).cmd(anyString(), any(NodeApi.Cb.class));
+
+        MinimaHtlc h2 = new MinimaHtlc(n2);
+        h2.setup(MY_ADDR, MY_PK, new MinimaHtlc.SetupCb() {
+            @Override public void ok(String a, String p) {} @Override public void err(String m) { throw new AssertionError(m); }
+        });
+
+        h2.lock("0.15", "150000", TOKEN_ERC20, "0xFEEDFACE", "0xBEEFCAFE", "0xDEADBEEF", 1, "FALSE", post());
+        h2.lock("0.16", "150000", TOKEN_ERC20, "0xFEEDFACE", "0xBEEFCAFE", "0xDEADBEEF", 1, "FALSE", post());
+        assertEquals("the second lock's send must be GATED until the first frees", 1, countStartsWith(cmds, "send"));
+
+        // free the first lock's send → the gate advances → the second lock's send is now issued
+        pendingSends.get(0).onResult(new JSONObject().put("status", true).put("response", new JSONObject().put("txpowid", "0xTX")));
+        assertEquals("first freed → second lock's send issued", 2, countStartsWith(cmds, "send"));
+        pendingSends.get(1).onResult(new JSONObject().put("status", true).put("response", new JSONObject().put("txpowid", "0xTX")));
+    }
+
+    private static int countStartsWith(List<String> cmds, String verb) {
+        int n = 0; for (String c : cmds) if (c.startsWith(verb)) n++; return n;
     }
 
     // ---- helpers ----

@@ -139,8 +139,9 @@ public final class SignGate {
         return true;
     }
 
-    /** Clear all static state so each test starts clean. TEST ONLY. */
-    static void resetForTest() {
+    /** Clear all static state so each test starts clean. TEST ONLY (public so cross-package tests — e.g. the
+     *  swap package's HTLC signing-path tests — can reset the shared static gate). Never called by app code. */
+    public static void resetForTest() {
         QUEUE.clear(); busy = false; watchdog = null; generation = 0;
     }
 }

@@ -251,7 +251,9 @@ public final class MinimaHtlc {
         // The refund owner is set explicitly via state[0]=myPubkey, so the coin stays mine to reclaim.
         String send = "send amount:" + lockAmt + " mine:true address:" + HTLC_ADDRESS
                 + " state:" + state.toString() + " tokenid:" + activeToken;
-        cmd(send, r -> {
+        // M1: a `send` SIGNS on the node, so it must go through SignGate like every other signing path — a
+        // user-initiated lock can otherwise sign a one-time key leaf concurrently with an autonomous claim/refund.
+        runSend(send, r -> {
             JSONObject resp = r.optJSONObject("response");
             cb.ok(resp == null ? "" : resp.optString("txpowid", ""));
         }, cb::err);
@@ -335,7 +337,8 @@ public final class MinimaHtlc {
     public void splitCoins(int count, String totalAmount, PostCb cb) {
         String send = "send amount:" + totalAmount + " address:" + myAddress
                 + " tokenid:" + activeToken + " split:" + count + " coinage:1 mine:true";
-        cmd(send, r -> {
+        // M1: `send split:` signs on the node → route through SignGate (same reason as lock()).
+        runSend(send, r -> {
             JSONObject resp = r.optJSONObject("response");
             cb.ok(resp == null ? "" : resp.optString("txpowid", ""));
         }, cb::err);
@@ -534,6 +537,13 @@ public final class MinimaHtlc {
         com.eurobuddha.comms.SignGate.submit(gate -> runSeqAt(cmds, 0,
                 r -> { gate.free(); finalOk.accept(r); },
                 e -> { gate.free(); err.accept(e); }));
+    }
+
+    /** A single node command that SIGNS on the node (a bare {@code send}) — gated through {@link
+     *  com.eurobuddha.comms.SignGate} exactly like a multi-step txnsign sequence, so a lock/split can never
+     *  sign a one-time key leaf concurrently with an autonomous claim/refund (M1). */
+    private void runSend(String sendCmd, Consumer<JSONObject> ok, Consumer<String> err) {
+        runSeq(java.util.Collections.singletonList(sendCmd), ok, err);
     }
     private void runSeqAt(List<String> cmds, int i, Consumer<JSONObject> finalOk, Consumer<String> err) {
         cmd(cmds.get(i), resp -> {
