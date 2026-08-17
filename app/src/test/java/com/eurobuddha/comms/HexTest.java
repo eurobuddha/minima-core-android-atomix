@@ -20,6 +20,11 @@ public class HexTest {
         Hex.from("abc");   // 3 nibbles — the old code dropped the 'c'
     }
 
+    @Test(expected = IllegalArgumentException.class)
+    public void rejectsNonHexChars() {
+        Hex.from("0x-1");   // Integer.parseInt(…,16) would decode a sign to 0xFF — a hex codec must reject it
+    }
+
     @Test public void nullsAreHandled() {
         assertEquals("", Hex.to(null));
         assertArrayEquals(new byte[0], Hex.from(null));

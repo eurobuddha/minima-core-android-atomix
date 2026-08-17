@@ -54,6 +54,12 @@ public final class CommsTransport {
             if (!isCleanHex(blobHex)) { cb.onFailed("bad post blob"); return; }
             // MI-5: clone rather than mutate the caller's JSONObject (adding "99" in place surprised a reused extraState).
             JSONObject state = extraState != null ? new JSONObject(extraState.toString()) : new JSONObject();
+            // Review MINOR: every extraState VALUE is serialized into the flat `send` command too, so validate
+            // them as hex like address/tokenid/blob — the one interpolated field the MA-9 hardening had missed.
+            for (java.util.Iterator<String> it = state.keys(); it.hasNext(); ) {
+                Object v = state.get(it.next());
+                if (!(v instanceof String) || !isCleanHex((String) v)) { cb.onFailed("bad extra state value"); return; }
+            }
             state.put("99", "0x" + blobHex);   // hex-typed state value, read back the same way
             post(node, "send amount:" + amount + " address:" + address + " tokenid:" + tokenid + " state:" + state, cb);
         } catch (Exception e) {

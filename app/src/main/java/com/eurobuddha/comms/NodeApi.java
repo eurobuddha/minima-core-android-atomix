@@ -139,13 +139,15 @@ public class NodeApi {
         final Runnable[] ref = new Runnable[1];
         final Runnable timeout = () -> {
             mPending.remove(ref[0]);
-            if (done[0] || dead()) return;
+            if (done[0]) return;
             done[0] = true;
+            // Review MAJOR: ALWAYS decrement a consumed write, even on a dead view — the old `|| dead()`
+            // early-return leaked mPendingWrites, which then made reRegister() early-return forever
+            // (mPendingWrites > 0), and dropped the callback so a caller that set an in-flight flag hung.
             if (isWrite) mPendingWrites--;
-            // The "paired-then-node-died" detector: a run of dead-air commands means the node app is gone
-            // (rebooted phone, force-stop, crash). Flip to unpaired so the hosts start re-registering.
-            // NOT while a write is pending — the node is likely just grinding that write's PoW.
-            if (mPendingWrites == 0 && ++mConsecTimeouts >= TIMEOUTS_TO_UNPAIR) noteEnabled(false);
+            // The "paired-then-node-died" detector touches the pairing listener, so skip it on a dead host;
+            // but still deliver the error so the caller (scanner/SignGate lambda) never hangs (MA-11 parity).
+            if (!dead() && mPendingWrites == 0 && ++mConsecTimeouts >= TIMEOUTS_TO_UNPAIR) noteEnabled(false);
             if (cb != null) cb.onError("Minima Core didn't respond. Is it installed, running and enabled?");
         };
         ref[0] = timeout;

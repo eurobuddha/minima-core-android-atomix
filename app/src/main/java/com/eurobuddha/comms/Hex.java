@@ -21,6 +21,10 @@ public final class Hex {
         if (h.length() >= 2 && (h.charAt(0) == '0') && (h.charAt(1) == 'x' || h.charAt(1) == 'X')) h = h.substring(2);
         // MI-9: reject odd length rather than silently dropping the final nibble (h.length()/2 truncated it).
         if ((h.length() & 1) != 0) throw new IllegalArgumentException("odd-length hex");
+        // Review NIT: reject any non-hex char up front — Integer.parseInt(…,16) would otherwise accept a
+        // leading sign (e.g. "0x-1" → 0xFF), which a hex codec must not.
+        for (int i = 0; i < h.length(); i++)
+            if (Character.digit(h.charAt(i), 16) < 0) throw new IllegalArgumentException("non-hex char");
         int n = h.length() / 2;
         byte[] b = new byte[n];
         for (int i = 0; i < n; i++) {

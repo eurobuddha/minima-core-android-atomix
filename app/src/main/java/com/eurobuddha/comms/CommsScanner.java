@@ -87,7 +87,9 @@ public final class CommsScanner {
         depth = Math.min(START_DEPTH, targetDepth);    // ALWAYS start small — never an unbounded query
         if (tracked) { fetch(chainBlock); return; }
         node.cmd("coinnotify action:add address:" + targetAddress, new NodeApi.Cb() {
-            @Override public void onResult(JSONObject j) { tracked = true; fetch(chainBlock); }
+            // Review MINOR: only latch `tracked` on a genuine success — a status:false reply used to latch it
+            // true and the address was never re-added, so later `coins` reads could silently return nothing.
+            @Override public void onResult(JSONObject j) { tracked = j.optBoolean("status", true); fetch(chainBlock); }
             @Override public void onError(String m) { fetch(chainBlock); }
         });
     }
