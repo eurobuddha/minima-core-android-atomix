@@ -15,15 +15,16 @@ android {
         // and never broke, but it left the number far below where the convention puts it, so the
         // first "correct" numbering would have been a downgrade — which is exactly how Terminal IDE
         // stranded itself. Realigned here while 122 is still an increase over 22.
-        versionCode 133
-        versionName "0.1.33"
+        versionCode 134
+        versionName "0.1.34"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
         // Minima family release key. Credentials come from ~/.gradle/gradle.properties
         // (outside every repo), so nothing secret is ever committed. On a machine without
-        // those props this config stays empty and release falls back to debug signing.
+        // those props this config stays empty and the release build is UNSIGNED (AGP does not
+        // substitute the debug key for an explicitly-assigned-but-empty release signingConfig).
         release {
             def ksFile = project.findProperty('MINIMA_FAMILY_RELEASE_STORE_FILE')
             if (ksFile != null) {
@@ -38,11 +39,15 @@ android {
 
     buildTypes {
         release {
+            // Deliberately no R8: web3j / BouncyCastle / lazysodium (+ JNA) and org.json are reflection-heavy,
+            // so shrinking needs careful keep rules and its own on-device verification. Not an oversight.
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            // Sign release with the debug keystore, matching the minima-core-android node app.
-            // IPC is authorized by the MINIMA_ID token, not by signature, so this is sufficient
-            // for sideloading. Swap to a dedicated release keystore if uploading to Play.
+            // Signed with the Minima FAMILY release key (see signingConfigs.release above; commit 4b63e3c).
+            // IPC is authorized by the MINIMA_ID token, not by signature, so a self-signed sideload key is
+            // sufficient. On a machine WITHOUT the MINIMA_FAMILY_RELEASE_* gradle props, signingConfigs.release
+            // is empty and the release build is left UNSIGNED (it does NOT silently fall back to the debug key)
+            // — supply the props, or sign the APK afterwards with apksigner.
             signingConfig signingConfigs.release
         }
     }

@@ -676,7 +676,7 @@ public class MainActivity extends AppCompatActivity {
                     if (MinimaHtlc.HTLC_ADDRESS.equalsIgnoreCase(mx)) tag = " (swap HTLC)";
                     else if (SwapOrderBook.address().equalsIgnoreCase(addr)) tag = " (order book)";
                     sb.append(Util.tidyAmount(amt)).append("   ")
-                      .append(addr.length() > 16 ? addr.substring(0, 16) + "…" : addr).append(tag).append("\n");
+                      .append(addr).append(tag).append("\n");   // RULE 1: full address (the dump is a scrollable text view)
                 }
                 sb.append("\nsum of relevant coins ").append(Util.tidyAmount(sum.toPlainString()));
                 showText("Coin breakdown", sb.toString());
@@ -1504,6 +1504,16 @@ public class MainActivity extends AppCompatActivity {
             out.setText(usdt == null ? "" : (sellMinima ? "You receive ≈ " : "You pay ≈ ") + usdt + " " + symbol);
         }));
 
+        // RULE 1: the title's shortened key is a glance label — put the FULL counterparty key in the body,
+        // copyable, so the user can verify who they're about to lock funds with.
+        if (maker.signerPk != null && !maker.signerPk.isEmpty()) {
+            TextView cpv = new TextView(this);
+            cpv.setText("Counterparty\n" + maker.signerPk);
+            cpv.setTextColor(Design.DIM()); cpv.setTextSize(11f); cpv.setTypeface(Design.mono()); cpv.setPadding(0, dp(8), 0, 0);
+            cpv.setOnLongClickListener(v -> { copy(maker.signerPk, "Counterparty key copied"); return true; });
+            box.addView(cpv);
+        }
+
         modalOpen = true;
         dialog()
                 .setTitle((sellMinima ? "Sell " + ccy() : "Buy " + ccy()) + " · " + Util.shorten(maker.signerPk))
@@ -1826,16 +1836,21 @@ public class MainActivity extends AppCompatActivity {
         why.setPadding(0, dp(8), 0, dp(12));
         card.addView(why);
 
+        // RULE 1: show the FULL keys here — this is the fund-recovery moment where the user needs to check a
+        // block explorer / open a support ticket, so the identifiers must be complete and copyable, never
+        // truncated. The block is selectable and long-press copies the whole thing.
         StringBuilder detail = new StringBuilder();
         if (IdentityWatch.minimaMismatch())
-            detail.append("Minima identity: ORPHANED\n  this app  ").append(shortKey(IdentityWatch.orphanedPk()))
+            detail.append("Minima identity: ORPHANED\n  this app  ").append(IdentityWatch.orphanedPk())
                   .append("\n  your node does not own it\n\n");
         if (IdentityWatch.ethMismatch())
-            detail.append("ETH wallet: STALE\n  in use   ").append(shortKey(IdentityWatch.staleEth()))
-                  .append("\n  node now ").append(shortKey(IdentityWatch.nodeEth())).append('\n');
+            detail.append("ETH wallet: STALE\n  in use   ").append(IdentityWatch.staleEth())
+                  .append("\n  node now ").append(IdentityWatch.nodeEth()).append('\n');
         TextView det = new TextView(this);
         det.setText(detail.toString().trim());
         det.setTextColor(Design.TEXT()); det.setTextSize(12f); det.setTypeface(android.graphics.Typeface.MONOSPACE);
+        det.setTextIsSelectable(true);
+        det.setOnLongClickListener(v -> { copy(det.getText().toString(), "Recovery details copied"); return true; });
         card.addView(det);
 
         int unsettled = 0;
@@ -1892,10 +1907,7 @@ public class MainActivity extends AppCompatActivity {
         return lp;
     }
 
-    private static String shortKey(String k) {
-        if (k == null || k.isEmpty()) return "(unknown)";
-        return k.length() <= 20 ? k : k.substring(0, 10) + "…" + k.substring(k.length() - 8);
-    }
+    // (shortKey removed — the identity-halt dialog now shows full, copyable keys per RULE 1.)
 
     /** The reliable reset. A reinstall SHOULD be enough, but Android's backup/restore can put the old prefs
      *  straight back (a user did uninstall → node reset → reinstall and the halt returned; only clearing
@@ -2334,6 +2346,8 @@ public class MainActivity extends AppCompatActivity {
             TextView r = new TextView(this);
             r.setText("Part " + (i + 1) + " · " + leg.minima + " " + ccy() + " @ " + fmtPrice(leg.price) + " → " + leg.usdt + " USDT · " + shortAddr(leg.maker.signerPk));
             r.setTextColor(Design.TEXT()); r.setTextSize(12f); r.setTypeface(Design.mono()); r.setPadding(0, dp(2), 0, dp(2));
+            final String legPk = leg.maker.signerPk;   // RULE 1: long-press copies the full leg maker key
+            if (legPk != null && !legPk.isEmpty()) r.setOnLongClickListener(v -> { copy(legPk, "Counterparty key copied"); return true; });
             box.addView(r);
         }
 
