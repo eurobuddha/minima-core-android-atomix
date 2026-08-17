@@ -106,6 +106,17 @@ public class RefundRetryTest {
         verify(minima, never()).refund(any(JSONObject.class), any(MinimaHtlc.PostCb.class));
     }
 
+    @Test public void refundIsRefusedWhenTheTimelockIsNotParseable() throws Exception {
+        // MI-1: a coin whose timelock state field isn't an integer must NEVER be treated as already-expired.
+        // The old parseInt returned 0, so `block <= 0` was false and a doomed refund fired every retry — burning
+        // a one-time key leaf each time. parseBlock returns -1 and the guard fails closed.
+        JSONObject coin = new JSONObject()
+                .put("coinid", "0x" + "77".repeat(32)).put("tokenid", "0x00").put("amount", "35.014005")
+                .put("state", new JSONObject().put("0", MY_PK).put("3", "not-a-number").put("4", "0xCC").put("5", HASH));
+        engine.checkExpiredMinima(coin, 2242106);
+        verify(minima, never()).refund(any(JSONObject.class), any(MinimaHtlc.PostCb.class));
+    }
+
     // ================= 1. discovery must not depend on the shallow scan window =================
 
     @Test public void expiredLockIsSweptFromTheDbNotTheShallowScan() {

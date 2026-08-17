@@ -364,7 +364,7 @@ public final class SwapEngine {
         final String reqMinima = MinimaHtlc.grain(buyMinima);
         minima.generateSecret(new MinimaHtlc.SecretCb() {
             @Override public void ok(String secret, String hash) {
-                io.execute(() -> {
+                submitIo(() -> {
                     try {
                         Credentials creds = wallet.creds();
                         EthHtlc eth = new EthHtlc(rpc, creds, net);
@@ -373,26 +373,26 @@ public final class SwapEngine {
                         ensureAllowanceBlocking(eth, token.address, sellRaw);
                         // F2: base the timelock on CHAIN time (what the vault enforces), not the device clock.
                         final long timelock = ethChainNow() + TIMELOCK_SECS;
-                        // Record secret + swap row BEFORE the lock broadcast: if newContract MINES but its RPC
-                        // response is lost (send() throws), checkEthContractFor still finds this row in
-                        // db.allSwaps() and refunds the USDT at timelock. A row whose broadcast never landed is
-                        // a harmless phantom (getContract → null → no-op).
-                        ui.post(() -> {
-                            db.insertSecret(hash, secret);
-                            db.insertMyHtlc(hash, reqMinima, "minima");
-                            SwapDb.Swap s = baseSwap(hash, "INITIATOR", "ERC20_TO_MINIMA",
-                                    tokenSymbol, sellTokenAmount, com.eurobuddha.atomix.TradingContext.active().coinLabel, reqMinima, maker.minimaPublicKey);
-                            s.myTimelock = timelock; s.myLegIsMinima = false; s.status = SwapDb.ST_STARTED;
-                            s.contractId = EthHtlc.contractId(hash);
-                            db.upsertSwap(s);
-                            notifier.onSwapsChanged();
-                        });
+                        // CR-1: record the secret + swap row SYNCHRONOUSLY (on this io thread) BEFORE the lock
+                        // broadcast. These were posted to the UI thread, but a busy or destroyed main thread can
+                        // DROP the post while newContract has already mined — and there is NO contractsAsSender
+                        // discovery scan, so a mined contract with no DB row is USDT stranded in the vault with no
+                        // in-app recovery. Written before the broadcast, checkEthContractFor finds the row in
+                        // db.allSwaps() and refunds at timelock even if the broadcast response is lost. A row whose
+                        // broadcast never landed is a harmless phantom (getContract → null → no-op). Only the UI
+                        // callback goes to ui.post.
+                        db.insertSecret(hash, secret);
+                        db.insertMyHtlc(hash, reqMinima, "minima");
+                        SwapDb.Swap s = baseSwap(hash, "INITIATOR", "ERC20_TO_MINIMA",
+                                tokenSymbol, sellTokenAmount, com.eurobuddha.atomix.TradingContext.active().coinLabel, reqMinima, maker.minimaPublicKey);
+                        s.myTimelock = timelock; s.myLegIsMinima = false; s.status = SwapDb.ST_STARTED;
+                        s.contractId = EthHtlc.contractId(hash);
+                        db.upsertSwap(s);
+                        ui.post(notifier::onSwapsChanged);
                         String txhash = eth.newContract(myMinimaPk, maker.ethAddress, hash,
                                 BigInteger.valueOf(timelock), token.address, sellRaw, reqRaw, otc);
-                        ui.post(() -> {
-                            db.logEvent(hash, SwapDb.EV_STARTED, "ETH:" + token.address, sellTokenAmount, txhash);
-                            cb.ok(hash);
-                        });
+                        db.logEvent(hash, SwapDb.EV_STARTED, "ETH:" + token.address, sellTokenAmount, txhash);
+                        ui.post(() -> cb.ok(hash));
                     } catch (Exception e) {
                         ui.post(() -> cb.err(e.getMessage()));
                     }
@@ -467,10 +467,10 @@ public final class SwapEngine {
                         if (isMyPublishKey(MinimaHtlc.stateAt(c, 4))) counterMinimaCoin = c; // a coin locked to me
                     }
                     final JSONObject myMin = myMinimaCoin, cpMin = counterMinimaCoin;
-                    io.execute(() -> reportInspection(s, hash, block, myMin, cpMin, cb));
-                }, err -> io.execute(() -> reportInspection(s, hash, block, null, null, cb)));
+                    submitIo(() -> reportInspection(s, hash, block, myMin, cpMin, cb));
+                }, err -> submitIo(() -> reportInspection(s, hash, block, null, null, cb)));
             }
-            @Override public void err(String m) { io.execute(() -> reportInspection(s, hash, -1, null, null, cb)); }
+            @Override public void err(String m) { submitIo(() -> reportInspection(s, hash, -1, null, null, cb)); }
         });
     }
 
@@ -558,7 +558,7 @@ public final class SwapEngine {
         minima.currentBlock(new MinimaHtlc.BlockCb() {
             @Override public void ok(int block) {
                 runMinimaChecks(block);
-                io.execute(() -> runEthChecks(block));
+                submitIo(() -> runEthChecks(block));
                 // H2: the market-history collector scans the WHOLE shared HTLC address (heavy) on the node's
                 // SINGLE command thread. Run it at most every MARKET_MIN_INTERVAL_MS, and SKIP it entirely while
                 // a claim is pending — so a time-critical claim (racing a counter-leg timelock) is never starved
@@ -595,8 +595,7 @@ public final class SwapEngine {
         // hundreds-deep "Invalid ResponseID" flood. So: ONE scan per cycle (the break), one scan per hash per
         // ETH_RETRY_SECS window (the gate, static → shared by both engines), round-robin across hashes.
         for (String h : pendingClaimMinimaHashes()) {
-            if (!ethRetryDue("claimScan:" + h)) continue;
-            markEthAttempt("claimScan:" + h);
+            if (!tryEthAttempt("claimScan:" + h)) continue;   // MA-20: atomic due-check-and-mark
             final String hh = h;
             minima.scanHtlcByHashDeep(h, 2, REFUND_SCAN_DEPTH, coins -> {
                 SwapLog.d("claimScan " + hh + " -> " + coins.length() + " coin(s)");
@@ -710,8 +709,7 @@ public final class SwapEngine {
             // so if a node command timed out and the callback was lost, the marker stuck forever and the claim
             // NEVER retried (the 30-min stall we hit). Now the timestamp is the gate: markEthAttempt stamps NOW
             // (same-cycle dedup), and after ETH_RETRY_SECS a lost/failed claim re-fires on its own. No inflight.
-            if (db.haveCollect(hash) || !ethRetryDue("claimM:" + hash)) return;
-            markEthAttempt("claimM:" + hash);
+            if (db.haveCollect(hash) || !tryEthAttempt("claimM:" + hash)) return;   // MA-20: atomic due-check-and-mark
             db.setSwapStatus(hash, SwapDb.ST_CLAIMING);   // counterparty leg found — claiming now
             notifier.onSwapsChanged();
             SwapLog.d("claim MINIMA leg " + hash + " amount=" + MinimaHtlc.coinAmount(coin));
@@ -750,7 +748,8 @@ public final class SwapEngine {
             if (d == null || !otcVerifySell(coin, d, reqTokenAddr)) return;
         } else if (!acceptTakerSellMinima(coin, reqTokenAddr)) return;   // must match my published order
         if (!inflight.add("cpEth:" + hash)) return;
-        io.execute(() -> lockEthCounterLeg(coin, hash, reqTokenAddr));
+        // CR-2: if the pool is shut down mid-call, release the marker we just claimed so the hash isn't wedged.
+        submitIo(() -> lockEthCounterLeg(coin, hash, reqTokenAddr), () -> inflight.remove("cpEth:" + hash));
     }
 
     /** TEST SEAM: the retry window is ETH_RETRY_SECS of real time, so a test proves the self-healing re-fire by
@@ -764,8 +763,8 @@ public final class SwapEngine {
 
     /** (package-private for tests) */
     void checkExpiredMinima(JSONObject coin, int block) {
-        int timelock = parseInt(MinimaHtlc.stateAt(coin, 3));
-        if (block <= timelock) return;
+        long timelock = parseBlock(MinimaHtlc.stateAt(coin, 3));   // MI-1: -1 on garbage/overflow (never 0)
+        if (timelock < 0 || block <= timelock) return;             // unparseable timelock → NEVER treat as expired
         String hash = MinimaHtlc.stateAt(coin, 5);
         // SELF-HEALING gate, identical to the claim path above. The old guard was `inflight.add("refundM:")`
         // cleared ONLY inside ok()/err() — so when a node command's callback was lost (NodeApi drops pending
@@ -774,8 +773,7 @@ public final class SwapEngine {
         // AND background engines at once. The claim path was moved off this exact pattern; the refund path was
         // not, and a real 35.014005 MINIMA lock sat refundable-but-unrefunded because of it. A timestamp cannot
         // leak: worst case a lost callback costs one ETH_RETRY_SECS window before the next attempt.
-        if (db.haveCollectExpired(hash) || !ethRetryDue("refundM:" + hash)) return;
-        markEthAttempt("refundM:" + hash);
+        if (db.haveCollectExpired(hash) || !tryEthAttempt("refundM:" + hash)) return;   // MA-20: atomic due-check-and-mark
         minima.refund(coin, new MinimaHtlc.PostCb() {
             @Override public void ok(String txpowid) {
                 // Status FIRST: haveCollectExpired is a permanent veto on any future refund, so if the process
@@ -814,24 +812,22 @@ public final class SwapEngine {
             // fails (or is grossly implausible) we THROW → the catch below aborts this lock and the responder
             // retries next cycle; we never lock the counter-leg on a guessed clock.
             final long timelock = ethChainNowStrict() + CP_SECS;
-            // Record the swap row BEFORE the lock broadcast so a mined-but-response-lost counter-leg is still
-            // found + refunded by checkEthContractFor. EV_CPSENT (→ haveSentCounterParty) stays AFTER, so a
-            // genuine pre-mine failure still retries; a mined-but-lost lock is dup-guarded by the contract.
-            ui.post(() -> {
-                SwapDb.Swap s = baseSwap(hash, "RESPONDER", "MINIMA_TO_ERC20",
-                        token.symbol, tokenHuman, com.eurobuddha.atomix.TradingContext.active().coinLabel, reqMinimaHuman, receiverEth);
-                s.myTimelock = timelock; s.myLegIsMinima = false; s.contractId = EthHtlc.contractId(hash);
-                s.status = SwapDb.ST_LOCKED;
-                db.upsertSwap(s);
-                notifier.onSwapsChanged();
-            });
+            // CR-1: record the swap row SYNCHRONOUSLY (this io thread) BEFORE the broadcast, and log EV_CPSENT
+            // synchronously AFTER it — both were in ui.post()s that a destroyed main thread can DROP. Losing the
+            // row leaves a mined counter-leg with nothing to refund it (no contractsAsSender scan); losing
+            // EV_CPSENT leaves haveSentCounterParty false, so the responder re-locks and DOUBLE-locks the leg.
+            // The cpEth marker is likewise released here on the io thread, not in a droppable post.
+            SwapDb.Swap s = baseSwap(hash, "RESPONDER", "MINIMA_TO_ERC20",
+                    token.symbol, tokenHuman, com.eurobuddha.atomix.TradingContext.active().coinLabel, reqMinimaHuman, receiverEth);
+            s.myTimelock = timelock; s.myLegIsMinima = false; s.contractId = EthHtlc.contractId(hash);
+            s.status = SwapDb.ST_LOCKED;
+            db.upsertSwap(s);
+            ui.post(notifier::onSwapsChanged);
             String txhash = eth.newContract(myMinimaPk, receiverEth, hash,
                     BigInteger.valueOf(timelock), token.address, sellRaw, reqRaw, false);
-            ui.post(() -> {
-                db.logEvent(hash, SwapDb.EV_CPSENT, "ETH:" + token.address, tokenHuman, txhash);
-                notifier.notify("Locked your " + token.symbol, "Waiting for the counterparty to reveal the secret");
-                inflight.remove("cpEth:" + hash);
-            });
+            db.logEvent(hash, SwapDb.EV_CPSENT, "ETH:" + token.address, tokenHuman, txhash);
+            inflight.remove("cpEth:" + hash);
+            ui.post(() -> notifier.notify("Locked your " + token.symbol, "Waiting for the counterparty to reveal the secret"));
         } catch (Exception e) {
             inflight.remove("cpEth:" + hash);
         }
@@ -855,8 +851,11 @@ public final class SwapEngine {
         }
         for (String h : pendLegs) {
             Long since = cpLockSince.get(h);
-            if (since != null && nowUnix() - since > CP_LOCK_TIMEOUT_SECS) { releaseCpLeg(h); continue; }
-            confirmMyLock(h, true, onChain -> { if (onChain) releaseCpLeg(h); });
+            // MI-2: releaseCpLeg cleans the cp* maps but NOT the process-wide "cpMin:" marker — drop it here too,
+            // so a leg whose lock callback was lost (dropped on a finishing Activity) doesn't leak the marker and
+            // wedge that hash forever.
+            if (since != null && nowUnix() - since > CP_LOCK_TIMEOUT_SECS) { releaseCpLeg(h); inflight.remove("cpMin:" + h); continue; }
+            confirmMyLock(h, true, onChain -> { if (onChain) { releaseCpLeg(h); inflight.remove("cpMin:" + h); } });
         }
 
         // PRIMARY (works on free/keyless RPCs): for every known swap, read its ETH leg by deterministic
@@ -924,7 +923,7 @@ public final class SwapEngine {
         if (db.getSwap(hash) != null || db.haveSentCounterParty(hash)) return;   // already handled
         minima.currentBlock(new MinimaHtlc.BlockCb() {
             @Override public void ok(int block) {
-                io.execute(() -> {
+                submitIo(() -> {
                     EthHtlc eth;
                     try { eth = new EthHtlc(rpc, wallet.creds(), net); } catch (Exception e) { return; }
                     processIncomingBuy(eth, wallet.address(), hash, block);
@@ -1048,6 +1047,18 @@ public final class SwapEngine {
     private boolean ethRetryDue(String key) { return nowUnix() - ethAttempt.getOrDefault(key, 0L) >= ETH_RETRY_SECS; }
     private void markEthAttempt(String key) { ethAttempt.put(key, nowUnix()); }
 
+    /** MA-20: atomic check-and-set on the shared retry-window map — true (and stamps NOW) iff the key is due
+     *  (≥ ETH_RETRY_SECS since its last attempt). Replaces the racy ethRetryDue()+markEthAttempt() pair on the
+     *  claim/refund paths so the foreground and background engines can't BOTH pass the check before either marks
+     *  and then both sign the same coin, permanently burning two one-time key leaves instead of one. */
+    private boolean tryEthAttempt(String key) {
+        long now = nowUnix();
+        Long prev = ethAttempt.putIfAbsent(key, now);
+        if (prev == null) return true;                        // never attempted → claim it
+        if (now - prev < ETH_RETRY_SECS) return false;        // still inside the window → not due
+        return ethAttempt.replace(key, prev, now);            // due → win the slot atomically (false if another thread already did)
+    }
+
     /** Unix seconds from the CHAIN (latest block timestamp) for setting an ETH HTLC timelock — the clock the
      *  vault enforces (F2). Falls back to the device clock only if the chain read fails. Safe ONLY for the
      *  INITIATOR's first leg, where a fast clock merely makes that leg LONGER (the safe direction) and a slow
@@ -1131,8 +1142,8 @@ public final class SwapEngine {
             if (cpInFlight.size() >= CP_LOCK_BURST || cpInFlight.containsKey(hash)) return; // burst full / already mine
             CP_LOCKING.put(hash, nowUnix());
             cpInFlight.put(hash, "");
+            cpLockSince.put(hash, nowUnix());   // MA-18: inside the CP_LOCKING monitor with cpInFlight (lines 202-203)
         }
-        cpLockSince.put(hash, nowUnix());
         if (!inflight.add("cpMin:" + hash)) { releaseCpLeg(hash); return; }
         lockMinimaCounterLeg(c, minimaBlock);
     }
@@ -1494,5 +1505,20 @@ public final class SwapEngine {
         catch (Exception e) { return BigDecimal.ZERO; }
     }
     private static int parseInt(String s) { try { return Integer.parseInt(s.trim()); } catch (Exception e) { return 0; } }
+    /** MI-1: parse an HTLC timelock/block state field, returning -1 (not 0) on any non-integer or overflow. The
+     *  refund path fails CLOSED on -1 — the old parseInt returned 0, which made an unparseable timelock read as
+     *  already-expired and drove a doomed refund that burned a one-time key leaf on every retry. */
+    private static long parseBlock(String s) { try { return Long.parseLong(s.trim()); } catch (Exception e) { return -1; } }
+
+    /** CR-2: submit to the io pool, swallowing rejection once it is shut down (Activity destroyed / Service
+     *  stopped). {@code onReject} runs if the task could not be scheduled (e.g. to release an in-flight marker
+     *  claimed just before the call). Replaces bare io.execute(), which threw RejectedExecutionException on the
+     *  calling thread — often a node callback thread — and could take down the process. */
+    private void submitIo(Runnable task) { submitIo(task, null); }
+    private void submitIo(Runnable task, Runnable onReject) {
+        if (io.isShutdown()) { if (onReject != null) onReject.run(); return; }
+        try { io.execute(task); }
+        catch (java.util.concurrent.RejectedExecutionException e) { if (onReject != null) onReject.run(); }
+    }
     private static long nowUnix() { return System.currentTimeMillis() / 1000L; }
 }
