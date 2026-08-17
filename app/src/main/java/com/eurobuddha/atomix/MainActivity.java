@@ -159,9 +159,16 @@ public class MainActivity extends AppCompatActivity {
     private String ethAddr = null;
     private String ethErr = null;
     private String ethBal = "…";
-    private BigInteger ethWeiRaw = BigInteger.ZERO;    // RAW wei — manual-send validation (never display strings)
-    private BigInteger usdtRawBal = BigInteger.ZERO;   // RAW USDT (6dp units)
+    // CR-7: volatile — written on the UI thread (fetchEthBalances' ui.post) but read on the io thread in the
+    // Send dialog's Max/Review handlers. Without the happens-before edge the io thread could validate a send
+    // against a stale (e.g. zero) balance.
+    private volatile BigInteger ethWeiRaw = BigInteger.ZERO;    // RAW wei — manual-send validation (never display strings)
+    private volatile BigInteger usdtRawBal = BigInteger.ZERO;   // RAW USDT (6dp units)
     private final LinkedHashMap<String, String> tokenBals = new LinkedHashMap<>();
+    // MI-12: the peg-preview dialog's 2s self-reposting tick. Held so onPause can stop it (it otherwise kept
+    // polling PriceOracle over the network while the app was backgrounded with the dialog open) and onResume
+    // can re-arm it; nulled on dismiss.
+    private Runnable pegTickRef;
 
     // Balance-pulse feedback: bounce the headline balances when a swap NEWLY completes (incl. while backgrounded).
     private TextView minimaBalView, ethBalView;
@@ -309,6 +316,7 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         FOREGROUND = true;     // Activity polls while visible; SwapService stands down
         startWatcher();
+        if (pegTickRef != null) ui.post(pegTickRef);   // MI-12: re-arm the peg-preview poll if its dialog is still open (the tick self-cancels if not)
         checkForNewCompletion();   // a swap that completed while we were away → refresh + pulse on return
     }
 
@@ -316,6 +324,7 @@ public class MainActivity extends AppCompatActivity {
         super.onPause();
         FOREGROUND = false;    // hand off to the background SwapService
         stopWatcher();
+        if (pegTickRef != null) ui.removeCallbacks(pegTickRef);   // MI-12: stop the 2s peg-preview poll while backgrounded
     }
 
     @Override protected void onDestroy() {
@@ -1259,6 +1268,7 @@ public class MainActivity extends AppCompatActivity {
             }
             ui.postDelayed(pegTick[0], 2000);
         };
+        pegTickRef = pegTick[0];   // MI-12: expose to onPause/onResume so it stops polling while backgrounded
         ui.postDelayed(pegTick[0], 1000);
         PriceOracle.refreshAsync();
         pegSw.setOnCheckedChangeListener((btn, on) -> {
@@ -1352,7 +1362,7 @@ public class MainActivity extends AppCompatActivity {
                     if (prefs.getBoolean("auto_publish", false)) pushOrderEdit(o);
                 })
                 .setNegativeButton("Cancel", null)
-                .setOnDismissListener(d -> { dlgOpen[0] = false; modalOpen = false; render(); })
+                .setOnDismissListener(d -> { dlgOpen[0] = false; pegTickRef = null; modalOpen = false; render(); })
                 .show();
     }
 
@@ -2239,10 +2249,12 @@ public class MainActivity extends AppCompatActivity {
         if (maxAmount > 0 && parseD(minima, 0) > maxAmount + 1e-9) {
             toast("Best level takes up to " + abbrev(maxAmount) + " " + ccy() + " — reduce the amount"); return;
         }
+        // NI-1 (RULE 1): show the FULL counterparty key on its own line at the moment funds are committed —
+        // never a truncated form the user can't verify against the maker.
         String msg = sellMinima
-                ? ("Sell  " + minima + " " + ccy() + "\nReceive  ≈ " + usdt + " USDT\n\nBest price " + fmtPrice(price) + " USDT/" + ccy() + "\nCounterparty  " + Util.shorten(maker.signerPk)
+                ? ("Sell  " + minima + " " + ccy() + "\nReceive  ≈ " + usdt + " USDT\n\nBest price " + fmtPrice(price) + " USDT/" + ccy() + "\nCounterparty\n" + maker.signerPk
                     + "\n\nThis locks your " + ccy() + " on-chain. Continue?")
-                : ("Buy  ≈ " + minima + " " + ccy() + "\nPay  " + usdt + " USDT (+ ETH gas)\n\nBest price " + fmtPrice(price) + " USDT/" + ccy() + "\nCounterparty  " + Util.shorten(maker.signerPk)
+                : ("Buy  ≈ " + minima + " " + ccy() + "\nPay  " + usdt + " USDT (+ ETH gas)\n\nBest price " + fmtPrice(price) + " USDT/" + ccy() + "\nCounterparty\n" + maker.signerPk
                     + "\n\nThis locks your USDT on-chain. Continue?");
         modalOpen = true;
         dialog()
@@ -2955,6 +2967,9 @@ public class MainActivity extends AppCompatActivity {
         String cp = (s.counterparty == null || s.counterparty.isEmpty()) ? "" : "  ·  " + shortAddr(s.counterparty);
         meta.setText(when + "  ·  " + s.role.toLowerCase() + cp);
         meta.setTextColor(Design.DIM2()); meta.setTextSize(11.5f); meta.setTypeface(Design.sans()); meta.setPadding(0, dp(5), 0, 0);
+        // NI-1 (RULE 1): the counterparty is shown truncated — long-press copies the FULL value.
+        if (s.counterparty != null && !s.counterparty.isEmpty())
+            meta.setOnLongClickListener(v -> { copy(s.counterparty, "Counterparty copied"); return true; });
         c.addView(meta);
 
         TextView detail = new TextView(this);
@@ -3321,6 +3336,9 @@ public class MainActivity extends AppCompatActivity {
         tag.setText(mine ? "you" : shortAddr(maker.signerPk));
         tag.setTextColor(mine ? Design.ACCENT() : Design.DIM2()); tag.setTextSize(9.5f); tag.setTypeface(Design.sans());
         tag.setGravity(isBid ? Gravity.START : Gravity.END);
+        // NI-1 (RULE 1): the displayed key is truncated — long-press copies the FULL value to the clipboard.
+        if (!mine && maker.signerPk != null && !maker.signerPk.isEmpty())
+            tag.setOnLongClickListener(v -> { copy(maker.signerPk, "Counterparty key copied"); return true; });
         half.addView(tag);
         if (!mine && cap > 0) {
             half.setOnClickListener(v -> takeOrderDialog(maker, sym, isBid, lvl.price, cap));
@@ -3566,7 +3584,9 @@ public class MainActivity extends AppCompatActivity {
                                 : EthSend.sendErc20(rpc, wallet.creds(), net.chainId, net.tokens[0].address, to,
                                         EthSend.parseUnits(amt, net.tokens[0].decimals));
                         SwapLog.d("manual send " + (eth ? "ETH" : "USDT") + " " + amt + " tx=" + tx);
-                        ui.post(() -> { toast("Sent — tx " + shortAddr(tx) + " (balance updates once mined)"); fetchEthBalances(true); });
+                        // NI-1 (RULE 1): a tx hash in a transient toast is otherwise unrecoverable — copy the FULL
+                        // hash to the clipboard so the user can look up their own send on a block explorer.
+                        ui.post(() -> { copy(tx, "Sent — full tx hash copied (updates once mined)"); fetchEthBalances(true); });
                     } catch (Exception e) {
                         ui.post(() -> toast("Send failed: " + e.getMessage()));
                     }
@@ -3715,6 +3735,9 @@ public class MainActivity extends AppCompatActivity {
             t.setText(sides.toString()); t.setTextColor(Design.TEXT()); t.setTextSize(14.5f); t.setTypeface(Design.sansBold()); box.addView(t);
             TextView who = new TextView(this); who.setText("LP " + shortAddr(o.signerPk));
             who.setTextColor(Design.DIM()); who.setTextSize(12f); who.setTypeface(Design.sans()); who.setPadding(0, dp(4), 0, dp(8)); box.addView(who);
+            // NI-1 (RULE 1): the LP key is shown truncated — long-press copies the FULL value.
+            if (o.signerPk != null && !o.signerPk.isEmpty())
+                who.setOnLongClickListener(v -> { copy(o.signerPk, "LP key copied"); return true; });
             LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
             if (o.sells()) {   // LP sells → I can BUY mxUSDT from them
                 TextView b = Design.pill(this, "Buy " + ccy(), Design.ACCENT(), Design.ON_ACCENT());
