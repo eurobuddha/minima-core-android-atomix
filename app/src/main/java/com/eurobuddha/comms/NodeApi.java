@@ -82,7 +82,7 @@ public class NodeApi {
             public void response(JSONObject zResponse) {
                 final boolean enabled = zResponse.optBoolean("enabled", false);
                 mMain.post(() -> {
-                    if (dead()) return;
+                    if (mReleased || dead()) return;   // MA-12: a late register reply after onDestroy must not touch state
                     noteEnabled(enabled);
                 });
             }
@@ -129,7 +129,10 @@ public class NodeApi {
     }
 
     public void cmd(String command, Cb cb) {
-        if (mReleased) return;
+        // MA-11: after release, deliver an async onError rather than returning silently — a caller that set a
+        // `running`/in-flight flag before calling (CommsScanner, the SignGate lambda) would otherwise hang
+        // forever waiting for a callback that never arrives. Async (mMain.post) matches the normal delivery.
+        if (mReleased) { if (cb != null) mMain.post(() -> cb.onError("released")); return; }
         final boolean isWrite = timeoutFor(command) == WRITE_TIMEOUT_MS;
         if (isWrite) mPendingWrites++;
         final boolean[] done = {false};
@@ -162,7 +165,9 @@ public class NodeApi {
                     // (pairing state isn't a view).
                     mLastOkMs = System.currentTimeMillis();
                     mConsecTimeouts = 0;
-                    if (dead()) return;   // cleaned up above; just don't touch dead views
+                    // MA-12: bail AFTER the bookkeeping above (pending-write / timeout counters must stay
+                    // consistent) but BEFORE delivering into a released wrapper or a dead view.
+                    if (mReleased || dead()) return;
 
                     // "enabled":false only appears on the gating reply; real command
                     // responses omit the key, so default true.
@@ -184,6 +189,8 @@ public class NodeApi {
         mReleased = true;
         for (Runnable r : mPending) mMain.removeCallbacks(r);
         mPending.clear();
-        if (mApi != null) mApi.onDestroy();
+        // MI-8: guard the third-party SDK teardown so a throw can't propagate out of Activity/Service.onDestroy
+        // (matches reRegister's guarded onDestroy above).
+        if (mApi != null) try { mApi.onDestroy(); } catch (Exception ignored) {}
     }
 }

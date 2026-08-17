@@ -100,7 +100,17 @@ public final class CommsScanner {
                 JSONArray coins = j.optJSONArray("response");
                 if (coins == null || !j.optBoolean("status", true)) { overLimit(chainBlock); return; }
                 grew = true;
-                newThisRun += process(coins);
+                int n;
+                try {
+                    n = process(coins);
+                } catch (RuntimeException e) {
+                    // CR-3: a throwing router/crypto.open must never leave running=true forever (the Looper
+                    // swallows it and no future scan ever starts). Finish the scan so it can run again.
+                    logw("scan process failed: " + e);
+                    finish(chainBlock, false);
+                    return;
+                }
+                newThisRun += n;
                 if (depth < targetDepth) { depth = Math.min(depth * 2, targetDepth); fetch(chainBlock); }  // grow while safe
                 else finish(chainBlock, true);
             }
@@ -118,11 +128,22 @@ public final class CommsScanner {
     }
 
     private void finish(int chainBlock, boolean ok) {
-        if (ok) meta.setMeta(bmBackfilled, "true");
-        if (chainBlock > 0) meta.setMeta(bmTip, String.valueOf(chainBlock));
-        running = false; lastScanEnd = System.currentTimeMillis();
+        // CR-4: a MetaStore write failure (disk full, DB locked) must reset running in a finally — otherwise
+        // the scanner is dead until app restart. Swallow it so onDone still fires and the scan can run again.
+        try {
+            if (ok) meta.setMeta(bmBackfilled, "true");
+            if (chainBlock > 0) meta.setMeta(bmTip, String.valueOf(chainBlock));
+        } catch (RuntimeException e) {
+            logw("scan meta write failed: " + e);
+        } finally {
+            running = false; lastScanEnd = System.currentTimeMillis();
+        }
         listener.onDone(ok, newThisRun);
     }
+
+    /** Log a warning without ever throwing — on the JVM (unit tests, returnDefaultValues=false) the
+     *  android.util.Log stub throws, and these calls sit on the exception-recovery path that must complete. */
+    private static void logw(String m) { try { android.util.Log.w("SwapPub", m); } catch (Throwable ignored) {} }
 
     private void finishFail() { running = false; lastScanEnd = System.currentTimeMillis(); listener.onDone(false, 0); }
 
