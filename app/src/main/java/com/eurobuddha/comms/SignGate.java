@@ -29,14 +29,22 @@ import java.util.ArrayDeque;
  * The node has since been fixed to synchronize its own signing, but this gate stays: the app also runs
  * against nodes we don't control, and serialising is correct regardless.
  *
- * Static, so the two engines in this process share one queue. Everything runs on the main thread
- * ({@link NodeApi} funnels every node callback back to it), so no locking is needed.
+ * Static, so the two engines in this process share one queue. Everything is expected to run on the main
+ * thread ({@link NodeApi} funnels every node callback back to it); {@link #submit} reposts to the main
+ * thread if ever called off it (MA-23), so the queue is never mutated concurrently.
+ *
+ * Each dispatch carries a monotonic GENERATION (CR-6). A {@link Release} and the lost-callback watchdog
+ * are both tied to the generation they were created for, so a callback that arrives AFTER its op was
+ * already timed out cannot cancel a later op's watchdog or advance the queue past it — which would have
+ * let two signing ops run at once, the exact one-time-key-reuse failure this class prevents.
  */
 public final class SignGate {
 
-    private static final ArrayDeque<Runnable> QUEUE = new ArrayDeque<>();
+    private static final ArrayDeque<Op> QUEUE = new ArrayDeque<>();
     private static boolean busy = false;
     private static Runnable watchdog = null;
+    /** Bumped on every dispatch; identifies the in-flight op so a stale Release/watchdog is a no-op (CR-6). */
+    private static long generation = 0;
 
     /** Longer than NodeApi's write timeout, so this only fires for a genuinely lost callback — never
      *  for an operation that is merely slow. Proof-of-work on a phone is not quick. */
@@ -61,32 +69,78 @@ public final class SignGate {
 
     /** Queue a signing operation. It must call {@link Release#free()} exactly once, however it ends. */
     public static void submit(final Op op) {
-        QUEUE.add(() -> op.run(new Release()));
+        // The queue + busy flag are unsynchronised, safe only because every caller is on the main thread.
+        // If one ever isn't, repost rather than corrupt the deque (MA-23). On the JVM (no Looper) main()
+        // is null, so this is skipped and the plain serialisation logic stays directly unit-testable.
+        Handler h = main();
+        if (h != null && Looper.myLooper() != Looper.getMainLooper()) { h.post(() -> submit(op)); return; }
+        QUEUE.add(op);
         if (!busy) next();
     }
 
     public interface Op { void run(Release release); }
 
-    /** Idempotent — a sequence with several exit paths can safely call this from all of them. */
+    /** Idempotent — a sequence with several exit paths can safely call this from all of them. Only the
+     *  Release for the CURRENT in-flight op may advance the queue (CR-6). */
     public static final class Release {
+        private final long gen;
         private boolean done = false;
+        Release(long gen) { this.gen = gen; }
         public void free() {
-            if (done) return;
+            if (done) return;                 // idempotent per instance
             done = true;
-            if (watchdog != null) { Handler h = main(); if (h != null) h.removeCallbacks(watchdog); watchdog = null; }
-            next();
+            if (gen != generation) return;    // our op was already timed out and the queue moved on — do NOT advance
+            cancelWatchdog();
+            advance();
         }
     }
 
     private static void next() {
-        Runnable r = QUEUE.poll();
-        if (r == null) { busy = false; return; }
+        if (busy) return;                     // never dispatch a second op while one is in flight
+        final Op op = QUEUE.poll();
+        if (op == null) return;
         busy = true;
+        final long gen = ++generation;        // this dispatch's identity
         Handler h = main();
         if (h != null) {
-            watchdog = () -> { watchdog = null; next(); };
+            watchdog = () -> {                // lost-callback recovery for THIS op only
+                if (gen != generation) return;   // a real free already advanced us; a stale watchdog is a no-op
+                watchdog = null;
+                advance();
+            };
             h.postDelayed(watchdog, MAX_HOLD_MS);
         }
-        r.run();
+        try {
+            op.run(new Release(gen));
+        } catch (Throwable t) {
+            // The Op threw synchronously, before its async callback could ever free — advance so the queue
+            // never jams (CR-5). The NORMAL path is async (op.run returns immediately and Release.free()
+            // advances later), so only this exceptional path releases here. Guard on gen so we don't advance
+            // twice if the op already freed before throwing.
+            if (gen == generation) { cancelWatchdog(); advance(); }
+        }
+    }
+
+    private static void advance() { busy = false; next(); }
+
+    private static void cancelWatchdog() {
+        if (watchdog != null) { Handler h = main(); if (h != null) h.removeCallbacks(watchdog); watchdog = null; }
+    }
+
+    // ---- test seams (package-private): the lost-callback watchdog is Android-only, so expose a way to
+    //      simulate it firing and to reset static state between tests. ----
+
+    /** Simulate the lost-callback watchdog firing for the current in-flight op (advances the queue exactly
+     *  as the watchdog would). Returns true if it advanced. TEST ONLY. */
+    static boolean fireWatchdogForTest() {
+        if (!busy) return false;
+        watchdog = null;
+        advance();
+        return true;
+    }
+
+    /** Clear all static state so each test starts clean. TEST ONLY. */
+    static void resetForTest() {
+        QUEUE.clear(); busy = false; watchdog = null; generation = 0;
     }
 }
