@@ -359,6 +359,14 @@ public final class SwapDb {
             createMarket(db);   // v1→v2: add the market_trades table (idempotent)
         }
 
+        @Override public void onDowngrade(SQLiteDatabase db, int oldV, int newV) {
+            // MA-16: installing an older APK over a newer one would otherwise throw the default
+            // SQLiteException and crash on startup until app data is cleared. This DB holds the `secrets`
+            // table (HTLC claim preimages) and swap identity — dropping it is FUND-DESTROYING — so accept the
+            // downgrade as a no-op (the schema is additive; older code simply ignores newer tables/columns).
+            db.setVersion(oldV);
+        }
+
         private void createMarket(SQLiteDatabase db) {
             db.execSQL("CREATE TABLE IF NOT EXISTS market_trades (coinid TEXT PRIMARY KEY, hash TEXT, "
                     + "price REAL, size_minima TEXT, req_amount TEXT, req_token TEXT, owner TEXT, receiver TEXT, "

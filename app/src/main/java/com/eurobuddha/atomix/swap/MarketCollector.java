@@ -98,7 +98,7 @@ public final class MarketCollector {
             BigDecimal req = new BigDecimal(reqAmount.trim());
             BigDecimal size = new BigDecimal(sizeMinima.trim());
             if (size.signum() <= 0 || req.signum() <= 0) return 0;
-            return req.divide(size, 12, BigDecimal.ROUND_HALF_UP).doubleValue();
+            return req.divide(size, 12, java.math.RoundingMode.HALF_UP).doubleValue();   // MI-17: deprecated int constant → RoundingMode
         } catch (Exception e) {
             return 0;
         }

@@ -6,6 +6,7 @@ public final class Hex {
     private static final char[] HEX = "0123456789abcdef".toCharArray();
 
     public static String to(byte[] b) {
+        if (b == null) return "";   // MI-9: guard null (from() already tolerates null)
         char[] out = new char[b.length * 2];
         for (int i = 0; i < b.length; i++) {
             int v = b[i] & 0xFF;
@@ -18,6 +19,8 @@ public final class Hex {
     public static byte[] from(String h) {
         if (h == null) return new byte[0];
         if (h.length() >= 2 && (h.charAt(0) == '0') && (h.charAt(1) == 'x' || h.charAt(1) == 'X')) h = h.substring(2);
+        // MI-9: reject odd length rather than silently dropping the final nibble (h.length()/2 truncated it).
+        if ((h.length() & 1) != 0) throw new IllegalArgumentException("odd-length hex");
         int n = h.length() / 2;
         byte[] b = new byte[n];
         for (int i = 0; i < n; i++) {

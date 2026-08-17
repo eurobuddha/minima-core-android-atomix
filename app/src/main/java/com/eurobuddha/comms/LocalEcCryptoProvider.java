@@ -66,12 +66,16 @@ public final class LocalEcCryptoProvider implements CryptoProvider {
             String from = payload.optString("f", "");
             byte[] body = Hex.from(payload.optString("b", ""));
             byte[] sig  = Hex.from(payload.optString("s", ""));
-            if (!CommsIdentity.isValidPublicId(from) || sig.length != Sign.BYTES) return new Opened(false, from, body);
+            // MI-10: return null (not Opened(false,…)) on a malformed sender id or an unverifiable signature, so an
+            // unauthenticated blob can never be mistaken for content. CommsScanner/OtcController already treat null
+            // and !valid identically (both skip), and routeTakeRequest — which does NOT re-check valid — is thereby
+            // protected: it can only ever receive a verified Opened.
+            if (!CommsIdentity.isValidPublicId(from) || sig.length != Sign.BYTES) return null;
 
             byte[] signed = concat(Hex.from(from), body);
             byte[] signPk = CommsIdentity.signPkOf(from);
             boolean valid = ls.cryptoSignVerifyDetached(sig, signed, signed.length, signPk);
-            return new Opened(valid, from, body);
+            return valid ? new Opened(true, from, body) : null;
         } catch (Exception e) {
             return null;   // not for us / malformed — skip silently
         }

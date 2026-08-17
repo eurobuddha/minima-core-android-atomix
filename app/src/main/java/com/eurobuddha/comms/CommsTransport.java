@@ -2,8 +2,6 @@ package com.eurobuddha.comms;
 
 import org.json.JSONObject;
 
-import java.nio.charset.StandardCharsets;
-
 /**
  * miniMall transport (Maxima-free). Two coin shapes:
  *   1. MESSAGE — a sealed order/status/chat blob in state[99], posted as a 1-nano coin to the shared
@@ -41,19 +39,8 @@ public final class CommsTransport {
         postBlob(node, MINIMERCH_ADDRESS, MESSAGE_AMOUNT, NATIVE, blob, null, cb);
     }
 
-    /** Send a real value PAYMENT to a vendor address; stamp the order ref into state[1] for matching. */
-    public static void sendPayment(NodeApi node, String vendorAddress, String amount, String tokenid,
-                                   String ref, SendCb cb) {
-        try {
-            JSONObject extra = new JSONObject();
-            if (ref != null && !ref.isEmpty()) extra.put("1", "0x" + Hex.to(ref.getBytes(StandardCharsets.UTF_8)));
-            String cmd = "send amount:" + amount + " address:" + vendorAddress + " tokenid:" + tokenid
-                    + (extra.length() > 0 ? " state:" + extra : "");
-            post(node, cmd, cb);
-        } catch (Exception e) {
-            cb.onFailed(e.getMessage());
-        }
-    }
+    // MA-9: sendPayment() deleted (dead code — no callers app-wide; inherited from the miniMall port). It built a
+    // node `send` command from unvalidated vendorAddress/amount/tokenid, a latent command-injection surface.
 
     /** Post a (sealed) blob into state[99] at an address with an amount + tokenid (+ optional extra state). */
     public static void postBlob(NodeApi node, String address, String amount, String tokenid,
@@ -65,7 +52,8 @@ public final class CommsTransport {
             if (!isDecimal(amount))   { cb.onFailed("bad post amount"); return; }
             if (!isCleanHex(tokenid)) { cb.onFailed("bad post tokenid"); return; }
             if (!isCleanHex(blobHex)) { cb.onFailed("bad post blob"); return; }
-            JSONObject state = extraState != null ? extraState : new JSONObject();
+            // MI-5: clone rather than mutate the caller's JSONObject (adding "99" in place surprised a reused extraState).
+            JSONObject state = extraState != null ? new JSONObject(extraState.toString()) : new JSONObject();
             state.put("99", "0x" + blobHex);   // hex-typed state value, read back the same way
             post(node, "send amount:" + amount + " address:" + address + " tokenid:" + tokenid + " state:" + state, cb);
         } catch (Exception e) {

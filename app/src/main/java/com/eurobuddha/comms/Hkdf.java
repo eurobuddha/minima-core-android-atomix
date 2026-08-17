@@ -13,6 +13,10 @@ import javax.crypto.spec.SecretKeySpec;
 final class Hkdf {
 
     static byte[] derive(byte[] ikm, String info, int len) {
+        // NI-3: RFC 5869 caps L at 255*HashLen; past it the single-byte counter T(i) wraps and blocks repeat,
+        // silently producing weak/duplicate key material. Callers request 32 (one block), so this never fires in
+        // practice — but a future caller must fail loudly, not derive a broken key.
+        if (len < 0 || len > 255 * 32) throw new IllegalArgumentException("HKDF length out of range: " + len);
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
             // Extract: PRK = HMAC(salt=0x00*32, IKM)

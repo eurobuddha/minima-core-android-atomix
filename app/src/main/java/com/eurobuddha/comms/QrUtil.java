@@ -14,6 +14,10 @@ import java.util.Map;
 public final class QrUtil {
 
     public static Bitmap qr(String text, int sizePx) {
+        // MI-11: bound the requested size — a w*h int[] plus a 4-byte/px bitmap is quadratic and can OOM (or
+        // overflow int) on an unbounded value. Callers already handle a null return.
+        if (sizePx <= 0) return null;
+        if (sizePx > 4096) sizePx = 4096;
         try {
             Map<EncodeHintType, Object> hints = new HashMap<>();
             hints.put(EncodeHintType.MARGIN, 1);

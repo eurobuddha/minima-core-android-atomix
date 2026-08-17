@@ -16,7 +16,7 @@ import java.nio.charset.StandardCharsets;
  *
  * Terms are carried on every offer message (PROPOSE/COUNTER/ACCEPT) so both sides always see the
  * standing offer without needing a prior message. Identities travel too, so the recipient can execute
- * against the sender directly. Modeled on {@code comms/MerchMessage} + {@code SwapTake}.
+ * against the sender directly. Modeled on SwapTake.
  */
 public final class OtcMessage {
 

@@ -14,7 +14,7 @@ import java.util.List;
 /**
  * Durable OTC negotiation state: one row per deal thread (keyed by {@code ref}) + an append-only message
  * log (keyed by {@code randomid} for dedup). The comms transport is stateless independent coins, so all
- * correlation and turn/status state lives here. Modeled on {@code comms/MerchDb}. The deal's {@code hash}
+ * correlation and turn/status state lives here. Modeled on the swap DB. The deal's {@code hash}
  * links to the on-chain swap (SwapDb) once execution starts.
  */
 public final class OtcDb {
@@ -185,6 +185,9 @@ public final class OtcDb {
         }
         @Override public void onUpgrade(SQLiteDatabase db, int o, int n) {
             if (o < 2) try { db.execSQL("ALTER TABLE otc_deals ADD COLUMN currency TEXT"); } catch (Exception ignore) {}
+        }
+        @Override public void onDowngrade(SQLiteDatabase db, int o, int n) {
+            db.setVersion(o);   // MA-16: accept an APK rollback as a no-op rather than crashing on the default SQLiteException
         }
     }
 }

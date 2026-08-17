@@ -84,11 +84,9 @@ public final class EthWallet {
         });
     }
 
-    /** Bring your own key (advanced). Validates by constructing the credentials. */
-    public void importKey(String hexPriv) {
-        creds = Credentials.create(hexPriv.startsWith("0x") ? hexPriv : "0x" + hexPriv);
-        imported = true;
-    }
+    // MA-7: importKey() deleted (dead code — no callers). It took a raw hex private key with no length/format
+    // validation, an unaudited key-import surface. isImported() stays (IdentityWatch reads it): with no importer,
+    // `imported` is always false, which correctly means "this node's ETH key is always seed-derived".
 
     public void clear() { creds = null; imported = false; }
 

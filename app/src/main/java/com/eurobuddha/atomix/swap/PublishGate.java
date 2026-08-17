@@ -1,5 +1,7 @@
 package com.eurobuddha.atomix.swap;
 
+import android.os.SystemClock;
+
 /**
  * Cross-host publish coordination. The Activity and the Service share one process (same convention as
  * {@code MainActivity.FOREGROUND}), so statics are the correct scope — and deliberately in-memory: no
@@ -27,7 +29,10 @@ public final class PublishGate {
 
     /** Claim the slot; false while another publish is in flight (and hasn't timed out). */
     public static synchronized boolean tryAcquire(int slot) {
-        long now = System.currentTimeMillis();
+        // MI-4: elapsedRealtime (monotonic) — a backwards wall-clock jump (NTP correction) under
+        // System.currentTimeMillis() could make (now - since) negative, satisfying < TIMEOUT_MS and wedging the
+        // slot until the skew passed; a forward jump could release it early and allow a duplicate publish.
+        long now = SystemClock.elapsedRealtime();
         if (since[slot] != 0 && now - since[slot] < TIMEOUT_MS) return false;
         since[slot] = now;
         return true;
