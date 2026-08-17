@@ -164,6 +164,31 @@ public final class MinimaHtlc {
         } catch (Exception e) { return false; }
     }
 
+    /** Strict hex guard for any value INTERPOLATED into a node command string. Minima commands are flat,
+     *  space-separated {@code key:value} tokens handed verbatim to the node (see {@link #cmd}), so a space —
+     *  or any non-hex byte — in a peer- or on-chain-sourced value would inject an extra command parameter into
+     *  a fund-moving command (e.g. a crafted state value {@code "0x.. tokenid:EVIL"}). Accepts an optional
+     *  0x/0X prefix; rejects null/empty and anything outside {@code [0-9A-Fa-f]}. Real pubkeys, hashlocks,
+     *  coinids, token ids and ETH keys are ALWAYS strict hex, so this only ever rejects malformed/hostile input.
+     *  Package-private so the swap-package tests can assert it directly. */
+    static boolean isHex(String v) {
+        if (v == null) return false;
+        String s = v.trim();
+        if (s.startsWith("0x") || s.startsWith("0X")) s = s.substring(2);
+        if (s.isEmpty()) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+        }
+        return true;
+    }
+
+    /** Decimal-amount guard for values interpolated into node commands (a lock/refund amount read from an
+     *  on-chain coin or a peer order). Rejects anything carrying a space/letter that could inject a parameter. */
+    static boolean isDecimal(String v) {
+        return v != null && v.trim().matches("[0-9]+(\\.[0-9]+)?");
+    }
+
     // ---- helpers ----
 
     public void currentBlock(BlockCb cb) {
@@ -200,6 +225,15 @@ public final class MinimaHtlc {
     public void lock(String amount, String requestAmount, String reqToken, String receiverPubkey,
                      String ownerEthKey, String hashlock, int timelockBlock, String otc, PostCb cb) {
         if (!ready()) { cb.err("Minima wallet not ready"); return; }
+        // MA-19: every value below is interpolated into the `send` command; reject non-hex/non-decimal so a
+        // hostile peer's order (receiverPubkey/ownerEthKey come from the order book) can't inject parameters.
+        if (!isHex(receiverPubkey)) { cb.err("lock: non-hex counterparty key"); return; }
+        if (!isHex(hashlock))       { cb.err("lock: non-hex hashlock"); return; }
+        if (!isHex(ownerEthKey))    { cb.err("lock: non-hex owner ETH key"); return; }
+        if (!isHex(reqToken))       { cb.err("lock: non-hex request token"); return; }
+        if (!isDecimal(requestAmount)) { cb.err("lock: non-decimal request amount"); return; }
+        String lockAmt = maybeGrain(amount);
+        if (!isDecimal(lockAmt))    { cb.err("lock: non-decimal amount"); return; }
         JSONObject state = new JSONObject();
         try {
             state.put("0", myPubkey);
@@ -215,7 +249,7 @@ public final class MinimaHtlc {
         // Fund from ANY of my 64 default addresses (no fromaddress/signkey constraint) — the node has no
         // dedicated "bridge wallet" here, so pinning to one address would fail when funds sit elsewhere.
         // The refund owner is set explicitly via state[0]=myPubkey, so the coin stays mine to reclaim.
-        String send = "send amount:" + maybeGrain(amount) + " mine:true address:" + HTLC_ADDRESS
+        String send = "send amount:" + lockAmt + " mine:true address:" + HTLC_ADDRESS
                 + " state:" + state.toString() + " tokenid:" + activeToken;
         cmd(send, r -> {
             JSONObject resp = r.optJSONObject("response");
@@ -233,8 +267,18 @@ public final class MinimaHtlc {
                               int timelockBlock, String otc, PostCb cb) {
         if (!ready()) { cb.err("Minima wallet not ready"); return; }
         if (coinids == null || coinids.isEmpty()) { cb.err("no coins to lock"); return; }
+        // MA-19: reject non-hex/non-decimal before building any txn command (receiverPubkey can come from an
+        // on-chain event / peer order; each coinid pins an input).
+        if (!isHex(receiverPubkey)) { cb.err("lock: non-hex counterparty key"); return; }
+        if (!isHex(hashlock))       { cb.err("lock: non-hex hashlock"); return; }
+        if (!isHex(ownerEthKey))    { cb.err("lock: non-hex owner ETH key"); return; }
+        if (!isHex(reqToken))       { cb.err("lock: non-hex request token"); return; }
+        if (!isDecimal(requestAmount)) { cb.err("lock: non-decimal request amount"); return; }
+        for (String cid : coinids) if (!isHex(cid)) { cb.err("lock: non-hex coinid"); return; }
         amount = maybeGrain(amount);                     // active-currency trade grain — the change output below follows from it
         String change = subtract(totalSelected, amount);
+        if (!isDecimal(amount)) { cb.err("lock: non-decimal amount"); return; }
+        if (positive(change) && !isDecimal(change)) { cb.err("lock: non-decimal change"); return; }
         String id = txnId();
         List<String> seq = new ArrayList<>();
         seq.add("txncreate id:" + id);
@@ -308,6 +352,13 @@ public final class MinimaHtlc {
         String amount = MinimaHtlc.coinAmount(coin);
         String owner = stateAt(coin, 0);
         String receiver = stateAt(coin, 4);
+        // MA-19: coinid/tokenid/owner/receiver come from a coin at the anyone-can-write shared HTLC address, and
+        // secret is harvested from the anyone-can-write NOTIFY sink — reject non-hex/non-decimal before any command.
+        if (!isHex(coinid))                    { cb.err("claim: non-hex coinid"); return; }
+        if (!isHex(tokenid))                   { cb.err("claim: non-hex tokenid"); return; }
+        if (!isHex(owner) || !isHex(receiver)) { cb.err("claim: non-hex coin state key"); return; }
+        if (!isHex(secret) || !isHex(hash))    { cb.err("claim: non-hex secret/hash"); return; }
+        if (!isDecimal(amount))                { cb.err("claim: non-decimal coin amount"); return; }
         String change = subtract(amount, "0.0001");
         String id = txnId();
 
@@ -337,6 +388,12 @@ public final class MinimaHtlc {
         String tokenid = coin.optString("tokenid", "0x00");
         String amount = MinimaHtlc.coinAmount(coin);
         String owner = stateAt(coin, 0);                    // the script's refund signer = state[0]
+        // MA-19: coinid/tokenid/owner/amount come from a coin at the anyone-can-write shared HTLC address —
+        // reject non-hex/non-decimal before building the refund command (owner is interpolated into txnsign).
+        if (!isHex(coinid))     { cb.err("refund: non-hex coinid"); return; }
+        if (!isHex(tokenid))    { cb.err("refund: non-hex tokenid"); return; }
+        if (!isHex(owner))      { cb.err("refund: non-hex owner key"); return; }
+        if (!isDecimal(amount)) { cb.err("refund: non-decimal coin amount"); return; }
         String id = txnId();
 
         List<String> seq = new ArrayList<>();
@@ -407,6 +464,7 @@ public final class MinimaHtlc {
     }
 
     private void doScanHtlcByState(String value, int coinageMin, int depth, boolean megammr, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
+        if (!isHex(value)) { err.accept("scan: non-hex state value"); return; }   // MA-19: value is interpolated into the coins command
         // SETTLEMENT scan: NO tokenid filter. The state: value (a unique hashlock, or my pubkey) already scopes the
         // reply, so this stays cheap; and dropping the token filter is what lets a claim/refund find an in-flight
         // swap's coin in EITHER currency after the user switched the active currency. claim()/refund() read the
@@ -439,6 +497,7 @@ public final class MinimaHtlc {
     }
 
     private void doScanNotify(String hash, int depth, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
+        if (!isHex(hash)) { err.accept("scan: non-hex hash"); return; }   // MA-19: hash is interpolated into the coins command
         // The node stores state hex UPPER-CASE ("0x259C…") and matches `state:` case-sensitively (a .contains).
         // normKey → UPPER-CASE, no 0x — a guaranteed substring of the stored value regardless of the caller's
         // case (SwapDb keys are lower-case). Passing the raw lower-case hash here would match NOTHING and

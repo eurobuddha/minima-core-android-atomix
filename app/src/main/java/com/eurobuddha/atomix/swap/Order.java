@@ -216,6 +216,12 @@ public final class Order {
         Order r = new Order();
         r.minimaPublicKey = o.optString("mpk", "");
         r.ethAddress = o.optString("eth", "");
+        // A maker self-signs its own order, so mpk/eth are untrusted input: the Ed25519 signature proves
+        // AUTHORSHIP, not well-formedness. Drop any non-hex value so a hostile maker can't smuggle a
+        // node-command-injecting string (e.g. "0x.. tokenid:EVIL") through to MinimaHtlc.lock (MA-19 — defence
+        // in depth alongside the lock/claim/refund guards). A blanked key makes the order un-tradeable, not fatal.
+        if (!r.minimaPublicKey.isEmpty() && !MinimaHtlc.isHex(r.minimaPublicKey)) r.minimaPublicKey = "";
+        if (!r.ethAddress.isEmpty() && !MinimaHtlc.isHex(r.ethAddress)) r.ethAddress = "";
         r.commsPublicId = o.optString("cid", "");
         r.ts = o.optLong("ts", 0);
         JSONObject bal = o.optJSONObject("bal");

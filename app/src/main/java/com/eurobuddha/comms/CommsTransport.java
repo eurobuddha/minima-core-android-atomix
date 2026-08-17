@@ -59,6 +59,12 @@ public final class CommsTransport {
     public static void postBlob(NodeApi node, String address, String amount, String tokenid,
                                 String blobHex, JSONObject extraState, SendCb cb) {
         try {
+            // MA-9: every value below is interpolated into the `send` command — reject anything that isn't a
+            // clean hex address/token/blob or a plain decimal amount, so no value can inject a command parameter.
+            if (!isCleanHex(address)) { cb.onFailed("bad post address"); return; }
+            if (!isDecimal(amount))   { cb.onFailed("bad post amount"); return; }
+            if (!isCleanHex(tokenid)) { cb.onFailed("bad post tokenid"); return; }
+            if (!isCleanHex(blobHex)) { cb.onFailed("bad post blob"); return; }
             JSONObject state = extraState != null ? extraState : new JSONObject();
             state.put("99", "0x" + blobHex);   // hex-typed state value, read back the same way
             post(node, "send amount:" + amount + " address:" + address + " tokenid:" + tokenid + " state:" + state, cb);
@@ -66,6 +72,12 @@ public final class CommsTransport {
             cb.onFailed(e.getMessage());
         }
     }
+
+    /** True iff {@code s} is a non-empty hex string (optional 0x prefix) — see {@link CommsScanner#isCleanHex}. */
+    private static boolean isCleanHex(String s) { return CommsScanner.isCleanHex(s); }
+
+    /** True iff {@code s} is a plain non-negative decimal amount (no space/letter that could inject a parameter). */
+    private static boolean isDecimal(String s) { return s != null && s.trim().matches("[0-9]+(\\.[0-9]+)?"); }
 
     /**
      * Behind {@link SignGate}: `send` signs internally, so it burns a one-time key leaf exactly like a

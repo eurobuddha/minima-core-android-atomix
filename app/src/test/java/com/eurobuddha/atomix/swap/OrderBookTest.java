@@ -19,8 +19,8 @@ public class OrderBookTest {
 
     private static Order orderWithLadder() {
         Order o = new Order();
-        o.minimaPublicKey = "0xMPK";
-        o.ethAddress = "0xETH";
+        o.minimaPublicKey = "0x11AA22BB";
+        o.ethAddress = "0x33CC44DD";
         o.commsPublicId = "0xCID";
         o.ts = 1_700_000_000_000L;
         o.minimaAvail = 100.0;

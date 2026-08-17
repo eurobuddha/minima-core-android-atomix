@@ -27,8 +27,8 @@ public class OrderBookTombstoneTest {
         o.pairs.put(SYM, p);
         o.signerPk = signer;
         o.ts = ts;
-        o.minimaPublicKey = "0xMPK";
-        o.ethAddress = "0xETH";
+        o.minimaPublicKey = "0x11AA22BB";
+        o.ethAddress = "0x33CC44DD";
         return o;
     }
 

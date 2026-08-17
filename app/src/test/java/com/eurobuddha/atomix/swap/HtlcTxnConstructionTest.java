@@ -40,7 +40,7 @@ public class HtlcTxnConstructionTest {
     private static final String TOKEN = MinimaHtlc.USDT_TOKENID;
     private static final String NOTIFY = MinimaHtlc.NOTIFY;
     private static final String MY_ADDR = "MxMYADDR";
-    private static final String MY_PK = "0xMYPUBKEY";
+    private static final String MY_PK = "0x0BC0FFEE";
 
     private NodeApi node;
     private MinimaHtlc htlc;
@@ -77,8 +77,8 @@ public class HtlcTxnConstructionTest {
     // ---- LOCK ----
 
     @Test public void lockWritesAllSevenStatePortsAndGrainsAmount() throws Exception {
-        htlc.lock("0.15", "150000", TOKEN_ERC20, "0xRECEIVERPK", "0xMYETH",
-                "0xHASH", 987654, "FALSE", post());
+        htlc.lock("0.15", "150000", TOKEN_ERC20, "0xFEEDFACE", "0xBEEFCAFE",
+                "0xDEADBEEF", 987654, "FALSE", post());
 
         String send = only(commands, "send");
         assertTrue("locks at the shared HTLC address", send.contains("address:" + HTLC_ADDR));
@@ -90,14 +90,14 @@ public class HtlcTxnConstructionTest {
         assertEquals("port1 = requested ERC20 amount", "150000", st.optString("1"));
         assertEquals("port2 = [reqToken]", "[" + TOKEN_ERC20 + "]", st.optString("2"));
         assertEquals("port3 = absolute timelock block", "987654", st.optString("3"));
-        assertEquals("port4 = counterparty (who claims with the secret)", "0xRECEIVERPK", st.optString("4"));
-        assertEquals("port5 = hashlock", "0xHASH", st.optString("5"));
-        assertEquals("port6 = owner ETH key", "0xMYETH", st.optString("6"));
+        assertEquals("port4 = counterparty (who claims with the secret)", "0xFEEDFACE", st.optString("4"));
+        assertEquals("port5 = hashlock", "0xDEADBEEF", st.optString("5"));
+        assertEquals("port6 = owner ETH key", "0xBEEFCAFE", st.optString("6"));
         assertEquals("port7 = otc flag", "FALSE", st.optString("7"));
     }
 
     @Test public void lockGrainsAnOverPreciseAmountDown() throws Exception {
-        htlc.lock("0.123456789", "1", TOKEN_ERC20, "0xR", "0xE", "0xH", 1, "FALSE", post());
+        htlc.lock("0.123456789", "1", TOKEN_ERC20, "0xAB", "0xCD", "0xEF", 1, "FALSE", post());
         String send = only(commands, "send");
         assertTrue("over-precise amount must be quantized DOWN to 6dp before it reaches the node",
                 send.contains("amount:0.123456 "));
@@ -112,17 +112,17 @@ public class HtlcTxnConstructionTest {
         // positive 2nd output — so the OUTPUT-COUNT check would NOT catch it. That forces the VALUE assertion
         // below (change == 0.1499) to be the load-bearing proof of the coloured-token fix.
         JSONObject coin = new JSONObject()
-                .put("coinid", "0xCOIN")
+                .put("coinid", "0xC01DCA5E")
                 .put("tokenid", TOKEN)
                 .put("amount", "0.05")          // decoy underlying-carrier value — must be IGNORED
                 .put("tokenamount", "0.15")     // the real coloured-token value — must be USED
-                .put("state", new JSONObject().put("0", "0xOWNERPK").put("4", MY_PK));
+                .put("state", new JSONObject().put("0", "0x0FFEC0DE").put("4", MY_PK));
 
-        htlc.claim(coin, "0xHASH", "0xSECRET", post());
+        htlc.claim(coin, "0xDEADBEEF", "0xCAFEBABE", post());
 
         // the coin is consumed, not some other coin
         assertTrue("exactly one txncreate", count(commands, "txncreate") == 1);
-        assertTrue("must input the HTLC coin by its own coinid", contains(commands, "txninput", "coinid:0xCOIN"));
+        assertTrue("must input the HTLC coin by its own coinid", contains(commands, "txninput", "coinid:0xC01DCA5E"));
 
         List<String> outs = allContaining(commands, "txnoutput");
         assertEquals("claim emits exactly two outputs: notify + change", 2, outs.size());
@@ -142,9 +142,9 @@ public class HtlcTxnConstructionTest {
         assertEquals("no burn: sum of outputs must equal the locked tokenamount",
                 0, amountOf(notify).add(amountOf(change)).compareTo(new BigDecimal("0.15")));
 
-        assertTrue("reveal the secret at state 100", contains(commands, "txnstate", "port:100 value:0xSECRET"));
-        assertTrue("echo the hashlock at state 101", contains(commands, "txnstate", "port:101 value:0xHASH"));
-        assertTrue("owner echoed at state 102", contains(commands, "txnstate", "port:102 value:[0xOWNERPK]"));
+        assertTrue("reveal the secret at state 100", contains(commands, "txnstate", "port:100 value:0xCAFEBABE"));
+        assertTrue("echo the hashlock at state 101", contains(commands, "txnstate", "port:101 value:0xDEADBEEF"));
+        assertTrue("owner echoed at state 102", contains(commands, "txnstate", "port:102 value:[0x0FFEC0DE]"));
         assertTrue("receiver echoed at state 103", contains(commands, "txnstate", "port:103 value:[" + MY_PK + "]"));
         assertTrue("must sign with the receiver key the script requires",
                 contains(commands, "txnsign", "publickey:" + MY_PK));
@@ -156,9 +156,9 @@ public class HtlcTxnConstructionTest {
     @Test public void claimOfDustOnlyCoinEmitsNoChangeOutput() throws Exception {
         // A coin worth exactly the notify (0.0001) leaves no positive change → only the notify output.
         JSONObject coin = new JSONObject()
-                .put("coinid", "0xDUST").put("tokenid", TOKEN).put("tokenamount", "0.0001")
-                .put("state", new JSONObject().put("0", "0xOWNERPK").put("4", MY_PK));
-        htlc.claim(coin, "0xHASH", "0xSECRET", post());
+                .put("coinid", "0xD057").put("tokenid", TOKEN).put("tokenamount", "0.0001")
+                .put("state", new JSONObject().put("0", "0x0FFEC0DE").put("4", MY_PK));
+        htlc.claim(coin, "0xDEADBEEF", "0xCAFEBABE", post());
         List<String> outs = allContaining(commands, "txnoutput");
         assertEquals("only the notify output for a dust-only lock", 1, outs.size());
         assertTrue(outs.get(0).contains("address:" + NOTIFY));
@@ -168,16 +168,16 @@ public class HtlcTxnConstructionTest {
 
     @Test public void refundReturnsWholeValueToOwnerAndSignsAsOwner() throws Exception {
         JSONObject coin = new JSONObject()
-                .put("coinid", "0xCOIN")
+                .put("coinid", "0xC01DCA5E")
                 .put("tokenid", TOKEN)
                 .put("amount", "0.000000000000000000000000000000000001")
                 .put("tokenamount", "0.15")
-                .put("state", new JSONObject().put("0", "0xOWNERPK").put("4", "0xSOMEONE"));
+                .put("state", new JSONObject().put("0", "0x0FFEC0DE").put("4", "0x50AD"));
 
         htlc.refund(coin, post());
 
         assertTrue("exactly one txncreate", count(commands, "txncreate") == 1);
-        assertTrue("must input the HTLC coin by its own coinid", contains(commands, "txninput", "coinid:0xCOIN"));
+        assertTrue("must input the HTLC coin by its own coinid", contains(commands, "txninput", "coinid:0xC01DCA5E"));
 
         List<String> outs = allContaining(commands, "txnoutput");
         assertEquals("refund is a single output — the whole coin back to me", 1, outs.size());
@@ -187,7 +187,7 @@ public class HtlcTxnConstructionTest {
                 amountOf(outs.get(0)).compareTo(new BigDecimal("0.15")));
         assertTrue("refund uses the coin's own token", outs.get(0).contains("tokenid:" + TOKEN));
         assertTrue("must sign with the owner key from state[0] (the script's refund signer)",
-                contains(commands, "txnsign", "publickey:0xOWNERPK"));
+                contains(commands, "txnsign", "publickey:0x0FFEC0DE"));
         assertTrue("must actually broadcast (txnpost) and clean up (txndelete)",
                 contains(commands, "txnpost", "txndelete:true"));
     }
@@ -200,7 +200,7 @@ public class HtlcTxnConstructionTest {
         // 0.30 back a 0.123456789 lock; the >6dp amount must grain DOWN and the remainder return as change.
         List<String> coinids = java.util.Arrays.asList("0xC1", "0xC2");
         htlc.lockFromCoins(coinids, "0.30", "0.123456789", "150000", TOKEN_ERC20,
-                "0xRECEIVERPK", "0xMYETH", "0xHASH", 987654, "FALSE", post());
+                "0xFEEDFACE", "0xBEEFCAFE", "0xDEADBEEF", 987654, "FALSE", post());
 
         assertTrue("exactly one txncreate", count(commands, "txncreate") == 1);
         assertTrue("pins the first coin", contains(commands, "txninput", "coinid:0xC1"));
@@ -211,9 +211,9 @@ public class HtlcTxnConstructionTest {
         assertTrue(contains(commands, "txnstate", "port:1 value:150000"));
         assertTrue(contains(commands, "txnstate", "port:2 value:[" + TOKEN_ERC20 + "]"));
         assertTrue(contains(commands, "txnstate", "port:3 value:987654"));
-        assertTrue(contains(commands, "txnstate", "port:4 value:0xRECEIVERPK"));
-        assertTrue(contains(commands, "txnstate", "port:5 value:0xHASH"));
-        assertTrue(contains(commands, "txnstate", "port:6 value:0xMYETH"));
+        assertTrue(contains(commands, "txnstate", "port:4 value:0xFEEDFACE"));
+        assertTrue(contains(commands, "txnstate", "port:5 value:0xDEADBEEF"));
+        assertTrue(contains(commands, "txnstate", "port:6 value:0xBEEFCAFE"));
         assertTrue(contains(commands, "txnstate", "port:7 value:FALSE"));
 
         List<String> outs = allContaining(commands, "txnoutput");
@@ -240,9 +240,9 @@ public class HtlcTxnConstructionTest {
     @Test public void claimFailsSafeOnMissingCoinid() throws Exception {
         // A coin with no coinid must be REFUSED before any command is built — never a spend with an empty input.
         JSONObject coin = new JSONObject().put("tokenid", TOKEN).put("tokenamount", "0.15")
-                .put("state", new JSONObject().put("0", "0xOWNERPK").put("4", MY_PK));
+                .put("state", new JSONObject().put("0", "0x0FFEC0DE").put("4", MY_PK));
         final boolean[] erred = {false};
-        htlc.claim(coin, "0xHASH", "0xSECRET", new MinimaHtlc.PostCb() {
+        htlc.claim(coin, "0xDEADBEEF", "0xCAFEBABE", new MinimaHtlc.PostCb() {
             @Override public void ok(String txpowid) { throw new AssertionError("must not build a spend"); }
             @Override public void err(String msg) { erred[0] = true; }
         });
@@ -252,7 +252,7 @@ public class HtlcTxnConstructionTest {
 
     @Test public void refundFailsSafeOnMissingCoinid() throws Exception {
         JSONObject coin = new JSONObject().put("tokenid", TOKEN).put("tokenamount", "0.15")
-                .put("state", new JSONObject().put("0", "0xOWNERPK"));
+                .put("state", new JSONObject().put("0", "0x0FFEC0DE"));
         final boolean[] erred = {false};
         htlc.refund(coin, new MinimaHtlc.PostCb() {
             @Override public void ok(String txpowid) { throw new AssertionError("must not build a spend"); }
@@ -265,16 +265,79 @@ public class HtlcTxnConstructionTest {
     @Test public void claimUsesTheCoinsOwnTokenForEveryOutput() throws Exception {
         // Both the notify and the change output must carry the SAME token as the input coin — a token mismatch
         // between input and outputs would fail the script's VERIFYOUT(@TOKENID) or move the wrong asset.
-        JSONObject coin = new JSONObject().put("coinid", "0xCOIN").put("tokenid", TOKEN).put("tokenamount", "0.15")
-                .put("state", new JSONObject().put("0", "0xOWNERPK").put("4", MY_PK));
-        htlc.claim(coin, "0xHASH", "0xSECRET", post());
+        JSONObject coin = new JSONObject().put("coinid", "0xC01DCA5E").put("tokenid", TOKEN).put("tokenamount", "0.15")
+                .put("state", new JSONObject().put("0", "0x0FFEC0DE").put("4", MY_PK));
+        htlc.claim(coin, "0xDEADBEEF", "0xCAFEBABE", post());
         for (String out : allContaining(commands, "txnoutput"))
             assertTrue("every claim output carries the coin's token: " + out, out.contains("tokenid:" + TOKEN));
+    }
+
+    // ---- MA-19: command-injection defence (a space or non-hex byte in a peer/on-chain value would inject
+    //      an extra parameter into a fund-moving node command) ----
+
+    @Test public void lockRejectsCounterpartyKeyCarryingAnInjectedParameter() throws Exception {
+        // A hostile maker's order-book mpk is signed (authorship) but never format-checked, so it can carry a
+        // space. If it reached the `send`, "0xAA tokenid:0x00" would redirect the lock's token. Must be refused.
+        final boolean[] erred = {false};
+        htlc.lock("0.15", "150000", TOKEN_ERC20, "0xAA tokenid:0x00", "0xBEEFCAFE",
+                "0xDEADBEEF", 1, "FALSE", errCb(erred));
+        assertTrue("lock must call err on a counterparty key with a space", erred[0]);
+        assertTrue("no command may be built", commands.isEmpty());
+    }
+
+    @Test public void lockRejectsNonHexHashlock() throws Exception {
+        final boolean[] erred = {false};
+        htlc.lock("0.15", "150000", TOKEN_ERC20, "0xFEEDFACE", "0xBEEFCAFE",
+                "not-a-hash", 1, "FALSE", errCb(erred));
+        assertTrue("lock must call err on a non-hex hashlock", erred[0]);
+        assertTrue("no command may be built", commands.isEmpty());
+    }
+
+    @Test public void claimRejectsCoinStateCarryingAnInjectedParameter() throws Exception {
+        // owner/receiver come from a coin at the anyone-can-write shared HTLC address. An owner value with a
+        // space would inject into txnstate port:102 (and STRING(owner) in the script). Must be refused.
+        JSONObject coin = new JSONObject()
+                .put("coinid", "0xC01DCA5E").put("tokenid", TOKEN).put("tokenamount", "0.15")
+                .put("state", new JSONObject().put("0", "0x0FFEC0DE mine:true").put("4", MY_PK));
+        final boolean[] erred = {false};
+        htlc.claim(coin, "0xDEADBEEF", "0xCAFEBABE", errCb(erred));
+        assertTrue("claim must call err on an injected owner state", erred[0]);
+        assertTrue("no command may be built", commands.isEmpty());
+    }
+
+    @Test public void refundRejectsCoinTokenidCarryingAnInjectedParameter() throws Exception {
+        JSONObject coin = new JSONObject()
+                .put("coinid", "0xC01DCA5E").put("tokenid", "0x00 address:MxEVIL").put("tokenamount", "0.15")
+                .put("state", new JSONObject().put("0", "0x0FFEC0DE"));
+        final boolean[] erred = {false};
+        htlc.refund(coin, errCb(erred));
+        assertTrue("refund must call err on an injected tokenid", erred[0]);
+        assertTrue("no command may be built", commands.isEmpty());
+    }
+
+    @Test public void refundRejectsNonDecimalCoinAmount() throws Exception {
+        // coinAmount() reads the coin's own (attacker-writable) tokenamount; a space there would inject into
+        // the txnoutput amount: field. Must be refused before any command is built.
+        JSONObject coin = new JSONObject()
+                .put("coinid", "0xC01DCA5E").put("tokenid", TOKEN).put("tokenamount", "0.15 address:MxEVIL")
+                .put("state", new JSONObject().put("0", "0x0FFEC0DE"));
+        final boolean[] erred = {false};
+        htlc.refund(coin, errCb(erred));
+        assertTrue("refund must call err on a non-decimal coin amount", erred[0]);
+        assertTrue("no command may be built", commands.isEmpty());
     }
 
     // ---- helpers ----
 
     private static final String TOKEN_ERC20 = "0xdac17f958d2ee523a2206206994597c13d831ec7";
+
+    /** A PostCb that records an err() and fails the test if a command is instead built (ok()). */
+    private static MinimaHtlc.PostCb errCb(final boolean[] erred) {
+        return new MinimaHtlc.PostCb() {
+            @Override public void ok(String txpowid) { throw new AssertionError("must not build a spend"); }
+            @Override public void err(String msg) { erred[0] = true; }
+        };
+    }
 
     private MinimaHtlc.PostCb post() {
         return new MinimaHtlc.PostCb() {

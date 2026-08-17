@@ -36,8 +36,8 @@ public class SwapOrderBookTest {
 
     private static String orderHex() throws Exception {
         Order o = new Order();
-        o.minimaPublicKey = "0xMPK";
-        o.ethAddress = "0xETH";
+        o.minimaPublicKey = "0x11AA22BB";
+        o.ethAddress = "0x33CC44DD";
         o.commsPublicId = "0xCID";
         o.ts = 1_700_000_000_000L;
         o.pairs.put("USDT", new Order.Pair(true, 1.01, 0.99, 0.01));
@@ -65,7 +65,7 @@ public class SwapOrderBookTest {
         byte[] pk = bytes(PK_LEN, 1), sig = bytes(SIG_LEN, 2);
         Order o = SwapOrderBook.verifyCoin(verifier(true), coin(orderHex(), pk, sig));
         assertNotNull("a valid signature must yield the parsed order", o);
-        assertEquals("0xMPK", o.minimaPublicKey);
+        assertEquals("0x11AA22BB", o.minimaPublicKey);
         assertEquals("recovered signer stamped from the coin's pk", "0x" + Hex.to(pk), o.signerPk);
         assertEquals("source coinid stamped", "0xCOIN123", o.coinid);
     }

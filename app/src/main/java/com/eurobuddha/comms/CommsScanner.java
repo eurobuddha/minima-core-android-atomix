@@ -64,6 +64,10 @@ public final class CommsScanner {
     /** Raw scanner (decrypt = false): hands EVERY coin to the router — e.g. to watch plaintext payments. */
     public CommsScanner(NodeApi node, CryptoProvider crypto, MetaStore meta,
                         String targetAddress, Router router, Listener listener, boolean decrypt) {
+        // MA-10: targetAddress is interpolated into `coinnotify`/`coins` commands; require a clean 0x-hex address
+        // so a stray value can never inject an extra command token (also guards the substring below). All callers
+        // pass a hardcoded TradingContext sentinel, so a failure here is a programming error, surfaced fail-fast.
+        if (!isCleanHex(targetAddress)) throw new IllegalArgumentException("scanner address must be 0x-hex: " + targetAddress);
         this.node = node; this.crypto = crypto; this.meta = meta;
         this.targetAddress = targetAddress; this.router = router; this.listener = listener;
         this.decrypt = decrypt;
@@ -164,5 +168,18 @@ public final class CommsScanner {
 
     private static int parseInt(String s) {
         try { return Integer.parseInt(s); } catch (Exception e) { return 0; }
+    }
+
+    /** True iff {@code s} is a non-empty hex string (optional 0x prefix, chars in [0-9A-Fa-f]) — no whitespace or
+     *  command-grammar characters. Local to comms (this package must not depend on the app package). */
+    static boolean isCleanHex(String s) {
+        if (s == null) return false;
+        String h = (s.startsWith("0x") || s.startsWith("0X")) ? s.substring(2) : s;
+        if (h.isEmpty()) return false;
+        for (int i = 0; i < h.length(); i++) {
+            char c = h.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+        }
+        return true;
     }
 }
