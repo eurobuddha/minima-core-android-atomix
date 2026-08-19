@@ -199,8 +199,10 @@ public class HtlcTxnConstructionTest {
         // The ERC20->mxUSDT responder locks YOUR mxUSDT via this path (pinned coins, explicit change), NOT the
         // send-path lock(). It was previously untested despite being a primary fund path. Two coins totalling
         // 0.30 back a 0.123456789 lock; the >6dp amount must grain DOWN and the remainder return as change.
+        // reqToken is the protocol's currency-agnostic literal "minima" here (NOT a hex token address) — this is
+        // exactly what SwapEngine.lockMinimaCounterLeg passes, and the value that must NOT be rejected as non-hex.
         List<String> coinids = java.util.Arrays.asList("0xC1", "0xC2");
-        htlc.lockFromCoins(coinids, "0.30", "0.123456789", "150000", TOKEN_ERC20,
+        htlc.lockFromCoins(coinids, "0.30", "0.123456789", "150000", "minima",
                 "0xFEEDFACE", "0xBEEFCAFE", "0xDEADBEEF", 987654, "FALSE", post());
 
         assertTrue("exactly one txncreate", count(commands, "txncreate") == 1);
@@ -210,7 +212,7 @@ public class HtlcTxnConstructionTest {
         // all seven HTLC state ports, exactly as the send-path lock() writes them
         assertTrue(contains(commands, "txnstate", "port:0 value:" + MY_PK));
         assertTrue(contains(commands, "txnstate", "port:1 value:150000"));
-        assertTrue(contains(commands, "txnstate", "port:2 value:[" + TOKEN_ERC20 + "]"));
+        assertTrue(contains(commands, "txnstate", "port:2 value:[minima]"));   // the mxUSDT leg's currency-agnostic marker
         assertTrue(contains(commands, "txnstate", "port:3 value:987654"));
         assertTrue(contains(commands, "txnstate", "port:4 value:0xFEEDFACE"));
         assertTrue(contains(commands, "txnstate", "port:5 value:0xDEADBEEF"));

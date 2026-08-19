@@ -230,7 +230,11 @@ public final class MinimaHtlc {
         if (!isHex(receiverPubkey)) { cb.err("lock: non-hex counterparty key"); return; }
         if (!isHex(hashlock))       { cb.err("lock: non-hex hashlock"); return; }
         if (!isHex(ownerEthKey))    { cb.err("lock: non-hex owner ETH key"); return; }
-        if (!isHex(reqToken))       { cb.err("lock: non-hex request token"); return; }
+        // reqToken is either an ETH token contract address (hex) or the protocol's currency-agnostic literal
+        // "minima" (the mxUSDT counter-leg marker) — BOTH are our own values, never peer input. Accept both;
+        // reject only genuinely malformed values. (0.1.23 wrongly required hex here, which silently rejected
+        // every "minima" counter-leg lock and broke all ERC20->mxUSDT buys.)
+        if (!isHex(reqToken) && !"minima".equalsIgnoreCase(reqToken.trim())) { cb.err("lock: bad request token"); return; }
         if (!isDecimal(requestAmount)) { cb.err("lock: non-decimal request amount"); return; }
         String lockAmt = maybeGrain(amount);
         if (!isDecimal(lockAmt))    { cb.err("lock: non-decimal amount"); return; }
@@ -274,7 +278,11 @@ public final class MinimaHtlc {
         if (!isHex(receiverPubkey)) { cb.err("lock: non-hex counterparty key"); return; }
         if (!isHex(hashlock))       { cb.err("lock: non-hex hashlock"); return; }
         if (!isHex(ownerEthKey))    { cb.err("lock: non-hex owner ETH key"); return; }
-        if (!isHex(reqToken))       { cb.err("lock: non-hex request token"); return; }
+        // reqToken is either an ETH token contract address (hex) or the protocol's currency-agnostic literal
+        // "minima" (the mxUSDT counter-leg marker) — BOTH are our own values, never peer input. Accept both;
+        // reject only genuinely malformed values. (0.1.23 wrongly required hex here, which silently rejected
+        // every "minima" counter-leg lock and broke all ERC20->mxUSDT buys.)
+        if (!isHex(reqToken) && !"minima".equalsIgnoreCase(reqToken.trim())) { cb.err("lock: bad request token"); return; }
         if (!isDecimal(requestAmount)) { cb.err("lock: non-decimal request amount"); return; }
         for (String cid : coinids) if (!isHex(cid)) { cb.err("lock: non-hex coinid"); return; }
         amount = maybeGrain(amount);                     // active-currency trade grain — the change output below follows from it
