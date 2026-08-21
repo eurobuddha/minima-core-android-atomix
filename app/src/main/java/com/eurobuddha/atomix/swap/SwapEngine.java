@@ -682,6 +682,15 @@ public final class SwapEngine {
             if (s == null || s.hash == null || s.myLegIsMinima) continue;   // my leg is ETH → I claim the mxUSDT leg
             if (SwapDb.ST_COMPLETE.equals(s.status) || SwapDb.ST_REFUNDED.equals(s.status)
                     || SwapDb.ST_ERROR.equals(s.status)) continue;
+            // ZOMBIE-SCAN REAPER (0.1.41): an ERC20→mxUSDT INITIATOR whose own ETH leg is already past its refund
+            // window can never still claim the (shorter, block+36) mxUSDT counter-leg — it expired long before my
+            // ~2h ETH leg opened. If that ETH-leg refund never CONFIRMED on-chain (dropped/replaced tx, or a free
+            // RPC that never surfaces gc.refunded) the row stays non-terminal forever and claimScan polls its dead
+            // hash every ~90s. Membership only — no fund decision (the ETH refund scan is unchanged). Scoped to
+            // this role+direction: a MINIMA_TO_ERC20 RESPONDER is also myLegIsMinima=false but its counter-leg
+            // claim stays live ~2h, so a blanket cutoff would strand it.
+            if ("INITIATOR".equals(s.role) && "ERC20_TO_MINIMA".equals(s.direction)
+                    && s.myTimelock > 0 && nowUnix() > s.myTimelock) continue;
             if (db.getSecret(s.hash) != null && !db.haveCollect(s.hash)) out.add(s.hash);
         }
         return out;
@@ -1055,7 +1064,9 @@ public final class SwapEngine {
         if (cur != null && SwapDb.ST_REFUNDED.equals(cur.status)) return;
         if (!db.haveCollectExpired(hash)) db.logEvent(hash, SwapDb.EV_EXPIRED, "ETH", "", "confirmed on-chain");
         db.setSwapStatus(hash, SwapDb.ST_REFUNDED);
-        ui.post(() -> { notifier.notify("Swap refunded", "Reclaimed your tokens"); notifier.onSwapsChanged(); });
+        final String reason = refundReason(hash);   // 0.1.41: say WHY, not a bare "Reclaimed your tokens"
+        SwapLog.w("refund CONFIRMED " + hash + " — " + reason);
+        ui.post(() -> { notifier.notify("Swap refunded", reason); notifier.onSwapsChanged(); });
     }
 
     /** The counterparty refunded the ETH leg I was to receive (I missed my claim window), so this swap failed
@@ -1414,7 +1425,20 @@ public final class SwapEngine {
      *  hash + receiver key and a wrong amount/token — a guaranteed mutual-refund grief for pennies. The
      *  once-guard also stops the per-poll event-table spam the old unguarded log produced. */
     void logMismatchOnce(String hash, String leg, String note) {
-        if (!db.haveMismatch(hash)) db.logEvent(hash, SwapDb.EV_MISMATCH, leg, "0", note);
+        if (!db.haveMismatch(hash)) {
+            db.logEvent(hash, SwapDb.EV_MISMATCH, leg, "0", note);
+            SwapLog.w("swap " + hash + " counter-leg REJECTED (" + leg + "): " + note);   // 0.1.41: was silent
+        }
+    }
+
+    /** A human reason a swap refunded, for the notification subtext + log. Prefers a stored EV_MISMATCH note
+     *  (the swap aborted on a counterparty amount/token mismatch); else the common case — the counterparty never
+     *  locked their counter-leg before the timeout. Read-only; changes no refund decision (0.1.41). */
+    private String refundReason(String hash) {
+        for (SwapDb.Event e : db.getEvents(hash))
+            if (SwapDb.EV_MISMATCH.equals(e.event) && e.note != null && !e.note.isEmpty())
+                return "Reclaimed your tokens — " + e.note;
+        return "Reclaimed your tokens — the counterparty never locked their side before the timeout";
     }
 
     /** The tokenid of the currency a swap BOUGHT (from its buyToken label) — verifies the received Minima coin

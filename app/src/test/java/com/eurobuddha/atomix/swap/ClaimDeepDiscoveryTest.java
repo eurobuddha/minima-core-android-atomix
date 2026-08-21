@@ -124,4 +124,35 @@ public class ClaimDeepDiscoveryTest {
 
         verify(minima, never()).scanHtlcByHashDeep(eq(HASH), anyInt(), anyInt(), any(), any());
     }
+
+    /** 0.1.41 zombie-scan reaper: an ERC20→mxUSDT INITIATOR whose own ETH leg is already past its refund window
+     *  can never still claim the shorter mxUSDT counter-leg. If its ETH refund never confirmed on-chain the row
+     *  stays non-terminal forever and claimScan polls the dead hash every cycle — the real S23 symptom. Retire it. */
+    @Test public void expiredInitiatorErc20ToMinimaIsReaped() {
+        SwapDb.Swap s = claimableSwap(SwapDb.ST_CLAIMING);
+        s.role = "INITIATOR"; s.direction = "ERC20_TO_MINIMA"; s.myTimelock = 1;   // unix 1 → long past
+        when(db.allSwaps()).thenReturn(Collections.singletonList(s));
+        when(db.getSecret(HASH)).thenReturn("0x" + "AA".repeat(32));
+        when(db.haveCollect(HASH)).thenReturn(false);
+
+        engine.runMinimaChecks(2245573);
+
+        verify(minima, never()).scanHtlcByHashDeep(eq(HASH), anyInt(), anyInt(), any(), any());
+    }
+
+    /** The reaper must be SCOPED: a MINIMA_TO_ERC20 RESPONDER is also myLegIsMinima=false, but its ETH leg is the
+     *  SHORT one while the mxUSDT first-leg it still claims after harvesting stays live ~2h — a blanket cutoff on
+     *  myTimelock would strand that claim. Past its ETH myTimelock, it must STILL be scanned. */
+    @Test public void expiredResponderMinimaToErc20StillScans() {
+        SwapDb.Swap s = claimableSwap(SwapDb.ST_CLAIMING);
+        s.role = "RESPONDER"; s.direction = "MINIMA_TO_ERC20"; s.myTimelock = 1;   // ETH leg expired, mxUSDT claim not
+        when(db.allSwaps()).thenReturn(Collections.singletonList(s));
+        when(db.getSecret(HASH)).thenReturn("0x" + "AA".repeat(32));
+        when(db.haveCollect(HASH)).thenReturn(false);
+
+        engine.runMinimaChecks(2245573);
+
+        verify(minima, times(1)).scanHtlcByHashDeep(eq(HASH), anyInt(),
+                eq(SwapEngine.REFUND_SCAN_DEPTH), any(), any());
+    }
 }
