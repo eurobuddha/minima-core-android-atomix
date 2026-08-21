@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class EthTx {
 
-    private static final BigInteger FALLBACK_GAS_PRICE = BigInteger.valueOf(2_000_000_000L); // 2 gwei
+    private static final BigInteger FALLBACK_GAS_PRICE = BigInteger.valueOf(1_000_000_000L); // 1 gwei (only used when eth_gasPrice returns ≤0)
 
     // ── Per-address nonce serializer ──────────────────────────────────────────────────────────────────────
     // A market sweep fires up to 6 ETH locks back-to-back, and the poll loop can issue a claim/refund/withdraw

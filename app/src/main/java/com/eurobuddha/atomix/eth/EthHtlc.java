@@ -33,6 +33,17 @@ public final class EthHtlc {
     /** topic0 of HTLCERC20New(contractId indexed, owner indexed, receiver indexed, …) — verbatim upstream. */
     public static final String NEW_TOPIC = "0x241f395d4e943ea32c5c6e0b8c523cb6fbf735af15880f21756155e7a5d576eb";
 
+    // Gas limits CALIBRATED from real on-chain gasUsed on the live HTLC contract (2026-08-21): newContract
+    // ~250.5k, withdraw/refund ~110.8k, approve ~48.9k. The old blanket 500_000 forced a wallet to PRE-HOLD
+    // gasLimit×gasPrice at submission (unused gas refunds), so a near-empty node-derived wallet could not afford
+    // its own withdraw and the swap silently mutual-refunded (proven live: 0.0005 ETH failed, 0.001 worked).
+    // These keep ~1.5× headroom (out-of-gas is unrecoverable; over-reserving only blocked new users), roughly
+    // quartering the reserve on the cheap ops. public so SwapEngine's low-ETH precheck reserves at the same limit.
+    public static final BigInteger GAS_LOCK     = BigInteger.valueOf(375_000);  // newContract
+    public static final BigInteger GAS_WITHDRAW = BigInteger.valueOf(160_000);  // withdraw
+    public static final BigInteger GAS_REFUND   = BigInteger.valueOf(160_000);  // refund
+    public static final BigInteger GAS_APPROVE  = BigInteger.valueOf( 80_000);  // approve
+
     private final EthRpc rpc;
     private final Credentials creds;
     private final EthNet net;
@@ -46,7 +57,7 @@ public final class EthHtlc {
         Function f = new Function("approve",
                 Arrays.asList(new Address(net.htlc), new Uint256(amount)),
                 Collections.emptyList());
-        return EthTx.send(rpc, creds, net.chainId, token, FunctionEncoder.encode(f), null, BigInteger.valueOf(100_000));
+        return EthTx.send(rpc, creds, net.chainId, token, FunctionEncoder.encode(f), null, GAS_APPROVE);
     }
 
     public BigInteger allowance(String token) throws Exception {
@@ -71,21 +82,21 @@ public final class EthHtlc {
                 new Uint256(requestAmount),
                 new Bool(otc)),
                 Collections.singletonList(new TypeReference<Bytes32>() {}));
-        return EthTx.send(rpc, creds, net.chainId, net.htlc, FunctionEncoder.encode(f), null, BigInteger.valueOf(500_000));
+        return EthTx.send(rpc, creds, net.chainId, net.htlc, FunctionEncoder.encode(f), null, GAS_LOCK);
     }
 
     public String withdraw(String contractId, String preimage) throws Exception {
         Function f = new Function("withdraw",
                 Arrays.asList(new Bytes32(b32(contractId)), new Bytes32(b32(preimage))),
                 Collections.emptyList());
-        return EthTx.send(rpc, creds, net.chainId, net.htlc, FunctionEncoder.encode(f), null, BigInteger.valueOf(500_000));
+        return EthTx.send(rpc, creds, net.chainId, net.htlc, FunctionEncoder.encode(f), null, GAS_WITHDRAW);
     }
 
     public String refund(String contractId) throws Exception {
         Function f = new Function("refund",
                 Collections.singletonList(new Bytes32(b32(contractId))),
                 Collections.emptyList());
-        return EthTx.send(rpc, creds, net.chainId, net.htlc, FunctionEncoder.encode(f), null, BigInteger.valueOf(500_000));
+        return EthTx.send(rpc, creds, net.chainId, net.htlc, FunctionEncoder.encode(f), null, GAS_REFUND);
     }
 
     /** contractId is deterministic: sha256(hashlock). Lets us locate a swap without scanning New events. */

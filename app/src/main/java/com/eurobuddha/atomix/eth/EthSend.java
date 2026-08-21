@@ -41,15 +41,21 @@ public final class EthSend {
         return new BigDecimal(s.trim()).movePointRight(decimals).toBigInteger();
     }
 
-    /** MA-6: the gas price a send will ACTUALLY broadcast at — EthTx's +20% headroom, floored at 2× the base
-     *  fee (F5). Pure and network-free, so this ONE formula backs both the UI's reserve/validation and
-     *  {@link EthTx#send}'s build; passing the current baseFee (rpc.baseFeePerGasOrZero()) stops the UI
-     *  under-reserving when eth_gasPrice sits below 2× base fee — the case where a validated send then failed at
-     *  broadcast with insufficient funds. baseFee 0 ⇒ just the +20% headroom (the pre-floor behaviour). */
+    /** A modest priority tip added to the base-fee floor so a tx still confirms without over-pricing. */
+    public static final BigInteger PRIORITY_TIP_WEI = BigInteger.valueOf(200_000_000L);   // 0.2 gwei
+
+    /** MA-6: the gas price a send will ACTUALLY broadcast at — a small headroom over eth_gasPrice, floored at
+     *  base fee + a 0.2 gwei tip. Pure and network-free, so this ONE formula backs both the UI's reserve/validation
+     *  and {@link EthTx#send}'s build; passing the current baseFee (rpc.baseFeePerGasOrZero()) stops the UI
+     *  under-reserving when eth_gasPrice sits below the floor. baseFee 0 ⇒ just the headroom (the pre-floor case).
+     *  The old floor was 2× base fee; combined with a fixed 500k gas limit it forced a near-empty node-derived
+     *  wallet to pre-hold ~0.0005 ETH for a ~0.00005 ETH op, so new users' swaps silently mutual-refunded. The
+     *  floor is now base+12.5%+tip (~realistic), which with the right-sized EthHtlc limits cuts the reserve ~4×. */
     public static BigInteger effectiveGasPriceWei(BigInteger gasPriceWei, BigInteger baseFeeWei) {
-        BigInteger gp = gasPriceWei.multiply(BigInteger.valueOf(12)).divide(BigInteger.TEN);   // +20% headroom
+        BigInteger gp = gasPriceWei.multiply(BigInteger.valueOf(9)).divide(BigInteger.valueOf(8));   // +12.5% headroom
         if (baseFeeWei != null && baseFeeWei.signum() > 0) {
-            BigInteger floor = baseFeeWei.multiply(BigInteger.valueOf(2));                       // F5 base-fee floor
+            BigInteger floor = baseFeeWei.multiply(BigInteger.valueOf(9)).divide(BigInteger.valueOf(8))
+                    .add(PRIORITY_TIP_WEI);                                                            // base+12.5% + tip
             if (gp.compareTo(floor) < 0) gp = floor;
         }
         return gp;

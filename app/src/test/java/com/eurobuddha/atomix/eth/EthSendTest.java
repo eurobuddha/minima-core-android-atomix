@@ -30,26 +30,30 @@ public class EthSendTest {
         assertFalse(EthSend.isEthAddr(null));
     }
 
-    private static final BigInteger NO_BASE = BigInteger.ZERO;   // baseFee 0 ⇒ just the +20% headroom (pre-floor behaviour)
+    private static final BigInteger NO_BASE = BigInteger.ZERO;   // baseFee 0 ⇒ just the +12.5% headroom (pre-floor behaviour)
 
     @Test public void gasMathMirrorsTheSerializerHeadroom() {
-        assertEquals(BigInteger.valueOf(21000L * 1_200_000_000L), EthSend.gasReserveWei(GP, NO_BASE, EthSend.GAS_ETH));
-        assertEquals(new BigInteger("100000000000000000").subtract(BigInteger.valueOf(21000L * 1_200_000_000L)),
+        // 0.1.40: headroom is +12.5% (was +20%); the old 2×baseFee floor is gone (it over-reserved ~4× and
+        // starved new node-derived wallets — proven live). NO_BASE ⇒ just the +12.5% headroom.
+        assertEquals(BigInteger.valueOf(21000L * 1_125_000_000L), EthSend.gasReserveWei(GP, NO_BASE, EthSend.GAS_ETH));
+        assertEquals(new BigInteger("100000000000000000").subtract(BigInteger.valueOf(21000L * 1_125_000_000L)),
                 EthSend.maxEthSendWei(new BigInteger("100000000000000000"), GP, NO_BASE));
         assertEquals(BigInteger.ZERO, EthSend.maxEthSendWei(BigInteger.valueOf(1000), GP, NO_BASE));
     }
 
-    @Test public void effectiveGasPriceFloorsAtTwiceBaseFee() {
-        // MA-6: when eth_gasPrice (+20%) sits below 2× base fee, the reserve must use the higher floor — the case
-        // where the UI validated a send that then failed at broadcast (EthTx applies the same floor).
-        BigInteger baseFee = BigInteger.valueOf(5_000_000_000L);                      // 5 gwei → floor 10 gwei
-        assertEquals("gp*1.2 (1.2 gwei) is below 2×baseFee (10 gwei) → floored",
-                BigInteger.valueOf(10_000_000_000L), EthSend.effectiveGasPriceWei(GP, baseFee));
-        assertEquals("no base fee → just +20% headroom",
-                BigInteger.valueOf(1_200_000_000L), EthSend.effectiveGasPriceWei(GP, NO_BASE));
-        // and the reserve/validation must reflect the floored price
-        assertEquals(EthSend.GAS_ETH.multiply(BigInteger.valueOf(10_000_000_000L)),
-                EthSend.gasReserveWei(GP, baseFee, EthSend.GAS_ETH));
+    @Test public void effectiveGasPriceFloorsAtBaseFeePlusTip() {
+        // 0.1.40: floor is baseFee+12.5% + a 0.2 gwei tip (was 2×baseFee) — enough to confirm without the ~2×
+        // over-pricing that, with a fixed 500k limit, forced a wallet to pre-hold ~0.0005 ETH for a ~0.00005 op.
+        BigInteger baseFee = BigInteger.valueOf(5_000_000_000L);                       // 5 gwei
+        BigInteger floor   = BigInteger.valueOf(5_625_000_000L + 200_000_000L);        // 5.625 + 0.2 tip = 5.825 gwei
+        assertEquals("gp*1.125 (1.125 gwei) is below the base+tip floor → floored",
+                floor, EthSend.effectiveGasPriceWei(GP, baseFee));
+        assertEquals("no base fee → just +12.5% headroom",
+                BigInteger.valueOf(1_125_000_000L), EthSend.effectiveGasPriceWei(GP, NO_BASE));
+        // the floor is NO LONGER 2×baseFee (would have been 10 gwei) — the whole point of the fix
+        assertTrue("must be well below the old 2×baseFee floor",
+                EthSend.effectiveGasPriceWei(GP, baseFee).compareTo(BigInteger.valueOf(10_000_000_000L)) < 0);
+        assertEquals(EthSend.GAS_ETH.multiply(floor), EthSend.gasReserveWei(GP, baseFee, EthSend.GAS_ETH));
     }
 
     @Test public void checkSendRefusalPaths() {

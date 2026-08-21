@@ -8,6 +8,7 @@ import com.eurobuddha.comms.NodeApi;
 import com.eurobuddha.atomix.eth.EthHtlc;
 import com.eurobuddha.atomix.eth.EthNet;
 import com.eurobuddha.atomix.eth.EthRpc;
+import com.eurobuddha.atomix.eth.EthSend;
 import com.eurobuddha.atomix.eth.EthTx;
 import com.eurobuddha.atomix.eth.EthWallet;
 import com.eurobuddha.atomix.SwapLog;
@@ -111,6 +112,7 @@ public final class SwapEngine {
     private final Map<String, Long> approvePending = Collections.synchronizedMap(new HashMap<>());
     private final Set<String> incoming = Collections.synchronizedSet(new HashSet<>());   // hashlocks announced by a buyer's handshake
     private final Set<String> declined = Collections.synchronizedSet(new HashSet<>());   // handshake buys we've already notified as declined
+    private final Set<String> lowEth   = Collections.synchronizedSet(new HashSet<>());   // swaps we've already told the user need more ETH for gas
     // F1: last broadcast time (unix secs) of an ETH terminal action, keyed "wdEth:"/"refundE:"+hash. Gates
     // re-broadcast to ≥ ETH_RETRY_SECS apart. In-memory only: a restart re-drives terminal state from the
     // on-chain withdrawn/refunded flags anyway, so losing these timestamps just allows an immediate retry.
@@ -810,6 +812,10 @@ public final class SwapEngine {
             String receiverEth = MinimaHtlc.stateAt(coin, 6);             // maker's ETH address (ownereth)
             BigInteger sellRaw = parseUnits(tokenHuman, token.decimals);
             BigInteger reqRaw = parseUnits(reqMinimaHuman, 18);
+            // Don't commit this counter-leg if the wallet can't afford the newContract gas — an approve/lock that
+            // the RPC rejects for gas would otherwise end as a silent mutual refund. GAS_LOCK is the dominant cost
+            // (> the approve), so this one check covers the whole approve→lock sequence.
+            if (!ethGasAffordable(hash, EthHtlc.GAS_LOCK)) { inflight.remove("cpEth:" + hash); return; }
             if (!approveIfReady(eth, token.address, sellRaw)) { inflight.remove("cpEth:" + hash); return; }
             // F2: the counter-leg MUST anchor to CHAIN time (block.timestamp) — STRICTLY. A device-clock
             // fallback here would re-open the very loss F2 closes: a fast phone clock pushes this leg's expiry
@@ -1005,6 +1011,7 @@ public final class SwapEngine {
      *  than stranding, and so a still-pending tx isn't piled behind. */
     private void broadcastEthWithdraw(EthHtlc eth, String contractId, String hash, String secret) {
         if (!ethRetryDue("wdEth:" + hash) || !inflight.add("wdEth:" + hash)) return;
+        if (!ethGasAffordable(hash, EthHtlc.GAS_WITHDRAW)) { inflight.remove("wdEth:" + hash); return; }
         try {
             markEthAttempt("wdEth:" + hash);
             db.setSwapStatus(hash, SwapDb.ST_CLAIMING);
@@ -1021,6 +1028,7 @@ public final class SwapEngine {
     /** Broadcast a refund of my own expired leg. Never finalizes — {@code gc.refunded} does, on a later cycle. */
     private void broadcastEthRefund(EthHtlc eth, String contractId, String hash) {
         if (!ethRetryDue("refundE:" + hash) || !inflight.add("refundE:" + hash)) return;
+        if (!ethGasAffordable(hash, EthHtlc.GAS_REFUND)) { inflight.remove("refundE:" + hash); return; }
         try {
             markEthAttempt("refundE:" + hash);
             eth.refund(contractId);
@@ -1063,6 +1071,33 @@ public final class SwapEngine {
 
     private boolean ethRetryDue(String key) { return nowUnix() - ethAttempt.getOrDefault(key, 0L) >= ETH_RETRY_SECS; }
     private void markEthAttempt(String key) { ethAttempt.put(key, nowUnix()); }
+
+    /** True iff this wallet can cover gas for one HTLC op of {@code gasLimit} at the price {@link EthTx} will
+     *  broadcast at. On a genuine shortfall: notify ONCE ("Add ETH for gas — ~X"), log it, and return false so
+     *  the caller SKIPS this broadcast (the poll loop retries once funded) instead of firing a doomed tx that
+     *  the RPC rejects for "insufficient funds for gas" and that ends as a SILENT mutual refund. A brand-new
+     *  node-derived ETH wallet holds almost nothing, so this is the difference between a clear prompt and an
+     *  invisible failure (proven live: a new user's swaps mutual-refunded at 0.0005 ETH, completed at 0.001).
+     *  On any read error returns true — never block a send on a transient RPC hiccup; let it try and surface. */
+    private boolean ethGasAffordable(String hash, BigInteger gasLimit) {
+        try {
+            BigInteger rawGp = EthRpc.hexToBig(rpc.callStr("eth_gasPrice", new JSONArray()));
+            if (rawGp.signum() <= 0) rawGp = BigInteger.valueOf(1_000_000_000L);   // mirror EthTx.FALLBACK_GAS_PRICE
+            BigInteger need = EthSend.gasReserveWei(rawGp, rpc.baseFeePerGasOrZero(), gasLimit);
+            BigInteger have = wallet.ethBalanceWei(rpc);
+            if (have.compareTo(need) >= 0) { lowEth.remove(hash); return true; }
+            if (lowEth.add(hash)) {   // once per hash, until the wallet clears the bar again
+                String shortEth = new BigDecimal(need.subtract(have)).movePointLeft(18)
+                        .stripTrailingZeros().toPlainString();
+                SwapLog.w("swap " + hash + " BLOCKED: needs ~" + shortEth + " more ETH for gas");
+                ui.post(() -> notifier.notify("Add ETH for gas",
+                        "This swap needs about " + shortEth + " more ETH for gas — top up this wallet's ETH"));
+            }
+            return false;
+        } catch (Exception e) {
+            return true;   // couldn't read balance/price → don't block; let the broadcast try
+        }
+    }
 
     /** MA-20: atomic check-and-set on the shared retry-window map — true (and stamps NOW) iff the key is due
      *  (≥ ETH_RETRY_SECS since its last attempt). Replaces the racy ethRetryDue()+markEthAttempt() pair on the
