@@ -74,4 +74,18 @@ public final class Util {
         if (s.endsWith(".")) s = s.substring(0, s.length() - 1);
         return s.isEmpty() ? "0" : s;
     }
+
+    /** Amount truncated to at most 5 decimal places — NO rounding (floor toward zero) — for tidy balance
+     *  DISPLAY, with trailing zeros trimmed. Minima amounts can carry a long high-precision tail (e.g.
+     *  23466.53282076419999…997) that is noise on screen; this shows 23466.53282. Non-numeric placeholders
+     *  ("…", "— (node didn't answer)") pass through unchanged. DISPLAY ONLY — never use for fund math. */
+    public static String fmt5(String amt) {
+        if (amt == null || amt.isEmpty()) return "0";
+        try {
+            return tidyAmount(new java.math.BigDecimal(amt.trim())
+                    .setScale(5, java.math.RoundingMode.DOWN).toPlainString());
+        } catch (NumberFormatException e) {
+            return amt;   // placeholder / non-numeric — leave as-is
+        }
+    }
 }

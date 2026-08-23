@@ -703,11 +703,11 @@ public class MainActivity extends AppCompatActivity {
     private String minimaBreakdown() {
         String locked = "—";
         try {
-            locked = Util.tidyAmount(new java.math.BigDecimal(minimaConfirmed).subtract(new java.math.BigDecimal(minimaBal)).toPlainString());
+            locked = Util.fmt5(new java.math.BigDecimal(minimaConfirmed).subtract(new java.math.BigDecimal(minimaBal)).toPlainString());
         } catch (Exception ignore) {}
         String ago = lastMinimaUpdate == 0 ? "never" : ((System.currentTimeMillis() - lastMinimaUpdate) / 1000) + "s ago";
-        return "confirmed " + Util.tidyAmount(minimaConfirmed) + "  ·  locked ≈ " + locked
-                + "  ·  unconfirmed " + Util.tidyAmount(minimaUnconfirmed) + "  ·  " + minimaCoins + " coins  ·  updated " + ago;
+        return "confirmed " + Util.fmt5(minimaConfirmed) + "  ·  locked ≈ " + locked
+                + "  ·  unconfirmed " + Util.fmt5(minimaUnconfirmed) + "  ·  " + minimaCoins + " coins  ·  updated " + ago;
     }
 
     /** Refresh both wallet balances. showLoading=false → silent (periodic) update, no "…" flicker. */
@@ -2743,7 +2743,7 @@ public class MainActivity extends AppCompatActivity {
     // ---- Wallet tab ----
 
     private void renderWalletTab(LinearLayout col) {
-        LinearLayout minimaCard = walletCard("Minima · available to swap", minimaBal + " " + ccy(), minimaBreakdown() + "  ·  long-press for coins", Design.ACCENT());
+        LinearLayout minimaCard = walletCard("Minima · available to swap", Util.fmt5(minimaBal) + " " + ccy(), minimaBreakdown() + "  ·  long-press for coins", Design.ACCENT());
         minimaCard.setOnLongClickListener(v -> { minimaCoinDump(); return true; });
         col.addView(minimaCard);
         minimaBalView = (TextView) minimaCard.findViewWithTag(TAG_BAL);   // fresh ref each render (tree is rebuilt)
