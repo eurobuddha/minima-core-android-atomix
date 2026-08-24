@@ -24,6 +24,10 @@ public final class OtcController {
     public interface SendResult { void ok(); void err(String msg); }
 
     private static final long EXPIRE_MS = 60L * 60 * 1000;        // a deal awaiting the PEER this long is abandoned
+    // An inbound offer awaiting MY move: the proposer's waiting side expires after EXPIRE_MS, so past that the
+    // deal is already dead on their end — an ACCEPT would go to a terminal deal, at a price that only gets staler.
+    // Give the user a real window to see it, then age it out like everything else (it used to sit forever).
+    static final long INBOUND_EXPIRE_MS = 24L * 60 * 60 * 1000;
     private static final long PRUNE_MS  = 24L * 60 * 60 * 1000;   // drop finished deals after this (bound the table)
     private static final long NOTE_MIN_GAP_MS = 30_000;          // coalesce inbound-PROPOSE notification spam
     private static final long EXEC_RESEND_GAP_MS = 90_000;              // resend a lost EXECUTE at most this often
@@ -249,8 +253,9 @@ public final class OtcController {
         });
     }
 
-    /** Expire deals stuck awaiting the PEER past {@link #EXPIRE_MS}; prune long-finished deals so the table can't
-     *  grow unboundedly under message spam. Also settle EXECUTING deals whose on-chain swap has completed/refunded. */
+    /** Expire deals stuck awaiting the PEER past {@link #EXPIRE_MS} and inbound offers ignored past
+     *  {@link #INBOUND_EXPIRE_MS}; prune long-finished deals so the table can't grow unboundedly under
+     *  message spam. Also settle EXECUTING deals whose on-chain swap has completed/refunded. */
     public void expireStale(long now) {
         for (OtcDb.Deal d : otcDb.allDeals()) {
             boolean stale = now - d.updated > EXPIRE_MS;
@@ -265,6 +270,9 @@ public final class OtcController {
                     || (OtcDb.ST_EXECUTING.equals(d.status) && (d.hash == null || d.hash.isEmpty()))   // execute never produced a hash
                     || ((OtcDb.ST_PROPOSED.equals(d.status) || OtcDb.ST_COUNTERED.equals(d.status)) && OtcDb.TURN_PEER.equals(d.whoseTurn)))) {
                 d.status = OtcDb.ST_EXPIRED; otcDb.upsertDeal(d); ui.onDealsChanged();   // no progress → abandon (any locked leg refunds at timelock)
+            } else if ((OtcDb.ST_PROPOSED.equals(d.status) || OtcDb.ST_COUNTERED.equals(d.status))
+                    && OtcDb.TURN_ME.equals(d.whoseTurn) && now - d.updated > INBOUND_EXPIRE_MS) {
+                d.status = OtcDb.ST_EXPIRED; otcDb.upsertDeal(d); ui.onDealsChanged();   // ignored inbound offer → zombie on the peer's side, stale price on mine
             }
             if (isTerminal(d.status) && now - d.updated > PRUNE_MS) { otcDb.deleteDeal(d.ref); lastExecResend.remove(d.ref); }
         }
