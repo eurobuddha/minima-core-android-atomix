@@ -163,4 +163,34 @@ public class RefundRetryTest {
         assertTrue("a deeper scan than the tree holds would be a false promise",
                 SwapEngine.REFUND_SCAN_DEPTH <= 1024);
     }
+
+    // ================= the refund reason must name the actual failure (0.1.44: role-aware) =================
+    // Proven live 2026-08-27: a first-time buyer locked 438 USDT, never claimed the matching 433.663366 mxUSDT
+    // counter-leg, and the bare "Timelock passed" notification left the operator reconstructing WHY on-chain.
+
+    private SwapDb.Swap roleSwap(String role) {
+        SwapDb.Swap s = new SwapDb.Swap();
+        s.hash = HASH; s.role = role;
+        return s;
+    }
+
+    @Test public void refundReasonResponderSaysCounterpartyNeverClaimed() {
+        when(db.getEvents(HASH)).thenReturn(Collections.emptyList());
+        when(db.getSwap(HASH)).thenReturn(roleSwap("RESPONDER"));
+        assertTrue(engine.refundReason(HASH).contains("never claimed yours"));
+    }
+
+    @Test public void refundReasonInitiatorSaysCounterpartyNeverLocked() {
+        when(db.getEvents(HASH)).thenReturn(Collections.emptyList());
+        when(db.getSwap(HASH)).thenReturn(roleSwap("INITIATOR"));
+        assertTrue(engine.refundReason(HASH).contains("never locked their side"));
+    }
+
+    @Test public void refundReasonPrefersStoredMismatchNote() {
+        SwapDb.Event e = new SwapDb.Event();
+        e.event = SwapDb.EV_MISMATCH; e.note = "counter-leg amount 1 short of 2";
+        when(db.getEvents(HASH)).thenReturn(Collections.singletonList(e));
+        when(db.getSwap(HASH)).thenReturn(roleSwap("RESPONDER"));
+        assertTrue(engine.refundReason(HASH).contains("amount 1 short of 2"));
+    }
 }

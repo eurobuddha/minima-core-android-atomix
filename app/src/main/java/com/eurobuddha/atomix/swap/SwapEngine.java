@@ -796,7 +796,11 @@ public final class SwapEngine {
                 // dies between these two writes the swap would be un-refundable AND still read "locked".
                 db.setSwapStatus(hash, SwapDb.ST_REFUNDED);
                 db.logEvent(hash, SwapDb.EV_EXPIRED, "minima", MinimaHtlc.coinAmount(coin), txpowid);
-                notifier.notify("Swap refunded", "Timelock passed — reclaimed your " + com.eurobuddha.atomix.TradingContext.labelFor(coin.optString("tokenid", "0x00")));
+                String reason = refundReason(hash);   // 0.1.44: the Minima-leg refund says WHY, like the ETH leg has since 0.1.41
+                SwapLog.w("refund OK (minima) " + hash + " — " + reason);
+                notifier.notify("Swap refunded", "Timelock passed — reclaimed your "
+                        + com.eurobuddha.atomix.TradingContext.labelFor(coin.optString("tokenid", "0x00"))
+                        + " (" + reason + ")");
                 notifier.onSwapsChanged();
                 ethAttempt.remove("refundM:" + hash);
                 SwapLog.d("refund OK " + hash + " tx=" + txpowid);
@@ -1064,7 +1068,7 @@ public final class SwapEngine {
         if (cur != null && SwapDb.ST_REFUNDED.equals(cur.status)) return;
         if (!db.haveCollectExpired(hash)) db.logEvent(hash, SwapDb.EV_EXPIRED, "ETH", "", "confirmed on-chain");
         db.setSwapStatus(hash, SwapDb.ST_REFUNDED);
-        final String reason = refundReason(hash);   // 0.1.41: say WHY, not a bare "Reclaimed your tokens"
+        final String reason = "Reclaimed your tokens — " + refundReason(hash);   // 0.1.41: say WHY, not a bare "Reclaimed your tokens"
         SwapLog.w("refund CONFIRMED " + hash + " — " + reason);
         ui.post(() -> { notifier.notify("Swap refunded", reason); notifier.onSwapsChanged(); });
     }
@@ -1432,13 +1436,19 @@ public final class SwapEngine {
     }
 
     /** A human reason a swap refunded, for the notification subtext + log. Prefers a stored EV_MISMATCH note
-     *  (the swap aborted on a counterparty amount/token mismatch); else the common case — the counterparty never
-     *  locked their counter-leg before the timeout. Read-only; changes no refund decision (0.1.41). */
-    private String refundReason(String hash) {
+     *  (the swap aborted on a counterparty amount/token mismatch); else by role: an INITIATOR's leg refunds
+     *  because the counterparty never locked, a RESPONDER's counter-leg because the counterparty locked but
+     *  never claimed (proven live 2026-08-27: a first-time buyer locked 438 USDT, never claimed the matching
+     *  433.663366 mxUSDT counter-leg, and the bare "Timelock passed" left the operator diagnosing on-chain).
+     *  Read-only; changes no refund decision (0.1.41, role-aware since 0.1.44). */
+    String refundReason(String hash) {
         for (SwapDb.Event e : db.getEvents(hash))
             if (SwapDb.EV_MISMATCH.equals(e.event) && e.note != null && !e.note.isEmpty())
-                return "Reclaimed your tokens — " + e.note;
-        return "Reclaimed your tokens — the counterparty never locked their side before the timeout";
+                return e.note;
+        SwapDb.Swap sw = db.getSwap(hash);
+        if (sw != null && "RESPONDER".equals(sw.role))
+            return "the counterparty locked their side but never claimed yours before the timeout";
+        return "the counterparty never locked their side before the timeout";
     }
 
     /** The tokenid of the currency a swap BOUGHT (from its buyToken label) — verifies the received Minima coin
