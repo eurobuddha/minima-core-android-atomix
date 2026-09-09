@@ -116,7 +116,10 @@ public final class EthHtlc {
                 Collections.singletonList(new Bytes32(b32(contractId))),
                 Collections.singletonList(new TypeReference<Bool>() {}));
         String ret = rpc.ethCall(net.htlc, FunctionEncoder.encode(f));
-        return EthRpc.hexToBig(ret).signum() != 0;
+        requireReturnWords(ret, 1);
+        BigInteger value = EthRpc.hexToBig(ret);
+        if (!value.equals(BigInteger.ZERO) && !value.equals(BigInteger.ONE)) throw new Exception("Invalid canCollect boolean reply");
+        return value.equals(BigInteger.ONE);
     }
 
     /**
@@ -135,12 +138,12 @@ public final class EthHtlc {
                         new TypeReference<Bytes32>() {}, new TypeReference<Uint256>() {}, new TypeReference<Bool>() {},
                         new TypeReference<Bool>() {}, new TypeReference<Bytes32>() {}, new TypeReference<Bool>() {}));
         String ret = rpc.ethCall(net.htlc, FunctionEncoder.encode(f));
-        if (ret == null || ret.length() < 3) return null;
+        requireReturnWords(ret, 12);
         try {
             // Review MINOR: decode() itself is the likelier thrower on a malformed RPC body (unchecked
             // NumberFormatException), so it belongs inside the same guard as the casts, not before it.
             List<Type> d = FunctionReturnDecoder.decode(ret, f.getOutputParameters());
-            if (d.size() < 12) return null;
+            if (d.size() != 12) throw new IllegalArgumentException("Incomplete contract tuple");
             String sender = (String) d.get(0).getValue();
             if (sender == null || EthRpc.hexToBig(sender).signum() == 0) return null;   // zero address = no such contract
             Contract c = new Contract();
@@ -152,18 +155,24 @@ public final class EthHtlc {
             c.amount = (BigInteger) d.get(4).getValue();
             c.requestAmount = (BigInteger) d.get(5).getValue();
             c.hashlock = Numeric.toHexString((byte[]) d.get(6).getValue());
-            c.timelock = ((BigInteger) d.get(7).getValue()).longValue();
+            c.timelock = ((BigInteger) d.get(7).getValue()).longValueExact();
             c.withdrawn = (Boolean) d.get(8).getValue();
             c.refunded = (Boolean) d.get(9).getValue();
             c.preimage = Numeric.toHexString((byte[]) d.get(10).getValue());
             c.otc = (Boolean) d.get(11).getValue();
             return c;
         } catch (RuntimeException e) {
-            // MA-8: malformed decoder output (unexpected type from a broken RPC) — a bare cast would throw an
-            // unchecked ClassCastException on the settlement poll thread. Return null, but LOG it: null otherwise
-            // means "no such contract" and SwapEngine branches refunds on that, so the two must not be conflated.
-            SwapLog.w("getContract decode failed for " + contractId + ": " + e);
-            return null;
+            throw new Exception("Invalid getContract reply for " + contractId, e);
+        }
+    }
+
+    private static void requireReturnWords(String ret, int words) throws Exception {
+        if (ret == null || !ret.matches("0[xX][0-9a-fA-F]{" + (words * 64) + "}"))
+            throw new Exception("Incomplete or malformed Ethereum contract reply");
+        // ABI booleans must be 0 or 1; lenient decoding must not fabricate withdrawn/refunded flags.
+        if (words == 12) for (int index : new int[]{8, 9, 11}) {
+            BigInteger v = new BigInteger(ret.substring(2 + index * 64, 2 + (index + 1) * 64), 16);
+            if (v.compareTo(BigInteger.ONE) > 0) throw new Exception("Invalid contract boolean reply");
         }
     }
 

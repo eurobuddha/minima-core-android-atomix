@@ -1,5 +1,9 @@
 # AtomiX changes
 
+## 0.1.56
+
+- Reject missing/truncated Ethereum contract tuples and invalid booleans. A failed read no longer looks like a missing, claimed or refunded leg; only a valid zero-owner tuple means no contract.
+
 ## 0.1.55
 
 - Continue recovering an expired Minima lock when the trade is marked ERROR after a counterparty refund. ERROR no longer suppresses the deep recovery scan.
