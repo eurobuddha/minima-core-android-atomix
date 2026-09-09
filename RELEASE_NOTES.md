@@ -1,5 +1,11 @@
 # AtomiX changes
 
+## 0.1.47 — 2026-09-09
+
+Manual Wallet consolidation with Preview and Run once, fresh balance/pending checks, a persisted confirmation wait and the existing SignGate. Coin reservations now span both engines; consolidation and new Minima locks exclude each other. Node errors retain the message returned by consolidate. No automatic consolidation or spending loop.
+
+Validation: 202 tests passed in each debug/release suite; release APK and lintVitalRelease passed.
+
 ## 0.1.46 — 2026-09-09
 
 Preflight wallet coin enumeration using a fresh, strictly parsed token balance. Refuse more than 53 MxUSD or 200 native MINIMA coins before requesting the reply that can kill AtomiX on older MinimaCore builds. Report the refusal and release responder reservations before persisting or broadcasting a counter-leg.

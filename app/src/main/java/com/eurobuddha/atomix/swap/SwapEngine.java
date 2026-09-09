@@ -195,8 +195,8 @@ public final class SwapEngine {
     private static final int  CP_LOCK_BURST = 2;            // max concurrent responder locks (each on a distinct coin-set)
     static final int  MAX_LOCK_COINS = 50;          // cap UTXOs combined into ONE counter-leg lock (tx-size bound)
     private static final long CP_LOCK_TIMEOUT_SECS = 600;   // per-leg watchdog (its leg refunds if it never confirms); ≫ a normal ~2-block confirm
-    private final Map<String,String> cpInFlight  = Collections.synchronizedMap(new HashMap<>());  // hash → pinned coinid ("" = slot reserved, coin not yet picked)
-    private final Map<String,Long>   cpLockSince = Collections.synchronizedMap(new HashMap<>());  // hash → lock time (watchdog)
+    private static final Map<String,String> cpInFlight  = Collections.synchronizedMap(new HashMap<>());  // hash → pinned coinid ("" = slot reserved, coin not yet picked)
+    private static final Map<String,Long>   cpLockSince = Collections.synchronizedMap(new HashMap<>());  // hash → lock time (watchdog)
     // PROCESS-WIDE per-hash marker: MainActivity + SwapService run SEPARATE engines (same process). The mxUSDT leg
     // has no on-chain hash-uniqueness, so without this a fg↔bg handoff mid-lock could lock a SECOND coin for the
     // SAME hash → the taker claims both with one secret → the maker loses the second coin. Shared + released on
@@ -283,6 +283,17 @@ public final class SwapEngine {
      *  unpinned and could select the same one (fund-safe: the loser is dropped, but the sweep could abort). */
     public boolean isSplitting() { return inflight.contains("split"); }
 
+    /** Coin selection must be excluded in BOTH directions, across Activity and Service engines. */
+    public static boolean isConsolidating() { return inflight.contains("consolidate"); }
+    public static boolean beginConsolidate() {
+        synchronized (CP_LOCKING) {
+            if (!CP_LOCKING.isEmpty() || !cpInFlight.isEmpty() || inflight.contains("sell")
+                    || inflight.contains("split") || com.eurobuddha.atomix.MainActivity.SWEEP_ACTIVE) return false;
+            return inflight.add("consolidate");
+        }
+    }
+    public static void endConsolidate() { synchronized (CP_LOCKING) { inflight.remove("consolidate"); } }
+
     /** A taker told us (via the sealed handshake) the hashlock of a USDT lock addressed to us. We discover it
      *  by deterministic contractId via getContract (free-RPC-safe) instead of eth_getLogs, then respond. */
     public void addIncomingHashlock(String hash) {
@@ -303,15 +314,23 @@ public final class SwapEngine {
 
     /** As above, with the OTC bit: {@code otc=true} sets HTLC state[7]=TRUE so the ladder auto-responder skips it
      *  and only the negotiated OTC responder locks the counter-leg. */
-    public void startMinimaToErc20(Order maker, String sellMinima, String tokenSymbol, String buyTokenAmount, boolean otc, StartCb cb) {
-        if (!ready()) { cb.err("Not ready"); return; }
+    public void startMinimaToErc20(Order maker, String sellMinima, String tokenSymbol, String buyTokenAmount, boolean otc, StartCb result) {
+        if (!ready()) { result.err("Not ready"); return; }
         // M3: a responder burst-lock (or a coin-split) draws mxUSDT from the SAME coin pool that this
         // user-initiated node-auto-select lock does; both could pick the same coin → one tx is rejected as a
         // double-spend (fund-safe) but can leave a phantom LOCKED row. Decline briefly while a responder lock or
         // split is in flight so the user just retries a moment later instead of racing it.
-        if (!cpInFlight.isEmpty() || isSplitting()) { cb.err("Busy locking another swap — try again in a few seconds"); return; }
         final EthNet.Token token = net.token(tokenSymbol);
-        if (token == null) { cb.err("Unknown token " + tokenSymbol); return; }
+        if (token == null) { result.err("Unknown token " + tokenSymbol); return; }
+        synchronized (CP_LOCKING) {
+            if (!cpInFlight.isEmpty() || isSplitting() || isConsolidating() || !inflight.add("sell")) {
+                result.err("Wallet busy — wait for the current lock or consolidation"); return;
+            }
+        }
+        final StartCb cb = new StartCb() {
+            public void ok(String hash) { synchronized (CP_LOCKING) { inflight.remove("sell"); } result.ok(hash); }
+            public void err(String error) { synchronized (CP_LOCKING) { inflight.remove("sell"); } result.err(error); }
+        };
         final String reqToken = "ETH:" + token.address;
         minima.generateSecret(new MinimaHtlc.SecretCb() {
             @Override public void ok(String secret, String hash) {
@@ -1214,6 +1233,10 @@ public final class SwapEngine {
         // up to CP_LOCK_BURST distinct-hash locks in flight (each gets a DISTINCT coin in lockMinimaCounterLeg),
         // and no OTHER engine can re-lock this same hash mid-flight. Both released together in releaseCpLeg.
         synchronized (CP_LOCKING) {
+            if (isConsolidating() || inflight.contains("sell")) {
+                declineCpNote(hash, "Wallet busy consolidating or locking coins. Retry after confirmation. Deal: " + hash);
+                return;
+            }
             if (db.getSwap(hash) != null) return;                                        // re-check the persistent row ATOMICALLY with the reserve (closes a stale-getSwap TOCTOU)
             Long lk = CP_LOCKING.get(hash);
             if (lk != null && nowUnix() - lk < CP_LOCK_TIMEOUT_SECS) return;              // another engine is locking this hash
@@ -1235,6 +1258,11 @@ public final class SwapEngine {
     /** Lock the mxUSDT counter-leg for an ERC20→mxUSDT swap I'm responding to (block+36). */
     private void lockMinimaCounterLeg(EthHtlc.Contract c, int minimaBlock) {
         final String hash = c.hashlock;
+        if (isConsolidating()) {
+            releaseCpLeg(hash); inflight.remove("cpMin:" + hash);
+            declineCpNote(hash, "Consolidation in progress. Retry after confirmation. Deal: " + hash);
+            return;
+        }
         final int timelock = minimaBlock + CP_BLOCKS;
         final String reqMinimaHuman = EthWallet.format(c.requestAmount, 18, 18);   // mxUSDT they want from me
         final String receiverPubkey = c.minimaPublicKey;                           // initiator's Minima pubkey

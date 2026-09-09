@@ -257,7 +257,7 @@ public final class MinimaHtlc {
                 + " state:" + state.toString() + " tokenid:" + activeToken;
         // M1: a `send` SIGNS on the node, so it must go through SignGate like every other signing path — a
         // user-initiated lock can otherwise sign a one-time key leaf concurrently with an autonomous claim/refund.
-        runSend(send, r -> {
+        runSigned(send, r -> {
             JSONObject resp = r.optJSONObject("response");
             cb.ok(resp == null ? "" : resp.optString("txpowid", ""));
         }, cb::err);
@@ -405,15 +405,7 @@ public final class MinimaHtlc {
      *  unconfirmed pool is global, so this is a cross-process check — it stops a second engine (after a
      *  foreground↔background handoff) from re-issuing a split whose coins from the first engine haven't landed yet. */
     public void hasPendingMinima(Consumer<Boolean> ok, Consumer<String> err) {
-        cmd("balance tokenid:" + activeToken, r -> {
-            Object resp = r.opt("response");
-            org.json.JSONObject t = null;
-            if (resp instanceof org.json.JSONArray && ((org.json.JSONArray) resp).length() > 0) t = ((org.json.JSONArray) resp).optJSONObject(0);
-            else if (resp instanceof org.json.JSONObject) t = (org.json.JSONObject) resp;
-            double unc = 0;
-            try { unc = Double.parseDouble(t == null ? "0" : t.optString("unconfirmed", "0")); } catch (Exception e) {}
-            ok.accept(unc > 0);
-        }, err);
+        tokenBalance(b -> ok.accept(new java.math.BigDecimal(b.unconfirmed).signum() > 0), err);
     }
 
     /** Split my own coins into {@code count} equal coins totalling {@code totalAmount} mxUSDT, in ONE tx, from
@@ -423,10 +415,26 @@ public final class MinimaHtlc {
         String send = "send amount:" + totalAmount + " address:" + myAddress
                 + " tokenid:" + activeToken + " split:" + count + " coinage:1 mine:true";
         // M1: `send split:` signs on the node → route through SignGate (same reason as lock()).
-        runSend(send, r -> {
+        runSigned(send, r -> {
             JSONObject resp = r.optJSONObject("response");
             cb.ok(resp == null ? "" : resp.optString("txpowid", ""));
         }, cb::err);
+    }
+
+    /** One manual self-send, signed through the same gate as lock/split. */
+    public void consolidateCoins(int maxCoins, PostCb cb) {
+        if (maxCoins < 3 || maxCoins > 20) { cb.err("Consolidate requires 3–20 inputs"); return; }
+        runSigned(consolidateCommand(activeToken, maxCoins), r -> cb.ok(txpowOf(r)), cb::err);
+    }
+
+    /** The node constructs the transaction without signing or posting it. */
+    public void previewConsolidate(int maxCoins, Consumer<JSONObject> ok, Consumer<String> err) {
+        if (maxCoins < 3 || maxCoins > 20) { err.accept("Consolidate requires 3–20 inputs"); return; }
+        cmd(consolidateCommand(activeToken, maxCoins) + " dryrun:true", ok, err);
+    }
+
+    private static String consolidateCommand(String token, int maxCoins) {
+        return "consolidate tokenid:" + token + " coinage:3 maxcoins:" + maxCoins + " maxsigs:5";
     }
 
     // ---- CLAIM: counterparty reveals the secret + pays the notify coin ----
@@ -601,7 +609,7 @@ public final class MinimaHtlc {
     private void cmd(String command, Consumer<JSONObject> ok, Consumer<String> err) {
         node.cmd(command, new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
-                if (!j.optBoolean("status", true)) { err.accept(shortCmd(command) + ": " + j.optString("error", "command failed")); return; }
+                if (!j.optBoolean("status", true)) { err.accept(shortCmd(command) + ": " + j.optString("error", j.optString("message", "command failed"))); return; }
                 ok.accept(j);
             }
             @Override public void onError(String m) { err.accept(m); }
@@ -624,10 +632,10 @@ public final class MinimaHtlc {
                 e -> { gate.free(); err.accept(e); }));
     }
 
-    /** A single node command that SIGNS on the node (a bare {@code send}) — gated through {@link
+    /** A single node command that SIGNS on the node ({@code send} or {@code consolidate}) — gated through {@link
      *  com.eurobuddha.comms.SignGate} exactly like a multi-step txnsign sequence, so a lock/split can never
      *  sign a one-time key leaf concurrently with an autonomous claim/refund (M1). */
-    private void runSend(String sendCmd, Consumer<JSONObject> ok, Consumer<String> err) {
+    private void runSigned(String sendCmd, Consumer<JSONObject> ok, Consumer<String> err) {
         runSeq(java.util.Collections.singletonList(sendCmd), ok, err);
     }
     private void runSeqAt(List<String> cmds, int i, Consumer<JSONObject> finalOk, Consumer<String> err) {

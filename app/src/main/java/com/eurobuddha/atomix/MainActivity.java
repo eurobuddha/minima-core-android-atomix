@@ -1602,8 +1602,8 @@ public class MainActivity extends AppCompatActivity {
         if (plan == null || plan.legs.isEmpty()) return;
         // A SELL sweep and an in-flight coin-split both pick mxUSDT coins unpinned — if they'd collide, the sweep
         // could lose leg 1 and abort. Splits finish within ~a block; ask the user to retry rather than risk it.
-        if (plan.sell && engine != null && engine.isSplitting()) {
-            toast("Preparing coins for your order ladder — try the sell again in a moment.");
+        if (plan.sell && (SwapEngine.isConsolidating() || (engine != null && engine.isSplitting()))) {
+            toast("Wallet coins are being prepared — try the sell again after confirmation.");
             return;
         }
         sweepRun = plan; sweepIdx = 0; sweepOk = 0;
@@ -2740,6 +2740,76 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
+    private void consolidateDialog() {
+        final String token = TradingContext.active().tokenId;
+        minima.tokenBalance(b -> {
+            if (isFinishing() || isDestroyed() || !token.equals(TradingContext.active().tokenId)) return;
+            int cap = MinimaHtlc.maxSafeCoinRows(token);
+            int runs = (int) Math.max(0L, ((long) b.coins - cap + 17L) / 18L);
+            String label = MinimaHtlc.MINIMA_TOKENID.equals(token) ? "MINIMA" : "MxUSD";
+            modalOpen = true;
+            dialog().setTitle("Consolidate " + label)
+                    .setMessage(b.coins + " wallet coins · read limit " + cap + ".\n\n"
+                            + (runs > 0 ? "At least about " + runs + " runs to reach the limit. " : "Your wallet is within the read limit. ")
+                            + "Each run asks the node to merge up to 20 spendable coins into 2, with at most 5 signing addresses. Locked coins cannot be merged.\n\n"
+                            + "Run once signs one self-send on your node and consumes one-time signing keys. Preview does not sign. "
+                            + "Wait for new coins to age 3 blocks before running again. No automatic repeats.")
+                    .setNeutralButton("Preview", (d, w) -> consolidateOnce(token, true))
+                    .setPositiveButton("Run once", (d, w) -> consolidateOnce(token, false))
+                    .setNegativeButton("Cancel", null)
+                    .setOnDismissListener(d -> { modalOpen = false; render(); }).show();
+        }, e -> showText("Consolidate", e));
+    }
+
+    private void consolidateOnce(String token, boolean preview) {
+        if (!token.equals(TradingContext.active().tokenId)) { toast("Trading currency changed; reopen Consolidate"); return; }
+        if (IdentityWatch.halted()) { toast("Halted: app keys don't match your node"); return; }
+        if (!SwapEngine.beginConsolidate()) { toast("Wallet busy — wait for the current lock or consolidation"); return; }
+        final MinimaHtlc target = minima;
+        java.util.function.Consumer<String> fail = e -> {
+            SwapEngine.endConsolidate();
+            if (!isFinishing() && !isDestroyed()) showText("Consolidate", e);
+        };
+        target.tokenBalance(b -> {
+            if (!token.equals(TradingContext.active().tokenId)) { fail.accept("Trading currency changed; reopen Consolidate"); return; }
+            if (b.coins < 3) { fail.accept("At least 3 spendable coins are needed."); return; }
+            target.hasPendingMinima(pending -> {
+                if (pending) { fail.accept("Coins are still confirming. Wait for 3 confirmations before another run."); return; }
+                target.currentBlock(new MinimaHtlc.BlockCb() {
+                    public void err(String e) { fail.accept(e); }
+                    public void ok(int block) {
+                        if (!token.equals(TradingContext.active().tokenId)) { fail.accept("Trading currency changed; reopen Consolidate"); return; }
+                        if (block <= 0) { fail.accept("Could not read the current block"); return; }
+                        int waitUntil = prefs.getInt("consolidate_until_" + token, 0);
+                        if (!preview && block < waitUntil) {
+                            fail.accept("Coins: " + b.coins + " · waiting for new coins to age 3 blocks. Retry at block " + waitUntil + "."); return;
+                        }
+                        if (preview) {
+                            target.previewConsolidate(20, r -> {
+                                SwapEngine.endConsolidate();
+                                showText("Consolidation preview — no transaction sent", r.toString());
+                            }, fail);
+                            return;
+                        }
+                        // Persist before submission: a lost reply must not offer an immediate repeat.
+                        prefs.edit().putInt("consolidate_until_" + token, block + 4).apply();
+                        target.consolidateCoins(20, new MinimaHtlc.PostCb() {
+                            public void err(String e) { fail.accept("Submission could not be confirmed: " + e + "\nCheck your balance before retrying."); }
+                            public void ok(String txpowid) {
+                                SwapEngine.endConsolidate();
+                                target.tokenBalance(after -> {
+                                    if (!isFinishing() && !isDestroyed()) showText("Consolidation submitted",
+                                            "Coins: " + b.coins + " → " + after.coins + " · waiting for new coins to age 3 blocks.\n\nTransaction: " + txpowid);
+                                    fetchMinimaBalance();
+                                }, e -> showText("Consolidation submitted", "Refresh your balance after confirmation.\nTransaction: " + txpowid));
+                            }
+                        });
+                    }
+                });
+            }, fail);
+        }, fail);
+    }
+
     // ---- Wallet tab ----
 
     private void renderWalletTab(LinearLayout col) {
@@ -2747,6 +2817,18 @@ public class MainActivity extends AppCompatActivity {
         minimaCard.setOnLongClickListener(v -> { minimaCoinDump(); return true; });
         col.addView(minimaCard);
         minimaBalView = (TextView) minimaCard.findViewWithTag(TAG_BAL);   // fresh ref each render (tree is rebuilt)
+
+        try {
+            int count = new java.math.BigDecimal(minimaCoins).intValueExact();
+            if (count >= 10) {
+                boolean blocked = count > MinimaHtlc.maxSafeCoinRows(TradingContext.active().tokenId);
+                TextView consolidate = Design.pill(this, blocked
+                        ? count + " coins — buys are being declined. Consolidate."
+                        : "Consolidate ▸ " + count + " coins into fewer", Design.SURFACE2(), blocked ? Design.RED() : Design.ACCENT());
+                consolidate.setOnClickListener(v -> consolidateDialog());
+                col.addView(consolidate);
+            }
+        } catch (NumberFormatException | ArithmeticException ignored) { /* balance is not available yet */ }
 
         String addrLine = ethAddr == null ? (ethErr == null ? "deriving from node seed…" : "—") : shortAddr(ethAddr);
         LinearLayout ethCard = walletCard("Ethereum · " + net.label, ethBal, addrLine, Design.TEXT());
