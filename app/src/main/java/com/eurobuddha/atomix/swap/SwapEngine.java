@@ -561,13 +561,15 @@ public final class SwapEngine {
                             + " " + s.buyToken + " — " + ethClaimStatus(gc, secretKnown));
                     if (claimable) L.add("The settlement poll can attempt collection, subject to amount/token validation and gas.");
                     else if (open) L.add("Waiting for the counterparty to claim the Minima leg and reveal the secret. Ethereum funds cannot be collected without it.");
-                    else if (gc.refunded) L.add("→ Maker's leg timed out & refunded; your " + s.sellToken + " auto-refunds at block " + s.myTimelock + ".");
+                    else if (gc.refunded) L.add(myMin != null
+                            ? "The counterparty refunded. Your visible Minima lock is refundable after block " + s.myTimelock + "; settlement will attempt recovery."
+                            : "The counterparty refunded. No Minima lock was found to refund; the recorded submission needs on-chain verification.");
                 }
             } else {
                 // counter = a Minima-chain coin to me — real on-chain check of the counterparty's lock
                 if (cpMin != null) {
                     L.add("• Counterparty " + s.buyToken + " leg: FOUND " + MinimaHtlc.coinAmount(cpMin) + " " + s.buyToken + " — "
-                            + (secretKnown ? "claimable now (claiming on the next poll)" : "waiting for the secret"));
+                            + (secretKnown ? "secret known; settlement must validate and confirm the claim" : "waiting for the secret"));
                 } else if (scanError != null) {
                     L.add("• Counterparty " + s.buyToken + " leg: UNKNOWN — node lookup failed");
                 } else {

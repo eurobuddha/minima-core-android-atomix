@@ -1,5 +1,9 @@
 # AtomiX changes
 
+## 0.1.53
+
+- After the counterparty refunds, only describe Minima recovery as available when a lock is actually visible. An absent lock requires transaction verification; it is not a promise of an automatic refund.
+
 ## 0.1.52
 
 - Keep Minima claim/refund submissions pending until the node confirms their TxPoW on-chain at depth two. Dropped submissions no longer permanently disable retries or falsely report funds received.
