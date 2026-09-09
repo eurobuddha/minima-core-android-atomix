@@ -42,11 +42,13 @@ public class HtlcTxnConstructionTest {
     private static final String MY_ADDR = "MxMYADDR";
     private static final String MY_PK = "0x0BC0FFEE";
 
+    private JSONObject checkReply;
     private NodeApi node;
     private MinimaHtlc htlc;
     private final List<String> commands = new ArrayList<>();
 
-    @Before public void setUp() {
+    @Before public void setUp() throws Exception {
+        checkReply = validCheck();
         com.eurobuddha.comms.SignGate.resetForTest();   // lock/claim/refund route through the shared static gate
         node = mock(NodeApi.class);
         // Record each command and reply with a generic success carrying everything any step reads back.
@@ -60,7 +62,7 @@ public class HtlcTxnConstructionTest {
                     .put("txpowid", "0xTXPOW")
                     .put("miniaddress", MY_ADDR)
                     .put("publickey", MY_PK));
-            cb.onResult(resp);
+            cb.onResult(command.startsWith("txncheck ") ? checkReply : resp);
             return null;
         }).when(node).cmd(anyString(), any(NodeApi.Cb.class));
 
@@ -73,6 +75,58 @@ public class HtlcTxnConstructionTest {
         });
         assertTrue("wallet identity must be ready after setup", ok[0]);
         commands.clear();   // drop the newscript command; each test asserts only its own sequence
+    }
+
+    private static JSONObject validCheck() throws Exception {
+        return new JSONObject().put("status", true).put("response", new JSONObject()
+                .put("valid", new JSONObject().put("basic", true).put("mmrproofs", true).put("scripts", 1))
+                .put("validamounts", true).put("allsignaturesvalid", true).put("validtransaction", true));
+    }
+
+    private void checkedOperation(int kind, MinimaHtlc.PostCb cb) throws Exception {
+        JSONObject coin = new JSONObject().put("coinid", "0xC1").put("tokenid", TOKEN).put("tokenamount", "1")
+                .put("state", new JSONObject().put("0", MY_PK).put("4", MY_PK));
+        if (kind == 0) htlc.lockFromCoins(java.util.Collections.singletonList("0xC1"), "1", "1", "1", "minima",
+                MY_PK, "0xAB", "0xCD", 987654, "FALSE", cb);
+        else if (kind == 1) htlc.claim(coin, "0xAB", "0xCD", cb);
+        else htlc.refund(coin, cb);
+    }
+
+    @Test public void everyExplicitTransactionValidatesBeforePostingWithoutDuplicateProofs() throws Exception {
+        for (int kind = 0; kind < 3; kind++) {
+            commands.clear(); checkedOperation(kind, post());
+            int sign = -1, basics = -1, check = -1, post = -1;
+            for (int i = 0; i < commands.size(); i++) {
+                String c = commands.get(i);
+                if (c.startsWith("txnsign ")) sign = i;
+                if (c.startsWith("txnbasics ")) basics = i;
+                if (c.startsWith("txncheck ")) check = i;
+                if (c.startsWith("txnpost ")) {
+                    post = i; assertFalse(c.contains("auto:true")); assertTrue(c.contains("mine:true"));
+                }
+            }
+            assertTrue(sign >= 0 && basics > sign && check > basics && post > check);
+            assertEquals(1, count(commands, "txnbasics"));
+        }
+    }
+
+    @Test public void missingOrRejectedValidationNeverPostsAnyExplicitTransaction() throws Exception {
+        for (int kind = 0; kind < 3; kind++) {
+            for (String flag : new String[]{"basic", "mmrproofs", "scripts", "validamounts", "allsignaturesvalid", "validtransaction"}) {
+                for (Object value : new Object[]{false, JSONObject.NULL}) {
+                    checkReply = validCheck();
+                    JSONObject response = checkReply.getJSONObject("response");
+                    JSONObject target = response.getJSONObject("valid").has(flag) ? response.getJSONObject("valid") : response;
+                    target.put(flag, value);
+                    commands.clear(); final boolean[] failed = {false};
+                    checkedOperation(kind, new MinimaHtlc.PostCb() {
+                        public void ok(String id) { throw new AssertionError("Invalid transaction posted"); }
+                        public void err(String msg) { failed[0] = true; assertTrue(msg.contains("Nothing was posted")); }
+                    });
+                    assertTrue(failed[0]); assertEquals(0, count(commands, "txnpost"));
+                }
+            }
+        }
     }
 
     // ---- LOCK ----

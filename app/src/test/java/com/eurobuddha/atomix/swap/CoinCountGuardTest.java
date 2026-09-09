@@ -54,7 +54,7 @@ public class CoinCountGuardTest {
     @Test public void safeCountUsesExactFreeQuery() throws Exception {
         reply = balance("53.0", true); read(false);
         assertNull(error); assertEquals(1, successes);
-        assertEquals("coins relevant:true sendable:true tokenid:" + MinimaHtlc.USDT_TOKENID + " coinage:1", commands.get(1));
+        assertEquals("coins relevant:true sendable:true tokenid:" + MinimaHtlc.USDT_TOKENID + " coinage:1 checkmempool:true", commands.get(1));
     }
     @Test public void diagnosticUsesCompactState() {
         read(true); assertNull(error);

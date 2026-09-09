@@ -304,10 +304,11 @@ public final class MinimaHtlc {
         seq.add("txnoutput id:" + id + " amount:" + amount + " address:" + HTLC_ADDRESS + " tokenid:" + activeToken + " storestate:true");
         if (positive(change)) seq.add("txnoutput id:" + id + " amount:" + change + " address:" + myAddress + " tokenid:" + activeToken + " storestate:false");
         seq.add("txnsign id:" + id + " publickey:auto");
+        addValidation(seq, id);
         // Split the broadcast (txnpost) from the build: a build failure PROVABLY didn't broadcast (caller may
         // retry); a txnpost failure MAY have broadcast with a lost response, so it's tagged "POSTED:" and the
         // caller must NOT retry (the mxUSDT leg has no on-chain hash-uniqueness → a retry would double-lock).
-        runSeq(seq, built -> cmd("txnpost id:" + id + " mine:true auto:true txndelete:true",
+        runSeq(seq, built -> cmd("txnpost id:" + id + " mine:true txndelete:true",
                 posted -> cb.ok(txpowOf(posted)),
                 e -> { deleteTxn(id); cb.err("POSTED:" + e); }),
             e -> { deleteTxn(id); cb.err(e); });
@@ -398,7 +399,7 @@ public final class MinimaHtlc {
     /** Spendable active-token coins. Preflight is mandatory: legacy nodes can kill the app delivering rows. */
     public void myFreeCoins(Consumer<org.json.JSONArray> ok, Consumer<String> err) {
         String token = activeToken;
-        guardedCoinRead(token, "coins relevant:true sendable:true tokenid:" + token + " coinage:1", ok, err);
+        guardedCoinRead(token, "coins relevant:true sendable:true tokenid:" + token + " coinage:1 checkmempool:true", ok, err);
     }
 
     /** Diagnostic wallet read uses the same preflight and compact state representation. */
@@ -482,7 +483,8 @@ public final class MinimaHtlc {
         seq.add("txnstate id:" + id + " port:103 value:[" + receiver + "]");
         // sign with the coin's receiver key (the counterparty the script requires) — one of my 64 defaults.
         seq.add("txnsign id:" + id + " publickey:" + receiver);
-        seq.add("txnpost id:" + id + " mine:true auto:true txndelete:true");
+        addValidation(seq, id);
+        seq.add("txnpost id:" + id + " mine:true txndelete:true");
         runSeq(seq, last -> cb.ok(txpowOf(last)), e -> { deleteTxn(id); cb.err(e); });
     }
 
@@ -509,7 +511,8 @@ public final class MinimaHtlc {
         seq.add("txnoutput id:" + id + " tokenid:" + tokenid + " amount:" + amount + " address:" + myAddress);
         // sign with the coin's owner key (SIGNEDBY(owner)) — one of my 64 defaults, whichever locked it.
         seq.add("txnsign id:" + id + " publickey:" + owner);
-        seq.add("txnpost id:" + id + " auto:true txndelete:true");
+        addValidation(seq, id);
+        seq.add("txnpost id:" + id + " mine:true txndelete:true");
         runSeq(seq, last -> cb.ok(txpowOf(last)), e -> { deleteTxn(id); cb.err(e); });
     }
 
@@ -643,9 +646,43 @@ public final class MinimaHtlc {
     }
     private void runSeqAt(List<String> cmds, int i, Consumer<JSONObject> finalOk, Consumer<String> err) {
         cmd(cmds.get(i), resp -> {
+            if (cmds.get(i).startsWith("txncheck ")) {
+                String invalid = transactionCheckFailure(resp);
+                if (invalid != null) { err.accept(invalid); return; }
+            }
             if (i == cmds.size() - 1) finalOk.accept(resp);
             else runSeqAt(cmds, i + 1, finalOk, err);
         }, err);
+    }
+
+    private static void addValidation(List<String> seq, String id) {
+        // Core appends proofs: txnpost must NOT use auto:true after txnbasics.
+        seq.add("txnbasics id:" + id);
+        seq.add("txncheck id:" + id);
+    }
+
+    /** Reused from PandaPools TxPost.checkFailure: command success alone is not transaction validity. */
+    static String transactionCheckFailure(JSONObject reply) {
+        JSONObject r = reply == null ? null : reply.optJSONObject("response");
+        JSONObject valid = r == null ? null : r.optJSONObject("valid");
+        if (!checkFlag(reply, "status")) return "The node could not check the transaction. Nothing was posted.";
+        if (!checkFlag(valid, "mmrproofs")) return "An input coin was already spent or its proof is invalid. Nothing was posted.";
+        if (!checkFlag(r, "validamounts")) return "The transaction amounts do not balance. Nothing was posted.";
+        if (!checkFlag(valid, "scripts")) return "The contract rejects this transaction. Nothing was posted.";
+        if (!checkFlag(valid, "basic") || !checkFlag(r, "allsignaturesvalid") || !checkFlag(r, "validtransaction"))
+            return "The node did not validate the complete transaction and signatures. Nothing was posted.";
+        return null;
+    }
+
+    private static boolean checkFlag(JSONObject o, String key) {
+        Object v = o == null ? null : o.opt(key);
+        if (v instanceof Boolean) return (Boolean) v;
+        if (v instanceof Number) {
+            try { return new java.math.BigDecimal(v.toString()).compareTo(java.math.BigDecimal.ONE) == 0; }
+            catch (NumberFormatException e) { return false; }
+        }
+        if (v instanceof String) return "1".equals(((String) v).trim()) || "true".equalsIgnoreCase(((String) v).trim());
+        return false;
     }
 
     private void deleteTxn(String id) { node.cmd("txndelete id:" + id, new NodeApi.Cb() {

@@ -1,3 +1,9 @@
+## 0.1.51
+
+- Validate proofs, amounts, contract scripts and signatures before posting an explicit Minima lock, claim or refund. Reuse PandaPools validation and build proofs only once.
+- Exclude coins already in the mempool when selecting counter-leg funding. A successful submission still requires on-chain confirmation.
+- Refund mining now returns the mined TxPoW identifier for subsequent confirmation tracking.
+
 # AtomiX changes
 
 ## 0.1.50 — 2026-09-09
