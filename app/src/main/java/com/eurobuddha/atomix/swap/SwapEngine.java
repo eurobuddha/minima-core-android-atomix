@@ -623,6 +623,7 @@ public final class SwapEngine {
     // ---- Minima side (node.cmd; main thread) ----
 
     void runMinimaChecks(final int block) {   // (package-private for tests)
+        confirmPendingMinima();
         // Harvest the revealed secret for each leg I locked that's still waiting — one hashlock-FILTERED query
         // per pending swap, so we never pull the whole (global, unbounded) notify address.
         for (String h : pendingSecretHashes()) {
@@ -771,12 +772,9 @@ public final class SwapEngine {
             SwapLog.d("claim MINIMA leg " + hash + " amount=" + MinimaHtlc.coinAmount(coin));
             minima.claim(coin, hash, secret, new MinimaHtlc.PostCb() {
                 @Override public void ok(String txpowid) {
-                    db.logEvent(hash, SwapDb.EV_COLLECT, "minima", MinimaHtlc.coinAmount(coin), txpowid);
-                    db.setSwapStatus(hash, SwapDb.ST_COMPLETE);
-                    notifier.notify("Swap complete", "Claimed " + MinimaHtlc.coinAmount(coin) + " " + com.eurobuddha.atomix.TradingContext.labelFor(coin.optString("tokenid", "0x00")));
+                    db.logEvent(hash, SwapDb.EV_MINIMA_CLAIM_SUBMITTED, coin.optString("tokenid", "0x00"), MinimaHtlc.coinAmount(coin), txpowid);
                     notifier.onSwapsChanged();
-                    ethAttempt.remove("claimM:" + hash);
-                    SwapLog.d("claim OK " + hash + " tx=" + txpowid);
+                    SwapLog.d("claim SUBMITTED " + hash + " tx=" + txpowid + " — awaiting confirmation");
                 }
                 @Override public void err(String m) {
                     SwapLog.w("claim ERR " + hash + ": " + m + " (retries after the window)");
@@ -832,24 +830,55 @@ public final class SwapEngine {
         if (db.haveCollectExpired(hash) || !tryEthAttempt("refundM:" + hash)) return;   // MA-20: atomic due-check-and-mark
         minima.refund(coin, new MinimaHtlc.PostCb() {
             @Override public void ok(String txpowid) {
-                // Status FIRST: haveCollectExpired is a permanent veto on any future refund, so if the process
-                // dies between these two writes the swap would be un-refundable AND still read "locked".
-                db.setSwapStatus(hash, SwapDb.ST_REFUNDED);
-                db.logEvent(hash, SwapDb.EV_EXPIRED, "minima", MinimaHtlc.coinAmount(coin), txpowid);
-                String reason = refundReason(hash);   // 0.1.44: the Minima-leg refund says WHY, like the ETH leg has since 0.1.41
-                SwapLog.w("refund OK (minima) " + hash + " — " + reason);
-                notifier.notify("Swap refunded", "Timelock passed — reclaimed your "
-                        + com.eurobuddha.atomix.TradingContext.labelFor(coin.optString("tokenid", "0x00"))
-                        + " (" + reason + ")");
+                db.logEvent(hash, SwapDb.EV_MINIMA_REFUND_SUBMITTED, coin.optString("tokenid", "0x00"), MinimaHtlc.coinAmount(coin), txpowid);
                 notifier.onSwapsChanged();
-                ethAttempt.remove("refundM:" + hash);
-                SwapLog.d("refund OK " + hash + " tx=" + txpowid);
+                SwapLog.d("refund SUBMITTED " + hash + " tx=" + txpowid + " — awaiting confirmation");
             }
             @Override public void err(String m) {
                 SwapLog.w("refund ERR " + hash + ": " + m + " (retries after the window)");
                 // leave the attempt timestamp → the next poll after ETH_RETRY_SECS retries it
             }
         });
+    }
+
+    /** Reuse the ETH settlement rule: submission records are retryable; only chain evidence is terminal.
+     * One due receipt per poll, shared throttle across foreground/background engines. The stored event
+     * survives a restart and is checked even after the spent HTLC coin disappears from discovery. */
+    void confirmPendingMinima() {
+        SwapDb.Event selected = null;
+        String selectedHash = null;
+        long oldestAttempt = Long.MAX_VALUE;
+        for (SwapDb.Swap swap : db.allSwaps()) {
+            if (swap == null || swap.hash == null || SwapDb.ST_COMPLETE.equals(swap.status)
+                    || SwapDb.ST_REFUNDED.equals(swap.status)) continue;
+            for (SwapDb.Event e : db.getEvents(swap.hash)) {
+                if (!SwapDb.EV_MINIMA_REFUND_SUBMITTED.equals(e.event) && !SwapDb.EV_MINIMA_CLAIM_SUBMITTED.equals(e.event)) continue;
+                if (e.note == null || !e.note.matches("(?i)0x[0-9a-f]{64}")) continue;
+                long attempted = ethAttempt.getOrDefault("receiptM:" + e.note, 0L);
+                // Rotate fairly: repeatedly missing recent receipts must not starve an older valid receipt.
+                if (nowUnix() - attempted >= ETH_RETRY_SECS && attempted < oldestAttempt) {
+                    selected = e; selectedHash = swap.hash; oldestAttempt = attempted;
+                }
+            }
+        }
+        if (selected == null || !tryEthAttempt("receiptM:" + selected.note)) return;
+        final SwapDb.Event receipt = selected;
+        final String hash = selectedHash;
+        final boolean refund = SwapDb.EV_MINIMA_REFUND_SUBMITTED.equals(receipt.event);
+        minima.confirmationDepth(receipt.note, depth -> {
+            if (depth < 2) return;
+            SwapDb.Swap current = db.getSwap(hash);
+            if (current == null || SwapDb.ST_COMPLETE.equals(current.status) || SwapDb.ST_REFUNDED.equals(current.status)) return;
+            // Status first: a crash must not leave a permanent event veto on a nonterminal row.
+            db.setSwapStatus(hash, refund ? SwapDb.ST_REFUNDED : SwapDb.ST_COMPLETE);
+            db.logEvent(hash, refund ? SwapDb.EV_EXPIRED : SwapDb.EV_COLLECT, "minima", receipt.amount, receipt.note);
+            ethAttempt.remove((refund ? "refundM:" : "claimM:") + hash);
+            notifier.notify(refund ? "Swap refunded" : "Swap complete",
+                    (refund ? "Reclaimed " : "Claimed ") + receipt.amount + " "
+                            + com.eurobuddha.atomix.TradingContext.labelFor(receipt.token) + " — confirmed on-chain"
+                            + (refund ? " (" + refundReason(hash) + ")" : ""));
+            notifier.onSwapsChanged();
+        }, error -> SwapLog.w("receipt " + hash + " ERR: " + error));
     }
 
     /** [io] lock the ETH counter-leg for a mxUSDT→ERC20 swap I'm responding to (now+1800s). */

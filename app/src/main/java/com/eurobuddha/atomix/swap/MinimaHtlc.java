@@ -655,6 +655,22 @@ public final class MinimaHtlc {
         }, err);
     }
 
+    /** Small read-only receipt lookup. A locally mined TxPoW is not necessarily on-chain. */
+    public void confirmationDepth(String txpowid, Consumer<Integer> ok, Consumer<String> err) {
+        if (txpowid == null || !txpowid.matches("(?i)0x[0-9a-f]{64}")) { err.accept("Invalid TxPoW identifier"); return; }
+        cmd("txpow onchain:" + txpowid, reply -> ok.accept(confirmedDepth(reply)), err);
+    }
+
+    /** Reused from PandaPools ActivityLog.confirmationDepth; malformed evidence is never confirmation. */
+    static int confirmedDepth(JSONObject reply) {
+        JSONObject r = reply == null ? null : reply.optJSONObject("response");
+        if (!checkFlag(reply, "status") || !checkFlag(r, "found")) return -1;
+        try {
+            int depth = new java.math.BigDecimal(r.get("confirmations").toString()).intValueExact();
+            return depth < 0 ? -1 : depth;
+        } catch (Exception invalid) { return -1; }
+    }
+
     private static void addValidation(List<String> seq, String id) {
         // Core appends proofs: txnpost must NOT use auto:true after txnbasics.
         seq.add("txnbasics id:" + id);

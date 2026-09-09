@@ -1,10 +1,15 @@
+# AtomiX changes
+
+## 0.1.52
+
+- Keep Minima claim/refund submissions pending until the node confirms their TxPoW on-chain at depth two. Dropped submissions no longer permanently disable retries or falsely report funds received.
+- Persist submission receipts across restarts and check them independently of the now-spent HTLC coin, with a shared bounded polling throttle.
+
 ## 0.1.51
 
 - Validate proofs, amounts, contract scripts and signatures before posting an explicit Minima lock, claim or refund. Reuse PandaPools validation and build proofs only once.
 - Exclude coins already in the mempool when selecting counter-leg funding. A successful submission still requires on-chain confirmation.
 - Refund mining now returns the mined TxPoW identifier for subsequent confirmation tracking.
-
-# AtomiX changes
 
 ## 0.1.50 — 2026-09-09
 
