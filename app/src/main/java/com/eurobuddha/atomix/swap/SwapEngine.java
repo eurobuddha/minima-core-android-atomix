@@ -695,26 +695,28 @@ public final class SwapEngine {
      *  expired lock means not a single extra node command.
      *
      *  This is a backstop, not a replacement — the shallow scan above still handles the fast path. */
-    void sweepExpiredMinima(int block) {   // (package-private for tests)
+    void sweepExpiredMinima(int block) {
+        SwapDb.Swap selected = null;
+        long oldest = Long.MAX_VALUE;
         for (SwapDb.Swap s : db.allSwaps()) {
             if (s == null || s.hash == null || !s.myLegIsMinima) continue;
-            if (SwapDb.ST_COMPLETE.equals(s.status) || SwapDb.ST_REFUNDED.equals(s.status)
-                    || SwapDb.ST_ERROR.equals(s.status)) continue;
-            if (s.myTimelock <= 0 || block <= s.myTimelock) continue;          // not refundable yet
-            if (db.haveCollectExpired(s.hash)) continue;                        // already refunded
-            if (!ethRetryDue("refundM:" + s.hash)) continue;                    // same self-healing window as the refund itself
-            final String hh = s.hash;
-            minima.scanHtlcByHashDeep(hh, 2, REFUND_SCAN_DEPTH, coins -> {
-                for (int i = 0; i < coins.length(); i++) {
-                    JSONObject coin = coins.optJSONObject(i);
-                    if (coin == null) continue;
-                    try {
-                        if (isMyOwnedKey(MinimaHtlc.stateAt(coin, 0)) && sameHash(MinimaHtlc.stateAt(coin, 5), hh))
-                            checkExpiredMinima(coin, block);
-                    } catch (Exception ignore) {}
-                }
-            }, e -> {});
+            // ERROR describes the trade outcome, not whether my own locked funds were recovered.
+            if (SwapDb.ST_COMPLETE.equals(s.status) || SwapDb.ST_REFUNDED.equals(s.status)) continue;
+            if (s.myTimelock <= 0 || block <= s.myTimelock || db.haveCollectExpired(s.hash)) continue;
+            if (!ethRetryDue("refundM:" + s.hash)) continue;
+            long attempted = ethAttempt.getOrDefault("refundScan:" + s.hash, 0L);
+            if (nowUnix() - attempted >= ETH_RETRY_SECS && attempted < oldest) { selected = s; oldest = attempted; }
         }
+        if (selected == null || !tryEthAttempt("refundScan:" + selected.hash)) return;
+        final String hash = selected.hash;
+        minima.scanHtlcByHashDeep(hash, 2, REFUND_SCAN_DEPTH, coins -> {
+            for (int i = 0; i < coins.length(); i++) {
+                JSONObject coin = coins.optJSONObject(i);
+                if (coin == null) continue;
+                if (isMyOwnedKey(MinimaHtlc.stateAt(coin, 0)) && sameHash(MinimaHtlc.stateAt(coin, 5), hash))
+                    checkExpiredMinima(coin, block);
+            }
+        }, e -> SwapLog.w("refundScan " + hash + " ERR: " + e));
     }
 
     /** Hashes of active swaps where I must CLAIM a mxUSDT counter-leg (my own leg is the ETH one): I hold the

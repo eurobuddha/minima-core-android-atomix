@@ -131,6 +131,18 @@ public class RefundRetryTest {
                 eq(SwapEngine.REFUND_SCAN_DEPTH), any(), any());
     }
 
+    @Test public void failedTradeStillRecoversItsOwnExpiredLockAndThrottlesMissingScans() {
+        SwapDb.Swap s = new SwapDb.Swap();
+        s.hash = HASH; s.status = SwapDb.ST_ERROR; s.myLegIsMinima = true; s.myTimelock = 2241192;
+        when(db.allSwaps()).thenReturn(Collections.singletonList(s));
+        engine.sweepExpiredMinima(2242106);
+        engine.sweepExpiredMinima(2242106);
+        verify(minima, times(1)).scanHtlcByHashDeep(eq(HASH), anyInt(), eq(SwapEngine.REFUND_SCAN_DEPTH), any(), any());
+        SwapEngine.ageRetryMarkerForTest("refundScan:" + HASH, 10_000);
+        engine.sweepExpiredMinima(2242106);
+        verify(minima, times(2)).scanHtlcByHashDeep(eq(HASH), anyInt(), eq(SwapEngine.REFUND_SCAN_DEPTH), any(), any());
+    }
+
     @Test public void sweepIgnoresSwapsThatAreNotYetRefundable() {
         SwapDb.Swap s = new SwapDb.Swap();
         s.hash = HASH; s.status = SwapDb.ST_LOCKED; s.myLegIsMinima = true; s.myTimelock = 2241192;

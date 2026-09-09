@@ -1,5 +1,10 @@
 # AtomiX changes
 
+## 0.1.55
+
+- Continue recovering an expired Minima lock when the trade is marked ERROR after a counterparty refund. ERROR no longer suppresses the deep recovery scan.
+- Limit recovery discovery to one due hash per poll with fair rotation and a shared retry window, including empty or failed scans.
+
 ## 0.1.54
 
 - Reuse PandaPools interrupted-write protection: persist before node signing/posting, pause new writes if the outcome is unknown, and require restart/reconciliation before a manual reset. A late reply cannot clear a newer write.
