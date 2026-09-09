@@ -193,7 +193,7 @@ public final class SwapEngine {
     // lock confirms on-chain (or a watchdog fires — that one leg refunds). Serial (K=1) was correct but ~1
     // leg/cycle; this is ~CP_LOCK_BURST× faster with the same coin-collision safety.
     private static final int  CP_LOCK_BURST = 2;            // max concurrent responder locks (each on a distinct coin-set)
-    private static final int  MAX_LOCK_COINS = 50;          // cap UTXOs combined into ONE counter-leg lock (tx-size bound)
+    static final int  MAX_LOCK_COINS = 50;          // cap UTXOs combined into ONE counter-leg lock (tx-size bound)
     private static final long CP_LOCK_TIMEOUT_SECS = 600;   // per-leg watchdog (its leg refunds if it never confirms); ≫ a normal ~2-block confirm
     private final Map<String,String> cpInFlight  = Collections.synchronizedMap(new HashMap<>());  // hash → pinned coinid ("" = slot reserved, coin not yet picked)
     private final Map<String,Long>   cpLockSince = Collections.synchronizedMap(new HashMap<>());  // hash → lock time (watchdog)
@@ -212,6 +212,17 @@ public final class SwapEngine {
         if (!cpNoted.add(hash)) return;
         ui.post(() -> notifier.notify("Can't lock your " + com.eurobuddha.atomix.TradingContext.active().coinLabel, reason));
     }
+
+    private static long lastFragmentationNoteMs;
+    private static synchronized boolean shouldNoteFragmentation() {
+        long now = System.currentTimeMillis();
+        if (lastFragmentationNoteMs != 0 && now - lastFragmentationNoteMs < 30 * 60_000L) return false;
+        lastFragmentationNoteMs = now;
+        return true;
+    }
+
+    int cpInFlightSizeForTest() { synchronized (CP_LOCKING) { return cpInFlight.size(); } }
+    static synchronized void resetFragmentationNoteForTest() { lastFragmentationNoteMs = 0; }
 
     private void releaseCpLeg(String hash) {
         synchronized (CP_LOCKING) { cpInFlight.remove(hash); cpLockSince.remove(hash); CP_LOCKING.remove(hash); }
@@ -1292,7 +1303,12 @@ public final class SwapEngine {
                     releaseCpLeg(hash);
                 }
             });
-        }, e -> { releaseCpLeg(hash); inflight.remove("cpMin:" + hash); }));
+        }, e -> {
+            releaseCpLeg(hash); inflight.remove("cpMin:" + hash);
+            SwapLog.w("Buy " + hash + " counter-leg declined: " + e);
+            if (e != null && e.startsWith(MinimaHtlc.ERR_TOO_MANY_COINS) && shouldNoteFragmentation())
+                declineCpNote(hash, e + ". Open Wallet → Consolidate before accepting buys. Deal: " + hash);
+        }));
     }
 
     // ============================================================ order-match guards (fund safety)

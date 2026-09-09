@@ -313,15 +313,92 @@ public final class MinimaHtlc {
             e -> { deleteTxn(id); cb.err(e); });
     }
 
-    /** My spendable native-mxUSDT coins (confirmed, simple-address) — the pool an ask ladder can lock against.
-     *  Each element has an {@code amount}; used to count coins ≥ a tranche size and decide whether to split. */
-    public void myFreeCoins(Consumer<org.json.JSONArray> ok, Consumer<String> err) {
-        // coinage:1 → confirmed coins only, matching splitCoins' coinage:1 inputs: the target we compute here is
-        // always fundable by the split, so it never fails insufficient-funds on freshly-received (coinage:0) coins.
-        cmd("coins relevant:true sendable:true tokenid:" + activeToken + " coinage:1", r -> {
-            Object resp = r.opt("response");
-            ok.accept(resp instanceof org.json.JSONArray ? (org.json.JSONArray) resp : new org.json.JSONArray());
+    // Measured MxUSD/native row costs with a margin below the observed fatal 270,864-byte parcel.
+    public static final int PARCEL_CHAR_BUDGET = 60_000;
+    public static final int CHARS_PER_TOKEN_COIN = 1_120;
+    public static final int CHARS_PER_NATIVE_COIN = 300;
+    public static final String ERR_TOO_MANY_COINS = "TOO_MANY_COINS";
+
+    public static int maxSafeCoinRows(String tokenid) {
+        return PARCEL_CHAR_BUDGET / (MINIMA_TOKENID.equals(tokenid)
+                ? CHARS_PER_NATIVE_COIN : CHARS_PER_TOKEN_COIN);
+    }
+
+    public static final class TokenBalance {
+        public final int coins;
+        public final String sendable, confirmed, unconfirmed;
+        TokenBalance(int coins, String sendable, String confirmed, String unconfirmed) {
+            this.coins = coins; this.sendable = sendable;
+            this.confirmed = confirmed; this.unconfirmed = unconfirmed;
+        }
+    }
+
+    /** Fresh, small balance reply. Missing/malformed fields must never authorise a wallet coin read. */
+    public void tokenBalance(Consumer<TokenBalance> ok, Consumer<String> err) {
+        tokenBalance(activeToken, ok, err);
+    }
+
+    private void tokenBalance(String token, Consumer<TokenBalance> ok, Consumer<String> err) {
+        cmd("balance tokenid:" + token, r -> {
+            final TokenBalance balance;
+            try {
+                if (!r.getBoolean("status")) throw new IllegalArgumentException("unsuccessful balance");
+                Object resp = r.get("response");
+                JSONObject row;
+                if (resp instanceof org.json.JSONArray) {
+                    org.json.JSONArray rows = (org.json.JSONArray) resp;
+                    // The node legitimately returns [] when this wallet has none of the requested token.
+                    if (rows.length() == 0) { ok.accept(new TokenBalance(0, "0", "0", "0")); return; }
+                    if (rows.length() != 1) throw new IllegalArgumentException("multiple token balances");
+                    row = rows.getJSONObject(0);
+                } else if (resp instanceof JSONObject) row = (JSONObject) resp;
+                else throw new IllegalArgumentException("missing token balance");
+                if (row.has("tokenid") && !token.equalsIgnoreCase(row.getString("tokenid")))
+                    throw new IllegalArgumentException("wrong token balance");
+                int count = new java.math.BigDecimal(row.get("coins").toString()).intValueExact();
+                if (count < 0) throw new IllegalArgumentException("negative coin count");
+                String sendable = balanceAmount(row, "sendable");
+                String confirmed = balanceAmount(row, "confirmed");
+                String unconfirmed = balanceAmount(row, "unconfirmed");
+                balance = new TokenBalance(count, sendable, confirmed, unconfirmed);
+            } catch (Exception bad) { err.accept("balance: invalid reply (" + bad.getMessage() + ")"); return; }
+            ok.accept(balance);
         }, err);
+    }
+
+    private static String balanceAmount(JSONObject row, String field) throws org.json.JSONException {
+        java.math.BigDecimal value = new java.math.BigDecimal(row.get(field).toString());
+        if (value.signum() < 0) throw new IllegalArgumentException("negative " + field);
+        return value.toPlainString();
+    }
+
+    private void guardedCoinRead(String token, String command, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
+        tokenBalance(token, balance -> {
+            int cap = maxSafeCoinRows(token);
+            if (balance.coins > cap) {
+                err.accept(ERR_TOO_MANY_COINS + ": " + balance.coins + " coins, safe limit " + cap);
+                return;
+            }
+            if (!token.equals(activeToken)) { err.accept("Trading currency changed; retry"); return; }
+            cmd(command, r -> {
+                if (!token.equals(activeToken)) { err.accept("Trading currency changed; retry"); return; }
+                Object resp = r.opt("response");
+                if (!(resp instanceof org.json.JSONArray)) { err.accept("coins: invalid reply"); return; }
+                ok.accept((org.json.JSONArray) resp);
+            }, err);
+        }, err);
+    }
+
+    /** Spendable active-token coins. Preflight is mandatory: legacy nodes can kill the app delivering rows. */
+    public void myFreeCoins(Consumer<org.json.JSONArray> ok, Consumer<String> err) {
+        String token = activeToken;
+        guardedCoinRead(token, "coins relevant:true sendable:true tokenid:" + token + " coinage:1", ok, err);
+    }
+
+    /** Diagnostic wallet read uses the same preflight and compact state representation. */
+    public void myRelevantCoins(Consumer<org.json.JSONArray> ok, Consumer<String> err) {
+        String token = activeToken;
+        guardedCoinRead(token, "coins relevant:true tokenid:" + token + " simplestate:true", ok, err);
     }
 
     /** Is there any UNCONFIRMED native mxUSDT in my wallet (a split/lock/payment still settling)? The chain's
