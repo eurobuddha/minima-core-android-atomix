@@ -1,5 +1,9 @@
 # AtomiX changes
 
+## 0.1.48 — 2026-09-09
+
+Ask ladder backing uses the small balance sendable total instead of enumerating coins. Keeps cumulative prefix trimming and the existing fail-safe publish path. The default three-confirmation balance is more conservative than the old one-confirmation read. Validation: 204 tests passed in each build variant.
+
 ## 0.1.47 — 2026-09-09
 
 Manual Wallet consolidation with Preview and Run once, fresh balance/pending checks, a persisted confirmation wait and the existing SignGate. Coin reservations now span both engines; consolidation and new Minima locks exclude each other. Node errors retain the message returned by consolidate. No automatic consolidation or spending loop.

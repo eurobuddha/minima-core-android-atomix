@@ -251,12 +251,8 @@ public final class SwapEngine {
         final int N = sym == null ? 0 : o.effectiveAsks(sym).size();
         if (N < 2 || !clamp) { if (afterPublish != null) afterPublish.run(); return; }   // single/no ladder, or no clamp → as-is
         final String fsym = sym;
-        minima.myFreeCoins(coins -> {
-            double totalFree = 0;                                            // sum of ALL free coins (multi-UTXO backing)
-            for (int i = 0; i < coins.length(); i++) {
-                org.json.JSONObject c = coins.optJSONObject(i);
-                if (c != null) totalFree += safeDouble(MinimaHtlc.coinAmount(c));
-            }
+        minima.tokenBalance(balance -> {
+            double totalFree = safeDouble(balance.sendable);
             // The responder locks a tranche by COMBINING coins (lockMinimaCounterLeg), like a wallet send — so
             // advertise the largest PREFIX of ask tranches whose CUMULATIVE amount the total free balance covers.
             // No "single coin ≥ tranche" gate, and no coin pre-splitting.
