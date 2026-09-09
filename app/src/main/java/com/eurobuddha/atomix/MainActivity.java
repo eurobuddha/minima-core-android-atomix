@@ -656,10 +656,9 @@ public class MainActivity extends AppCompatActivity {
      *  exactly what inflates the balance (e.g. shared order-book / HTLC / casino coins vs your simple coins). */
     private void minimaCoinDump() {
         toast("Reading coins…");
-        node.cmd("coins relevant:true tokenid:" + TradingContext.active().tokenId + " simplestate:false", new NodeApi.Cb() {
-            @Override public void onResult(JSONObject j) {
-                Object resp = j.opt("response");
-                JSONArray coins = resp instanceof JSONArray ? (JSONArray) resp : new JSONArray();
+        final String token = TradingContext.active().tokenId;
+        minima.myRelevantCoins(coins -> {
+                if (!token.equals(TradingContext.active().tokenId)) return;
                 StringBuilder sb = new StringBuilder();
                 sb.append("sendable ").append(Util.tidyAmount(minimaBal))
                   .append("   confirmed ").append(Util.tidyAmount(minimaConfirmed)).append("\n")
@@ -680,8 +679,17 @@ public class MainActivity extends AppCompatActivity {
                 }
                 sb.append("\nsum of relevant coins ").append(Util.tidyAmount(sum.toPlainString()));
                 showText("Coin breakdown", sb.toString());
-            }
-            @Override public void onError(String m) { showText("Coin breakdown", "Failed: " + m); }
+        }, m -> showText("Coin breakdown", "Failed: " + m), balance -> {
+            if (!token.equals(TradingContext.active().tokenId)) return;
+            modalOpen = true;
+            dialog().setTitle("Coin breakdown")
+                    .setMessage("Sendable: " + balance.sendable + "\nConfirmed: " + balance.confirmed
+                            + "\nUnconfirmed: " + balance.unconfirmed + "\nCoins: " + balance.coins
+                            + "\n\nThe detailed reply is too large to request safely from older nodes. "
+                            + "Consolidate spendable coins to bring the wallet below " + MinimaHtlc.maxSafeCoinRows(token) + " coins.")
+                    .setPositiveButton("Consolidate", (d, w) -> consolidateDialog())
+                    .setNegativeButton("Close", null)
+                    .setOnDismissListener(d -> { modalOpen = false; render(); }).show();
         });
     }
 
@@ -2347,7 +2355,7 @@ public class MainActivity extends AppCompatActivity {
             r.setText("Part " + (i + 1) + " · " + leg.minima + " " + ccy() + " @ " + fmtPrice(leg.price) + " → " + leg.usdt + " USDT · " + shortAddr(leg.maker.signerPk));
             r.setTextColor(Design.TEXT()); r.setTextSize(12f); r.setTypeface(Design.mono()); r.setPadding(0, dp(2), 0, dp(2));
             final String legPk = leg.maker.signerPk;   // RULE 1: long-press copies the full leg maker key
-            if (legPk != null && !legPk.isEmpty()) r.setOnLongClickListener(v -> { copy(legPk, "Counterparty key copied"); return true; });
+            if (legPk != null && !legPk.isEmpty()) r.setOnClickListener(v -> copy(legPk, "Counterparty key copied"));
             box.addView(r);
         }
 
@@ -2832,7 +2840,7 @@ public class MainActivity extends AppCompatActivity {
 
         String addrLine = ethAddr == null ? (ethErr == null ? "deriving from node seed…" : "—") : shortAddr(ethAddr);
         LinearLayout ethCard = walletCard("Ethereum · " + net.label, ethBal, addrLine, Design.TEXT());
-        if (ethAddr != null) ethCard.setOnClickListener(v -> receiveDialog());
+        if (ethAddr != null) ethCard.setOnClickListener(v -> copy(ethAddr, "Ethereum address copied"));
         col.addView(ethCard);
         ethBalView = (TextView) ethCard.findViewWithTag(TAG_BAL);
         tokenBalViews.clear();
@@ -3065,7 +3073,7 @@ public class MainActivity extends AppCompatActivity {
         meta.setTextColor(Design.DIM2()); meta.setTextSize(11.5f); meta.setTypeface(Design.sans()); meta.setPadding(0, dp(5), 0, 0);
         // NI-1 (RULE 1): the counterparty is shown truncated — long-press copies the FULL value.
         if (s.counterparty != null && !s.counterparty.isEmpty())
-            meta.setOnLongClickListener(v -> { copy(s.counterparty, "Counterparty copied"); return true; });
+            meta.setOnClickListener(v -> copy(s.counterparty, "Counterparty copied"));
         c.addView(meta);
 
         TextView detail = new TextView(this);
@@ -3434,7 +3442,7 @@ public class MainActivity extends AppCompatActivity {
         tag.setGravity(isBid ? Gravity.START : Gravity.END);
         // NI-1 (RULE 1): the displayed key is truncated — long-press copies the FULL value to the clipboard.
         if (!mine && maker.signerPk != null && !maker.signerPk.isEmpty())
-            tag.setOnLongClickListener(v -> { copy(maker.signerPk, "Counterparty key copied"); return true; });
+            tag.setOnClickListener(v -> copy(maker.signerPk, "Counterparty key copied"));
         half.addView(tag);
         if (!mine && cap > 0) {
             half.setOnClickListener(v -> takeOrderDialog(maker, sym, isBid, lvl.price, cap));
@@ -3833,7 +3841,7 @@ public class MainActivity extends AppCompatActivity {
             who.setTextColor(Design.DIM()); who.setTextSize(12f); who.setTypeface(Design.sans()); who.setPadding(0, dp(4), 0, dp(8)); box.addView(who);
             // NI-1 (RULE 1): the LP key is shown truncated — long-press copies the FULL value.
             if (o.signerPk != null && !o.signerPk.isEmpty())
-                who.setOnLongClickListener(v -> { copy(o.signerPk, "LP key copied"); return true; });
+                who.setOnClickListener(v -> copy(o.signerPk, "LP key copied"));
             LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
             if (o.sells()) {   // LP sells → I can BUY mxUSDT from them
                 TextView b = Design.pill(this, "Buy " + ccy(), Design.ACCENT(), Design.ON_ACCENT());

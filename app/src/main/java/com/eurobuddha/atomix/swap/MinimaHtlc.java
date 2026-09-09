@@ -373,9 +373,15 @@ public final class MinimaHtlc {
     }
 
     private void guardedCoinRead(String token, String command, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
+        guardedCoinRead(token, command, ok, err, null);
+    }
+
+    private void guardedCoinRead(String token, String command, Consumer<org.json.JSONArray> ok, Consumer<String> err,
+                                 Consumer<TokenBalance> oversized) {
         tokenBalance(token, balance -> {
             int cap = maxSafeCoinRows(token);
             if (balance.coins > cap) {
+                if (oversized != null) { oversized.accept(balance); return; }
                 err.accept(ERR_TOO_MANY_COINS + ": " + balance.coins + " coins, safe limit " + cap);
                 return;
             }
@@ -399,6 +405,11 @@ public final class MinimaHtlc {
     public void myRelevantCoins(Consumer<org.json.JSONArray> ok, Consumer<String> err) {
         String token = activeToken;
         guardedCoinRead(token, "coins relevant:true tokenid:" + token + " simplestate:true", ok, err);
+    }
+
+    public void myRelevantCoins(Consumer<org.json.JSONArray> ok, Consumer<String> err, Consumer<TokenBalance> oversized) {
+        String token = activeToken;
+        guardedCoinRead(token, "coins relevant:true tokenid:" + token + " simplestate:true", ok, err, oversized);
     }
 
     /** Is there any UNCONFIRMED native mxUSDT in my wallet (a split/lock/payment still settling)? The chain's
@@ -500,14 +511,6 @@ public final class MinimaHtlc {
         seq.add("txnsign id:" + id + " publickey:" + owner);
         seq.add("txnpost id:" + id + " auto:true txndelete:true");
         runSeq(seq, last -> cb.ok(txpowOf(last)), e -> { deleteTxn(id); cb.err(e); });
-    }
-
-    /** Scan the shared HTLC address for coins (claimable orders / my locked coins). */
-    public void scanHtlcCoins(int depth, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
-        cmd("coins depth:" + depth + " relevant:false tokenid:" + activeToken + " address:" + HTLC_ADDRESS, r -> {
-            Object resp = r.opt("response");
-            ok.accept(resp instanceof org.json.JSONArray ? (org.json.JSONArray) resp : new org.json.JSONArray());
-        }, err);
     }
 
     /**

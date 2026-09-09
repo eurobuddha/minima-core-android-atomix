@@ -1,5 +1,9 @@
 # AtomiX changes
 
+## 0.1.50 — 2026-09-09
+
+Wallet coin breakdown uses the preflight guard and shows the already-fetched balance summary with a Consolidate action when enumeration is unsafe. Removed the unused unguarded HTLC scan and made truncated counterparty/address displays copy the full value with one tap. Validation: 206 tests passed per build; release APK and lintVitalRelease passed.
+
 ## 0.1.49 — 2026-09-09
 
 Prioritized the live stalled-swap investigation. Inspection now distinguishes scan failure from absence, prints the actual 1,024-block search depth, includes the full hashlock and recorded transaction IDs, and never promises Ethereum collection without the secret. No change to transaction retry or settlement authorization. Validation: 206 tests passed per build, release APK and lintVitalRelease passed; installed in place on S23 and Z Fold.
