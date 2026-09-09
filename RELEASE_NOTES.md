@@ -1,5 +1,9 @@
 # AtomiX changes
 
+## 0.1.49 — 2026-09-09
+
+Prioritized the live stalled-swap investigation. Inspection now distinguishes scan failure from absence, prints the actual 1,024-block search depth, includes the full hashlock and recorded transaction IDs, and never promises Ethereum collection without the secret. No change to transaction retry or settlement authorization. Validation: 206 tests passed per build, release APK and lintVitalRelease passed; installed in place on S23 and Z Fold.
+
 ## 0.1.48 — 2026-09-09
 
 Ask ladder backing uses the small balance sendable total instead of enumerating coins. Keeps cumulative prefix trimming and the existing fail-safe publish path. The default three-confirmation balance is more conservative than the old one-confirmation read. Validation: 204 tests passed in each build variant.

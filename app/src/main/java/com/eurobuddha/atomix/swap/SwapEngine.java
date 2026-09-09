@@ -500,21 +500,25 @@ public final class SwapEngine {
                         if (isMyPublishKey(MinimaHtlc.stateAt(c, 4))) counterMinimaCoin = c; // a coin locked to me
                     }
                     final JSONObject myMin = myMinimaCoin, cpMin = counterMinimaCoin;
-                    submitIo(() -> reportInspection(s, hash, block, myMin, cpMin, cb), onStopped);
-                }, err -> submitIo(() -> reportInspection(s, hash, block, null, null, cb), onStopped));
+                    submitIo(() -> reportInspection(s, hash, block, myMin, cpMin, null, cb), onStopped);
+                }, err -> submitIo(() -> reportInspection(s, hash, block, null, null, err, cb), onStopped));
             }
-            @Override public void err(String m) { submitIo(() -> reportInspection(s, hash, -1, null, null, cb), onStopped); }
+            @Override public void err(String m) { submitIo(() -> reportInspection(s, hash, -1, null, null, m, cb), onStopped); }
         });
     }
 
     /** [io] compose the inspection report from the Minima coins (already scanned) + a live ETH getContract read. */
-    private void reportInspection(SwapDb.Swap s, String hash, int block, JSONObject myMin, JSONObject cpMin, InspectCb cb) {
+    private void reportInspection(SwapDb.Swap s, String hash, int block, JSONObject myMin, JSONObject cpMin, String scanError, InspectCb cb) {
         java.util.List<String> L = new java.util.ArrayList<>();
         try {
-            boolean sell = "MINIMA_TO_ERC20".equals(s.direction);   // I sold mxUSDT → counter leg is ETH USDT
+            boolean sell = s.myLegIsMinima;
             boolean secretKnown = db.getSecret(hash) != null;
             L.add((sell ? "Sell " : "Buy ") + s.sellAmount + " " + s.sellToken + " → " + s.buyAmount + " " + s.buyToken
                     + "  ·  " + s.status.toLowerCase());
+            L.add("Hashlock: " + hash);
+            L.add("Minima lookup: " + (scanError == null ? "completed, depth " + REFUND_SCAN_DEPTH + ", minimum coin age 2"
+                    : "FAILED — " + scanError + ". Leg presence is unknown; this is not evidence of a missing or spent coin."));
+            if (block > 0) L.add("Node block: " + block + " · recorded refund block: " + (s.myLegIsMinima ? s.myTimelock : "not your Minima leg"));
             EthHtlc eth = new EthHtlc(rpc, wallet.creds(), net);
 
             // ---- my leg ----
@@ -524,17 +528,16 @@ public final class SwapEngine {
                     int tl = parseInt(MinimaHtlc.stateAt(myMin, 3));
                     L.add(myLeg + "LOCKED — refundable at block " + tl
                             + (block > 0 ? " (~" + Math.max(0, (tl - block)) * 50 / 60 + " min)" : ""));
+                } else if (scanError != null) {
+                    L.add(myLeg + "UNKNOWN — node lookup failed");
                 } else if (SwapDb.ST_REFUNDED.equals(s.status)) {
                     L.add(myLeg + "refunded");
                 } else if (SwapDb.ST_COMPLETE.equals(s.status)) {
                     L.add(myLeg + "claimed by the counterparty (complete)");
                 } else {
-                    // NOT proof the coin is gone. This scan only walks back HTLC_SCAN_DEPTH blocks, so a coin
-                    // that is still fully locked reads as "not found" once it is older than that. Saying
-                    // "spent/claimed" here told a user their funds had moved when they had not.
-                    L.add(myLeg + "not found in the last " + HTLC_SCAN_DEPTH + " blocks — this does NOT mean it was"
-                            + " spent. A lock older than that is outside the scan; check the coin directly before"
-                            + " assuming anything.");
+                    L.add(myLeg + "no matching unspent coin returned by the " + REFUND_SCAN_DEPTH
+                            + "-block lookup. The saved lock record alone does not prove broadcast or confirmation."
+                            + " Check the recorded transaction below; a spent/refunded coin or older unavailable history can also produce an empty result.");
                 }
             } else {
                 boolean stillLocked = eth.canCollect(s.contractId);
@@ -552,10 +555,12 @@ public final class SwapEngine {
                 if (gc == null) {
                     L.add("• Counterparty " + s.buyToken + " leg: NOT FOUND yet — the maker hasn't locked it.");
                 } else {
-                    boolean claimable = !gc.withdrawn && !gc.refunded;
+                    boolean open = !gc.withdrawn && !gc.refunded;
+                    boolean claimable = open && secretKnown;
                     L.add("• Counterparty " + s.buyToken + " leg: FOUND " + EthWallet.format(gc.amount, decimalsOf(gc.tokenContract), 6)
-                            + " " + s.buyToken + (claimable ? " — claimable now" : (gc.withdrawn ? " — withdrawn (complete)" : " — refunded")));
-                    if (claimable) L.add("→ Claiming on the next poll — your " + s.buyToken + " arrives shortly.");
+                            + " " + s.buyToken + " — " + ethClaimStatus(gc, secretKnown));
+                    if (claimable) L.add("The settlement poll can attempt collection, subject to amount/token validation and gas.");
+                    else if (open) L.add("Waiting for the counterparty to claim the Minima leg and reveal the secret. Ethereum funds cannot be collected without it.");
                     else if (gc.refunded) L.add("→ Maker's leg timed out & refunded; your " + s.sellToken + " auto-refunds at block " + s.myTimelock + ".");
                 }
             } else {
@@ -563,13 +568,16 @@ public final class SwapEngine {
                 if (cpMin != null) {
                     L.add("• Counterparty " + s.buyToken + " leg: FOUND " + MinimaHtlc.coinAmount(cpMin) + " " + s.buyToken + " — "
                             + (secretKnown ? "claimable now (claiming on the next poll)" : "waiting for the secret"));
+                } else if (scanError != null) {
+                    L.add("• Counterparty " + s.buyToken + " leg: UNKNOWN — node lookup failed");
                 } else {
-                    L.add("• Counterparty " + s.buyToken + " leg: NOT FOUND — not locked yet, <2 confirmations old, or already spent.");
+                    L.add("• Counterparty " + s.buyToken + " leg: no matching unspent coin returned — may be unposted, younger than 2 confirmations, spent/refunded, or outside available history.");
                 }
             }
 
-            L.add("• Secret: " + (secretKnown ? "known (you can claim)" : "not revealed yet"));
+            L.add("• Secret: " + (secretKnown ? "known locally; collection also requires a valid matching leg" : "not revealed yet"));
             for (SwapDb.Event e : db.getEvents(hash)) {
+                if (e.note != null && MinimaHtlc.isHex(e.note)) L.add("Recorded " + e.event + " transaction: " + e.note);
                 String n = e.note == null ? "" : e.note.toLowerCase();
                 if (n.contains("mismatch") || n.contains("invalid") || n.contains("incorrect")
                         || n.contains("too close") || n.contains("fail")) L.add("⚠ " + e.note);
@@ -581,6 +589,12 @@ public final class SwapEngine {
         }
         final java.util.List<String> out = L;
         ui.post(() -> cb.report(out));
+    }
+
+    static String ethClaimStatus(EthHtlc.Contract contract, boolean secretKnown) {
+        if (contract.withdrawn) return "withdrawn (complete)";
+        if (contract.refunded) return "refunded";
+        return secretKnown ? "locked; secret available for collection" : "locked; waiting for the secret";
     }
 
     // ============================================================ watcher poll
