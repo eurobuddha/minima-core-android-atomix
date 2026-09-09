@@ -62,5 +62,7 @@ public class WriteSafetyTest {
         assertFalse(WriteSafety.completeReply(new JSONObject().put("response", "unknown")));
         assertFalse(WriteSafety.completeReply(new JSONObject().put("status", "true")));
         assertTrue(WriteSafety.completeReply(new JSONObject().put("status", false)));
+        assertFalse(WriteSafety.completeReply(new JSONObject().put("status", true).put("pending", true)));
+        assertFalse(WriteSafety.completeReply(new JSONObject().put("status", false).put("response", "Result too long! MAX(256000)")));
     }
 }

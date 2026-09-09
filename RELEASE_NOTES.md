@@ -1,5 +1,9 @@
 # AtomiX changes
 
+## 0.1.57
+
+- Retain the interrupted-write safety marker for pending approvals and oversized-result stubs. Neither response proves a write outcome.
+
 ## 0.1.56
 
 - Reject missing/truncated Ethereum contract tuples and invalid booleans. A failed read no longer looks like a missing, claimed or refunded leg; only a valid zero-owner tuple means no contract.

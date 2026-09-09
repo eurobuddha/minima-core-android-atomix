@@ -14,7 +14,14 @@ final class WriteSafety {
                 || verb.equals("consolidate") || verb.equals("tokencreate");
     }
     static boolean completeReply(JSONObject reply) {
-        return reply != null && (reply.opt("status") instanceof Boolean || Boolean.FALSE.equals(reply.opt("enabled")));
+        if (reply == null || Boolean.TRUE.equals(reply.opt("pending"))) return false;
+        Object response = reply.opt("response");
+        // PandaPools NodeApi.isTooLong: the node may replace a write result with an over-limit stub.
+        if (Boolean.FALSE.equals(reply.opt("status")) && response instanceof String) {
+            String text = ((String) response).toLowerCase(java.util.Locale.ROOT);
+            if (text.contains("too long") || text.contains("max(256000)")) return false;
+        }
+        return reply.opt("status") instanceof Boolean || Boolean.FALSE.equals(reply.opt("enabled"));
     }
     static synchronized boolean begin(SharedPreferences prefs, String id) {
         if (!prefs.getString("pending", "").isEmpty()) return false;
