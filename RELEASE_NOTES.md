@@ -1,5 +1,10 @@
 # AtomiX changes
 
+## 0.1.54
+
+- Reuse PandaPools interrupted-write protection: persist before node signing/posting, pause new writes if the outcome is unknown, and require restart/reconciliation before a manual reset. A late reply cannot clear a newer write.
+- Keep node callbacks alive through Activity teardown so transaction chains and operation markers can finish.
+
 ## 0.1.53
 
 - After the counterparty refunds, only describe Minima recovery as available when a lock is actually visible. An absent lock requires transaction verification; it is not a promise of an automatic refund.

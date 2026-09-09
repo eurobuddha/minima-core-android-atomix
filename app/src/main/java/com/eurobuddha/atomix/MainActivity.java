@@ -694,6 +694,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showText(String title, String body) {
+        if (isFinishing() || isDestroyed()) return;
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(20), dp(12), dp(20), dp(4));
@@ -1786,6 +1787,7 @@ public class MainActivity extends AppCompatActivity {
     // ---- render dispatcher ----
 
     private void render() {
+        if (isFinishing() || isDestroyed()) return;
         // Never rebuild the view tree while a dialog with text inputs is open — a background render
         // (watcher / balance callback) restarts the IME and resets the cursor mid-typing. We re-render
         // once when the dialog dismisses. (All text entry lives in guarded dialogs, never inline in a tab.)
@@ -2821,6 +2823,19 @@ public class MainActivity extends AppCompatActivity {
     // ---- Wallet tab ----
 
     private void renderWalletTab(LinearLayout col) {
+        if (node != null && node.hasInterruptedWrite()) {
+            TextView resolve = Design.pill(this, "Resolve interrupted write", Design.SURFACE2(), Design.RED());
+            resolve.setOnClickListener(v -> new AlertDialog.Builder(this)
+                    .setTitle("Resolve interrupted write")
+                    .setMessage("A node write lost its reply and may have completed. First restart MinimaCore to stop any old command, "
+                            + "then check your transactions and balances. Clearing this pause does not undo or retry a transaction.")
+                    .setNegativeButton("Keep paused", null)
+                    .setPositiveButton("I restarted and checked", (d, w) -> {
+                        toast(node.acknowledgeInterruptedWrite() ? "Pause cleared. Review balances before starting a new trade." : "A write is still active; keep paused.");
+                        render();
+                    }).show());
+            col.addView(resolve);
+        }
         LinearLayout minimaCard = walletCard("Minima · available to swap", Util.fmt5(minimaBal) + " " + ccy(), minimaBreakdown() + "  ·  long-press for coins", Design.ACCENT());
         minimaCard.setOnLongClickListener(v -> { minimaCoinDump(); return true; });
         col.addView(minimaCard);
@@ -4121,6 +4136,7 @@ public class MainActivity extends AppCompatActivity {
     private final SwapEngine.Notifier notifier = new SwapEngine.Notifier() {
         @Override public void notify(String title, String body) { ui.post(() -> postNotification(title, body)); }
         @Override public void onSwapsChanged() { ui.post(() -> {
+            if (isFinishing() || isDestroyed()) return;
             // Drop the sticky action line ("Buy started — maker notified" / "Sweep done…") once everything has settled.
             if (sweepRun == null && activeSwapCount() == 0) orderStatus = null;
             render();

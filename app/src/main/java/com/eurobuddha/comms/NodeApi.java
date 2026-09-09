@@ -33,6 +33,16 @@ public class NodeApi {
     /** Returned as the error message when the node says we are not enabled yet. */
     public static final String ERR_NOT_ENABLED = "NOT_ENABLED";
 
+    public static final String ERR_WRITE_UNCERTAIN = "A node write lost its reply and may still complete. New signing is paused. "
+            + "Check Activity, then use Wallet → Resolve interrupted write.";
+    private boolean destroyRequested;
+    private android.content.SharedPreferences writePrefs() {
+        return mContext.getSharedPreferences("atomix_write_safety", Context.MODE_PRIVATE);
+    }
+    public boolean hasInterruptedWrite() { return WriteSafety.interrupted(writePrefs()); }
+    /** Invoked only by the explicit restart-and-reconcile action in Wallet. */
+    public boolean acknowledgeInterruptedWrite() { return WriteSafety.acknowledge(writePrefs()); }
+
     private static final long READ_TIMEOUT_MS = 30000;
     private static final long WRITE_TIMEOUT_MS = 180000;   // build + proof-of-work + post is slow on mobile
 
@@ -44,7 +54,7 @@ public class NodeApi {
     /** Transaction/PoW commands can take a long time on a phone; reads are quick. */
     private static long timeoutFor(String command) {
         String c = command == null ? "" : command.trim();
-        if (c.startsWith("send") || c.startsWith("consolidate") || c.startsWith("txnsign")
+        if (WriteSafety.writesFunds(c) || c.startsWith("send") || c.startsWith("consolidate") || c.startsWith("txnsign")
                 || c.startsWith("txnpost") || c.startsWith("tokencreate") || c.startsWith("txnbasics")) {
             return WRITE_TIMEOUT_MS;
         }
@@ -129,10 +139,18 @@ public class NodeApi {
     }
 
     public void cmd(String command, Cb cb) {
+        if (Looper.myLooper() != Looper.getMainLooper()) { mMain.post(() -> cmd(command, cb)); return; }
+        if (command == null || command.trim().isEmpty()) { if (cb != null) cb.onError("Empty node command"); return; }
         // MA-11: after release, deliver an async onError rather than returning silently — a caller that set a
         // `running`/in-flight flag before calling (CommsScanner, the SignGate lambda) would otherwise hang
         // forever waiting for a callback that never arrives. Async (mMain.post) matches the normal delivery.
         if (mReleased) { if (cb != null) mMain.post(() -> cb.onError("released")); return; }
+        final boolean funds = WriteSafety.writesFunds(command) && !command.matches(".*(?:^|\\s)dryrun:true(?:\\s|$).*");
+        final String writeId = java.util.UUID.randomUUID().toString();
+        if (funds && !WriteSafety.begin(writePrefs(), writeId)) {
+            if (cb != null) mMain.post(() -> cb.onError(ERR_WRITE_UNCERTAIN));
+            return;
+        }
         final boolean isWrite = timeoutFor(command) == WRITE_TIMEOUT_MS;
         if (isWrite) mPendingWrites++;
         final boolean[] done = {false};
@@ -148,16 +166,20 @@ public class NodeApi {
             // The "paired-then-node-died" detector touches the pairing listener, so skip it on a dead host;
             // but still deliver the error so the caller (scanner/SignGate lambda) never hangs (MA-11 parity).
             if (!dead() && mPendingWrites == 0 && ++mConsecTimeouts >= TIMEOUTS_TO_UNPAIR) noteEnabled(false);
-            if (cb != null) cb.onError("Minima Core didn't respond. Is it installed, running and enabled?");
+            if (funds) WriteSafety.uncertain(writeId);
+            try { if (cb != null) cb.onError(funds ? ERR_WRITE_UNCERTAIN : "Minima Core didn't respond. Is it installed, running and enabled?"); }
+            finally { finishDestroy(); }
         };
         ref[0] = timeout;
         mPending.add(timeout);
         mMain.postDelayed(timeout, timeoutFor(command));
 
-        mApi.Command(command, new MinimaAPIListener() {
+        try { mApi.Command(command, new MinimaAPIListener() {
             @Override
             public void response(JSONObject zResponse) {
                 mMain.post(() -> {
+                    // A late complete reply resolves only this write's durable marker; never a newer one.
+                    if (funds) WriteSafety.returned(writePrefs(), writeId, WriteSafety.completeReply(zResponse));
                     if (done[0]) return;
                     done[0] = true;
                     mMain.removeCallbacks(timeout);
@@ -167,32 +189,47 @@ public class NodeApi {
                     // (pairing state isn't a view).
                     mLastOkMs = System.currentTimeMillis();
                     mConsecTimeouts = 0;
-                    // MA-12: bail AFTER the bookkeeping above (pending-write / timeout counters must stay
-                    // consistent) but BEFORE delivering into a released wrapper or a dead view.
-                    if (mReleased || dead()) return;
+                    // Keep transaction callbacks alive even after Activity teardown; UI consumers guard their views.
+                    if (mReleased) return;
+                    try {
+                    if (!WriteSafety.completeReply(zResponse)) {
+                        if (cb != null) cb.onError(funds ? ERR_WRITE_UNCERTAIN : "Incomplete node reply");
+                        return;
+                    }
 
                     // "enabled":false only appears on the gating reply; real command
                     // responses omit the key, so default true.
                     if (!zResponse.optBoolean("enabled", true)) {
-                        noteEnabled(false);
+                        if (!dead()) noteEnabled(false);
                         if (cb != null) cb.onError(ERR_NOT_ENABLED);
                         return;
                     }
                     // A successful command means the node ran it as an enabled app — if we thought we
                     // were unpaired (e.g. the register reply got lost), this is the recovery signal.
-                    noteEnabled(true);
+                    if (!dead()) noteEnabled(true);
                     if (cb != null) cb.onResult(zResponse);
+                    } catch (RuntimeException callbackFailure) {
+                        if (funds) WriteSafety.callbackFailed(writePrefs(), writeId);
+                        if (cb != null) try { cb.onError(funds ? ERR_WRITE_UNCERTAIN : "Bad node reply"); } catch (RuntimeException ignored) {}
+                    } finally { finishDestroy(); }
                 });
             }
-        });
+        }); } catch (RuntimeException dispatchFailure) {
+            mMain.removeCallbacks(timeout);
+            timeout.run();
+        }
     }
 
     public void onDestroy() {
+        destroyRequested = true;
+        finishDestroy();
+    }
+
+    private void finishDestroy() {
+        // Keep the SDK alive until callback chains finish, as in PandaPools NodeApi. A screen closing
+        // cannot silently discard a sign/post reply and strand the shared gate or operation marker.
+        if (!destroyRequested || mReleased || !mPending.isEmpty()) return;
         mReleased = true;
-        for (Runnable r : mPending) mMain.removeCallbacks(r);
-        mPending.clear();
-        // MI-8: guard the third-party SDK teardown so a throw can't propagate out of Activity/Service.onDestroy
-        // (matches reRegister's guarded onDestroy above).
         if (mApi != null) try { mApi.onDestroy(); } catch (Exception ignored) {}
     }
 }
