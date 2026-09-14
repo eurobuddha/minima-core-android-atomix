@@ -72,4 +72,35 @@ public class TradingContextTest {
 
         TradingContext.setActive(TradingContext.MXUSDT, prefs);   // restore default for other tests
     }
+
+    // ---- attributing a recorded swap to its market (history scoping, 0.1.58) ----
+
+    @Test public void coinLabelsMapBackToTheirMarket() {
+        assertSame(TradingContext.MINIMA, TradingContext.forCoinLabel("MINIMA"));
+        assertSame(TradingContext.MXUSDT, TradingContext.forCoinLabel("mxUSDT"));
+        // The dollar token is properly MxUSD; rows on disk say "mxUSDT". BOTH must attribute, so a later
+        // label rename can never orphan the history already written under the old spelling.
+        assertSame(TradingContext.MXUSDT, TradingContext.forCoinLabel("MxUSD"));
+        assertSame(TradingContext.MINIMA, TradingContext.forCoinLabel("  minima  "));
+    }
+
+    @Test public void ethereumLegSymbolsAreNotAMarket() {
+        // "USDT" is the ERC20 leg of EVERY swap in BOTH markets — matching it would attribute every row to
+        // the dollar market and re-create the bug this map exists to fix.
+        assertNull(TradingContext.forCoinLabel("USDT"));
+        assertNull(TradingContext.forCoinLabel("WETH"));
+        assertNull(TradingContext.forCoinLabel(""));
+        assertNull(TradingContext.forCoinLabel(null));
+    }
+
+    @Test public void forSwapReadsWhicheverLegIsTheMinimaOne() {
+        // The two real shapes: sell the Minima leg, or buy it.
+        assertSame(TradingContext.MINIMA, TradingContext.forSwap("MINIMA", "USDT"));
+        assertSame(TradingContext.MXUSDT, TradingContext.forSwap("USDT", "mxUSDT"));
+        assertSame(TradingContext.MXUSDT, TradingContext.forSwap("mxUSDT", "USDT"));
+        assertSame(TradingContext.MINIMA, TradingContext.forSwap("USDT", "MINIMA"));
+        // Neither leg attributable → null, and callers must SHOW such a row rather than hide it.
+        assertNull(TradingContext.forSwap("USDT", "WETH"));
+        assertNull(TradingContext.forSwap(null, null));
+    }
 }

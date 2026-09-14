@@ -106,4 +106,35 @@ public enum TradingContext {
         if (tokenid != null) for (TradingContext c : values()) if (c.tokenId.equalsIgnoreCase(tokenid)) return c.coinLabel;
         return active().coinLabel;
     }
+
+    // ---- attributing a RECORDED swap to its market (history scoping) ----
+
+    /**
+     * The market a Minima-side coin LABEL belongs to, or null for an Ethereum-leg symbol ("USDT", "WETH", …)
+     * or an unrecognised legacy label.
+     *
+     * <p>Swap rows persist the label that was current when they were written ({@link #coinLabel}, stamped by
+     * SwapEngine.baseSwap), so this accepts the dollar token's ALIASES too: the Minima dollar token is properly
+     * MxUSD, and rows already on disk carry "mxUSDT". Matching both means a later label rename can never orphan
+     * existing history.
+     *
+     * <p>Deliberately does NOT match the bare "USDT" — that is the ERC20 leg's symbol on EVERY swap in BOTH
+     * markets, so matching it would attribute every row to the dollar market.
+     */
+    public static TradingContext forCoinLabel(String label) {
+        if (label == null) return null;
+        String l = label.trim();
+        if (l.isEmpty()) return null;
+        for (TradingContext c : values()) if (c.coinLabel.equalsIgnoreCase(l)) return c;
+        if (l.equalsIgnoreCase("mxUSD") || l.equalsIgnoreCase("mxUSDT")) return MXUSDT;
+        if (l.equalsIgnoreCase("MINIMA")) return MINIMA;
+        return null;
+    }
+
+    /** The market a recorded swap belongs to — whichever of its two legs carries a Minima-side label. Returns
+     *  null when neither does (an unattributable legacy row); callers MUST show such a row, never hide it. */
+    public static TradingContext forSwap(String sellToken, String buyToken) {
+        TradingContext c = forCoinLabel(sellToken);
+        return c != null ? c : forCoinLabel(buyToken);
+    }
 }

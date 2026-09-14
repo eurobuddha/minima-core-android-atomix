@@ -3000,6 +3000,7 @@ public class MainActivity extends AppCompatActivity {
         List<SwapDb.Swap> show = new java.util.ArrayList<>();
         int hidden = 0;
         for (SwapDb.Swap s : db.allSwaps()) {
+            if (!visibleHere(s)) continue;   // another market's finished history — it lives on ITS Activity tab
             if (dismissed.contains(s.hash) || (isTerminal(s) && now - s.updated > TERMINAL_GRACE_MS)) { hidden++; continue; }
             show.add(s);
         }
@@ -3056,10 +3057,14 @@ public class MainActivity extends AppCompatActivity {
         if (historyTab == 0) mySwapsList(col); else marketView(col);
     }
 
+    /** History for the SELECTED market only (plus any still-actionable swap in the other one — visibleHere).
+     *  Without the scope this listed both currencies at once, so switching to MINIMA still showed the dollar
+     *  history: the rows carry their market in sellToken/buyToken, the list just never read it. */
     private void mySwapsList(LinearLayout col) {
         if (db == null) return;
-        java.util.List<SwapDb.Swap> all = db.allSwaps();
-        if (all.isEmpty()) { col.addView(dimNote("No swaps yet — your completed and refunded swaps will appear here.")); return; }
+        java.util.List<SwapDb.Swap> all = new java.util.ArrayList<>();
+        for (SwapDb.Swap s : db.allSwaps()) if (visibleHere(s)) all.add(s);
+        if (all.isEmpty()) { col.addView(dimNote("No " + ccy() + " swaps yet — your completed and refunded swaps will appear here.")); return; }
         for (SwapDb.Swap s : all) col.addView(historySwapCard(s));
     }
 
@@ -3173,7 +3178,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private static boolean isTerminal(SwapDb.Swap s) {
-        return SwapDb.ST_COMPLETE.equals(s.status) || SwapDb.ST_REFUNDED.equals(s.status) || SwapDb.ST_ERROR.equals(s.status);
+        return com.eurobuddha.atomix.swap.SwapVisibility.isTerminal(s);
+    }
+
+    /** Does this swap belong on screen in the currently-selected market? Its own currency always; the OTHER
+     *  currency only while it is still actionable — see SwapVisibility for the rule and why it fails open. */
+    private boolean visibleHere(SwapDb.Swap s) {
+        return com.eurobuddha.atomix.swap.SwapVisibility.visibleIn(
+                s, TradingContext.active(), chainBlock, System.currentTimeMillis());
     }
 
     private java.util.Set<String> dismissedSwaps() {
@@ -4068,16 +4080,20 @@ public class MainActivity extends AppCompatActivity {
                 java.util.List<SwapDb.Swap> all = db.allSwaps();
                 SimpleDateFormat fmt = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ENGLISH);
                 fmt.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                // Currency is APPENDED, never inserted, and no existing header is renamed: the reconciliation
+                // ledger (tools/dexHistory/atomix_ledger.py) reads these columns BY NAME, "Price (USDT/MINIMA)"
+                // included. Renaming that header to something currency-neutral would break a working ledger for
+                // a cosmetic gain — the new Currency column already says which coin the price is denominated in.
                 StringBuilder sb = new StringBuilder(
-                    "Date,Role,Direction,Sold Amount,Sold Token,Bought Amount,Bought Token,Price (USDT/MINIMA),Counterparty,Status,Contract Id,Minima Tx,Eth Tx\r\n");
+                    "Date,Role,Direction,Sold Amount,Sold Token,Bought Amount,Bought Token,Price (USDT/MINIMA),Counterparty,Status,Contract Id,Minima Tx,Eth Tx,Currency\r\n");
                 for (SwapDb.Swap s : all) {
                     java.util.List<SwapDb.Event> ev = db.getEvents(s.hash);
                     String date = s.created > 0 ? fmt.format(new Date(s.created)) : "";
                     String[] cells = {
-                        date, roleLabel(s.role), dirLabel(s.direction),
+                        date, roleLabel(s.role), dirLabel(s),
                         s.sellAmount, tokLabel(s.sellToken), s.buyAmount, tokLabel(s.buyToken), priceUsdtPerMinima(s),
                         s.counterparty, s.status == null ? "" : s.status.toLowerCase(Locale.ENGLISH),
-                        s.contractId, pickTx(ev, true), pickTx(ev, false)
+                        s.contractId, pickTx(ev, true), pickTx(ev, false), ccyLabel(s)
                     };
                     for (int i = 0; i < cells.length; i++) { if (i > 0) sb.append(','); sb.append(csvCell(cells[i])); }
                     sb.append("\r\n");
@@ -4094,13 +4110,33 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private static String roleLabel(String r) { return "RESPONDER".equals(r) ? "Maker" : ("INITIATOR".equals(r) ? "Taker" : (r == null ? "" : r)); }
-    private static String dirLabel(String d) { return "MINIMA_TO_ERC20".equals(d) ? "Sell MINIMA" : ("ERC20_TO_MINIMA".equals(d) ? "Buy MINIMA" : (d == null ? "" : d)); }
+    /** The market a recorded swap traded in, for the CSV's Currency column. "" when unattributable. */
+    private static String ccyLabel(SwapDb.Swap s) {
+        TradingContext c = TradingContext.forSwap(s.sellToken, s.buyToken);
+        return c == null ? "" : c.coinLabel;
+    }
+
+    /** "Sell <coin>" / "Buy <coin>" where <coin> is the row's OWN Minima-leg coin. The direction constants are
+     *  shared by both markets (MINIMA_TO_ERC20 is used for mxUSDT swaps too), so a hard-coded "MINIMA" here
+     *  labelled every dollar swap as a Minima one. */
+    private static String dirLabel(SwapDb.Swap s) {
+        String d = s.direction;
+        TradingContext c = TradingContext.forSwap(s.sellToken, s.buyToken);
+        String coin = c == null ? "MINIMA" : c.coinLabel;
+        if ("MINIMA_TO_ERC20".equals(d)) return "Sell " + coin;
+        if ("ERC20_TO_MINIMA".equals(d)) return "Buy " + coin;
+        return d == null ? "" : d;
+    }
+    /** Normalise a stored leg label for the CSV: a raw tokenid becomes its coin label, an already-labelled
+     *  leg (including the legacy mxUSDT spelling) passes through its canonical TradingContext label, and an
+     *  Ethereum symbol ("USDT", "WETH") is left exactly as written. */
     private static String tokLabel(String t) {
         if (t == null) return "";
         String l = t.toLowerCase(Locale.ENGLISH);
         if (l.equals("0x00")) return "MINIMA";
-        if (l.contains("7d39745")) return "mxUSDT";
-        return t;
+        if (l.contains("7d39745")) return TradingContext.MXUSDT.coinLabel;
+        TradingContext c = TradingContext.forCoinLabel(t);
+        return c == null ? t : c.coinLabel;
     }
     /** USDT per MINIMA, comparable across both directions; blank if a leg amount is missing/zero. */
     private static String priceUsdtPerMinima(SwapDb.Swap s) {

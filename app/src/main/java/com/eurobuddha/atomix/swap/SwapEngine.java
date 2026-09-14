@@ -1542,10 +1542,9 @@ public final class SwapEngine {
      *  (backport from atomix-mds; fund gate: a maker could otherwise lock a WORTHLESS coloured token of the
      *  right AMOUNT, and amountTokenOk's currency-agnostic 'minima' literal would pass it). */
     static String expectedTokenId(SwapDb.Swap sw) {
-        if (sw != null && sw.buyToken != null)
-            for (com.eurobuddha.atomix.TradingContext c : com.eurobuddha.atomix.TradingContext.values())
-                if (c.coinLabel.equals(sw.buyToken)) return c.tokenId;
-        return com.eurobuddha.atomix.TradingContext.active().tokenId;
+        com.eurobuddha.atomix.TradingContext c =
+                sw == null ? null : com.eurobuddha.atomix.TradingContext.forCoinLabel(sw.buyToken);
+        return c != null ? c.tokenId : com.eurobuddha.atomix.TradingContext.active().tokenId;
     }
 
     /** Initiator's check that the counterparty locked at least what I asked, in the right token. */
