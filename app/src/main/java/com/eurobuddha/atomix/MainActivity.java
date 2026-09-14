@@ -3108,8 +3108,11 @@ public class MainActivity extends AppCompatActivity {
 
     private void marketView(LinearLayout col) {
         if (db == null) return;
-        java.util.List<SwapDb.MarketTrade> chartData = db.executedTrades(200);
-        java.util.List<SwapDb.MarketTrade> recent = db.recentTrades(50);
+        // The SELECTED market's prints only. Unscoped, the chart plotted mxUSD's parity ~1.00 alongside
+        // MINIMA's ~0.004 in one series, under an axis labelled with whichever currency happened to be active.
+        final String tok = TradingContext.active().tokenId;
+        java.util.List<SwapDb.MarketTrade> chartData = db.executedTrades(200, tok);
+        java.util.List<SwapDb.MarketTrade> recent = db.recentTrades(50, tok);
 
         MarketChartView chart = new MarketChartView(this);
         chart.setBackground(Design.card(this, 14));

@@ -250,7 +250,11 @@ public final class SwapDb {
 
     public static final class MarketTrade {
         public String coinid, hash, sizeMinima, reqAmount, reqToken, owner, receiver, status, secret;
-        public double price;          // USDT per mxUSDT = reqAmount / sizeMinima
+        /** The MARKET this print belongs to — the tokenid of the locked Minima leg. Without it both
+         *  currencies' prints share one series, and the ~200x price gap (mxUSD parity ~1.00 vs MINIMA
+         *  ~0.004) makes the chart meaningless after a currency switch. */
+        public String tokenId;
+        public double price;          // the counter-asset per locked coin = reqAmount / sizeMinima
         public long createdBlock, observedAt, timelock;
     }
 
@@ -260,29 +264,24 @@ public final class SwapDb {
      *  terminal row back to OPEN. */
     public synchronized void upsertOpenTrade(MarketTrade t) {
         if (t.coinid == null || t.coinid.isEmpty()) return;
-        ContentValues v = new ContentValues();
-        v.put("coinid", t.coinid);
-        v.put("hash", norm(t.hash));
-        v.put("price", t.price);
-        v.put("size_minima", t.sizeMinima);
-        v.put("req_amount", t.reqAmount);
-        v.put("req_token", t.reqToken);
-        v.put("owner", t.owner);
-        v.put("receiver", t.receiver);
-        v.put("created_block", t.createdBlock);
         // keep the first-seen observed_at; only set on insert
         helper.getWritableDatabase().execSQL(
                 "INSERT OR IGNORE INTO market_trades(coinid,hash,price,size_minima,req_amount,req_token,owner,"
-                        + "receiver,created_block,timelock,observed_at,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        + "receiver,created_block,timelock,observed_at,status,tokenid) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 new Object[]{t.coinid, norm(t.hash), t.price, t.sizeMinima, t.reqAmount, t.reqToken, t.owner,
-                        t.receiver, t.createdBlock, t.timelock, System.currentTimeMillis(), MT_OPEN});
+                        t.receiver, t.createdBlock, t.timelock, System.currentTimeMillis(), MT_OPEN,
+                        t.tokenId == null ? "" : t.tokenId});
     }
 
-    /** All trades still marked OPEN (so the collector can detect which were spent since last scan). */
-    public synchronized List<MarketTrade> openTrades() {
+    /** Trades still marked OPEN in ONE market, so the collector can detect which were spent since its last
+     *  scan. The token scope is MANDATORY, not a nicety: the scan that feeds the reconcile is itself
+     *  token-filtered, so an unscoped read handed the collector the OTHER currency's open locks — absent from
+     *  the scan through no fault of their own — and it duly marked every one of them EXECUTED or REFUNDED. */
+    public synchronized List<MarketTrade> openTrades(String tokenId) {
         List<MarketTrade> out = new ArrayList<>();
         try (Cursor c = helper.getReadableDatabase().rawQuery(
-                "SELECT * FROM market_trades WHERE status=?", new String[]{MT_OPEN})) {
+                "SELECT * FROM market_trades WHERE status=? AND tokenid=?",
+                new String[]{MT_OPEN, tokenId == null ? "" : tokenId})) {
             while (c.moveToNext()) out.add(readTrade(c));
         }
         return out;
@@ -301,23 +300,24 @@ public final class SwapDb {
         helper.getWritableDatabase().update("market_trades", v, "coinid=?", new String[]{coinid});
     }
 
-    /** Recent trades (any status), newest first by created block then observed time. */
-    public synchronized List<MarketTrade> recentTrades(int limit) {
+    /** Recent trades in ONE market (any status), newest first by created block then observed time. */
+    public synchronized List<MarketTrade> recentTrades(int limit, String tokenId) {
         List<MarketTrade> out = new ArrayList<>();
         try (Cursor c = helper.getReadableDatabase().rawQuery(
-                "SELECT * FROM market_trades ORDER BY created_block DESC, observed_at DESC LIMIT ?",
-                new String[]{String.valueOf(limit)})) {
+                "SELECT * FROM market_trades WHERE tokenid=? ORDER BY created_block DESC, observed_at DESC LIMIT ?",
+                new String[]{tokenId == null ? "" : tokenId, String.valueOf(limit)})) {
             while (c.moveToNext()) out.add(readTrade(c));
         }
         return out;
     }
 
-    /** Executed prints for the chart, oldest→newest so a line plots left-to-right. */
-    public synchronized List<MarketTrade> executedTrades(int limit) {
+    /** Executed prints for ONE market's chart, oldest→newest so a line plots left-to-right. */
+    public synchronized List<MarketTrade> executedTrades(int limit, String tokenId) {
         List<MarketTrade> out = new ArrayList<>();
         try (Cursor c = helper.getReadableDatabase().rawQuery(
-                "SELECT * FROM (SELECT * FROM market_trades WHERE status=? ORDER BY created_block DESC LIMIT ?) "
-                        + "ORDER BY created_block ASC", new String[]{MT_EXECUTED, String.valueOf(limit)})) {
+                "SELECT * FROM (SELECT * FROM market_trades WHERE status=? AND tokenid=? "
+                        + "ORDER BY created_block DESC LIMIT ?) ORDER BY created_block ASC",
+                new String[]{MT_EXECUTED, tokenId == null ? "" : tokenId, String.valueOf(limit)})) {
             while (c.moveToNext()) out.add(readTrade(c));
         }
         return out;
@@ -338,11 +338,13 @@ public final class SwapDb {
         t.observedAt = c.getLong(c.getColumnIndexOrThrow("observed_at"));
         t.status = c.getString(c.getColumnIndexOrThrow("status"));
         t.secret = c.getString(c.getColumnIndexOrThrow("secret"));
+        t.tokenId = c.getString(c.getColumnIndexOrThrow("tokenid"));
         return t;
     }
 
     private static final class Helper extends SQLiteOpenHelper {
-        Helper(Context ctx) { super(ctx, "atomix.db", null, 2); }
+        /** v2 added market_trades; v3 tagged its rows with the market they were observed in. */
+        Helper(Context ctx) { super(ctx, "atomix.db", null, 3); }
 
         @Override public void onCreate(SQLiteDatabase db) {
             db.execSQL("CREATE TABLE secrets (hash TEXT PRIMARY KEY, secret TEXT, added INTEGER)");
@@ -359,6 +361,7 @@ public final class SwapDb {
 
         @Override public void onUpgrade(SQLiteDatabase db, int oldV, int newV) {
             createMarket(db);   // v1→v2: add the market_trades table (idempotent)
+            tagMarketTokens(db);// v2→v3: tag each print with its market (idempotent)
         }
 
         @Override public void onDowngrade(SQLiteDatabase db, int oldV, int newV) {
@@ -372,7 +375,28 @@ public final class SwapDb {
         private void createMarket(SQLiteDatabase db) {
             db.execSQL("CREATE TABLE IF NOT EXISTS market_trades (coinid TEXT PRIMARY KEY, hash TEXT, "
                     + "price REAL, size_minima TEXT, req_amount TEXT, req_token TEXT, owner TEXT, receiver TEXT, "
-                    + "created_block INTEGER, timelock INTEGER, observed_at INTEGER, status TEXT, secret TEXT)");
+                    + "created_block INTEGER, timelock INTEGER, observed_at INTEGER, status TEXT, secret TEXT, "
+                    + "tokenid TEXT)");
+        }
+
+        /**
+         * v2→v3: give every market print the market it belongs to.
+         *
+         * <p>Rows written before this have no token at all, so they are back-attributed ONCE by price band.
+         * That is a heuristic, but a wide one: the dollar market is pegged at parity (~1.00) while MINIMA
+         * trades around 0.004, ~200x apart, so 0.5 sits in empty space between them. It only affects which
+         * chart a historical print is drawn on — no fund decision reads this column.
+         *
+         * <p>Idempotent by necessity: SQLite has no ADD COLUMN IF NOT EXISTS, and onDowngrade deliberately
+         * lets an older APK run against this schema (see below), so the upgrade can be re-entered on the next
+         * install. A duplicate-column error therefore means the work is already done, not that it failed.
+         */
+        private void tagMarketTokens(SQLiteDatabase db) {
+            try { db.execSQL("ALTER TABLE market_trades ADD COLUMN tokenid TEXT"); }
+            catch (Exception alreadyThere) { /* column exists — re-entered upgrade */ }
+            db.execSQL("UPDATE market_trades SET tokenid = CASE WHEN price >= 0.5 THEN ? ELSE ? END "
+                            + "WHERE tokenid IS NULL OR tokenid = ''",
+                    new Object[]{MinimaHtlc.USDT_TOKENID, MinimaHtlc.MINIMA_TOKENID});
         }
     }
 }

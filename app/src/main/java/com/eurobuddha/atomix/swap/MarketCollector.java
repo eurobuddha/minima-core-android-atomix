@@ -10,8 +10,9 @@ import java.util.Set;
 /**
  * Builds a NETWORK-WIDE trade history from on-chain HTLC locks (the market data feed). On-chain only shows
  * OPEN locks and the price-bearing coin is spent on completion, so there's no backfill — we poll the shared
- * HTLC address each watcher cycle, persist every observed lock {@code (price = reqUSDT/mxUSDT, size, hash,
- * block)}, then reconcile locks that have since been spent to EXECUTED (a notify coin revealed the secret) or
+ * HTLC address each watcher cycle, persist every observed lock {@code (price = reqUSDT/coin, size, hash,
+ * block, tokenid)}, then reconcile locks that have since been spent to EXECUTED (a notify coin revealed the
+ * secret) or
  * REFUNDED (no notify ⇒ refund; the KISS script forces a notify on every claim).
  *
  * Direction (taker buy vs sell) is NOT recoverable from the Minima coin — the counter-leg lives on Ethereum —
@@ -27,10 +28,13 @@ public final class MarketCollector {
     /** One collection cycle. Safe to call repeatedly from the 90s tick; all writes are idempotent. */
     public static void poll(MinimaHtlc minima, SwapDb db, int tipBlock) {
         if (minima == null || db == null || !minima.ready()) return;
-        minima.scanAllHtlcCoins(0, HTLC_DEPTH, coins -> ingest(minima, db, coins, tipBlock), e -> {});
+        // Capture the token the scan will actually run under, and carry it through ingest: everything this
+        // cycle observes or reconciles belongs to THIS market and must not touch the other one's rows.
+        final String token = minima.activeToken();
+        minima.scanAllHtlcCoins(0, HTLC_DEPTH, coins -> ingest(minima, db, coins, tipBlock, token), e -> {});
     }
 
-    private static void ingest(MinimaHtlc minima, SwapDb db, JSONArray coins, int tipBlock) {
+    private static void ingest(MinimaHtlc minima, SwapDb db, JSONArray coins, int tipBlock, String token) {
         Set<String> seen = new HashSet<>();
         for (int i = 0; i < coins.length(); i++) {
             JSONObject c = coins.optJSONObject(i);
@@ -52,11 +56,14 @@ public final class MarketCollector {
             t.receiver = MinimaHtlc.stateAt(c, 4);
             t.createdBlock = c.optLong("created", tipBlock);
             t.timelock = parseLong(MinimaHtlc.stateAt(c, 3));
+            t.tokenId = token;
             db.upsertOpenTrade(t);
             seen.add(coinid);
         }
-        // Any lock we had OPEN that's no longer in the scan has been spent → classify it.
-        for (SwapDb.MarketTrade open : db.openTrades()) {
+        // Any lock we had OPEN that's no longer in the scan has been spent → classify it. Scoped to the token
+        // we just scanned: the scan is token-filtered, so the OTHER currency's open locks are absent from it by
+        // construction, and reconciling them here marked every one EXECUTED or REFUNDED on a currency switch.
+        for (SwapDb.MarketTrade open : db.openTrades(token)) {
             if (!seen.contains(open.coinid)) reconcileSpent(minima, db, open, tipBlock);
         }
     }
