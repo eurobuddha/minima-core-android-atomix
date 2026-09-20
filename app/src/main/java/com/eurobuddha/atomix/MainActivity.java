@@ -4195,6 +4195,9 @@ public class MainActivity extends AppCompatActivity {
                 .setSmallIcon(android.R.drawable.stat_sys_upload_done)
                 .setContentTitle(title)
                 .setContentText(body)
+                // BigTextStyle so a full identifier (e.g. the ETH address in "Add ETH for gas") survives the
+                // shade instead of being ellipsised by the system — RULE 1. SwapService.alert already does this.
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
                 .setAutoCancel(true)
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT);
         nm.notify(notifId.incrementAndGet(), n.build());

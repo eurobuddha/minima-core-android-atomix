@@ -593,6 +593,19 @@ public final class SwapEngine {
         ui.post(() -> cb.report(out));
     }
 
+    /** Body of the "Add ETH for gas" notification. RULE 1: the wallet is named IN FULL, because this is the
+     *  one surface the user reads while the swap is blocked and a truncated address cannot be pasted into a
+     *  wallet. The old wording ("top up this wallet's ETH") named nothing at all — proven useless live on
+     *  2026-09-20, when a maker sat on 0 ETH through five blocked swaps and the prompt never said where to send.
+     *  A null address (wallet not derived yet) falls back to pointing at the Wallet tab rather than printing
+     *  "null" — the address is still exactly one tap away there, never abbreviated. */
+    static String gasShortfallMessage(String shortEth, String ethAddress) {
+        return "This swap needs about " + shortEth + " more ETH for gas. Send ETH on Ethereum to "
+                + (ethAddress == null || ethAddress.isEmpty()
+                        ? "this app's Ethereum wallet — open the Wallet tab to copy the address"
+                        : ethAddress);
+    }
+
     static String ethClaimStatus(EthHtlc.Contract contract, boolean secretKnown) {
         if (contract.withdrawn) return "withdrawn (complete)";
         if (contract.refunded) return "refunded";
@@ -1177,9 +1190,10 @@ public final class SwapEngine {
             if (lowEth.add(hash)) {   // once per hash, until the wallet clears the bar again
                 String shortEth = new BigDecimal(need.subtract(have)).movePointLeft(18)
                         .stripTrailingZeros().toPlainString();
-                SwapLog.w("swap " + hash + " BLOCKED: needs ~" + shortEth + " more ETH for gas");
-                ui.post(() -> notifier.notify("Add ETH for gas",
-                        "This swap needs about " + shortEth + " more ETH for gas — top up this wallet's ETH"));
+                final String gasAddr = wallet.address();
+                final String body = gasShortfallMessage(shortEth, gasAddr);
+                SwapLog.w("swap " + hash + " BLOCKED: needs ~" + shortEth + " more ETH for gas at " + gasAddr);
+                ui.post(() -> notifier.notify("Add ETH for gas", body));
             }
             return false;
         } catch (Exception e) {
