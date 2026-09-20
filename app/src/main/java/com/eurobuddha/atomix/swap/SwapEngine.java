@@ -537,7 +537,7 @@ public final class SwapEngine {
                 } else {
                     L.add(myLeg + "no matching unspent coin returned by the " + REFUND_SCAN_DEPTH
                             + "-block lookup. The saved lock record alone does not prove broadcast or confirmation."
-                            + " Check the recorded transaction below; a spent/refunded coin or older unavailable history can also produce an empty result.");
+                            + " See the recorded-transaction line below; a spent/refunded coin or older unavailable history can also produce an empty result.");
                 }
             } else {
                 boolean stillLocked = eth.canCollect(s.contractId);
@@ -578,12 +578,14 @@ public final class SwapEngine {
             }
 
             L.add("• Secret: " + (secretKnown ? "known locally; collection also requires a valid matching leg" : "not revealed yet"));
+            int recorded = 0;
             for (SwapDb.Event e : db.getEvents(hash)) {
-                if (e.note != null && MinimaHtlc.isHex(e.note)) L.add("Recorded " + e.event + " transaction: " + e.note);
+                if (e.note != null && MinimaHtlc.isHex(e.note)) { L.add("Recorded " + e.event + " transaction: " + e.note); recorded++; }
                 String n = e.note == null ? "" : e.note.toLowerCase();
                 if (n.contains("mismatch") || n.contains("invalid") || n.contains("incorrect")
                         || n.contains("too close") || n.contains("fail")) L.add("⚠ " + e.note);
             }
+            L.add(recordedTxnSummary(recorded));
             if (!SwapDb.ST_COMPLETE.equals(s.status) && !SwapDb.ST_REFUNDED.equals(s.status))
                 L.add("(swaps take a few minutes — ~90s polls + 2 confirmations + on-phone PoW per step)");
         } catch (Exception e) {
@@ -591,6 +593,21 @@ public final class SwapEngine {
         }
         final java.util.List<String> out = L;
         ui.post(() -> cb.report(out));
+    }
+
+    /** The recorded-transaction line, which is printed on EVERY inspection — including, and especially, when
+     *  there is nothing to print. The swap row and the secret are written BEFORE the lock is broadcast (see
+     *  startMinimaToErc20's M2 note) so that a lost reply cannot strand a claimable leg; the flip side is that a
+     *  row exists even when the broadcast never happened, and logEvent only runs on the PostCb.ok path. So "no
+     *  recorded transaction" is not an absence of evidence — it is the evidence: nothing was ever posted.
+     *  Before this line the report said "Check the recorded transaction below" and then printed nothing at all,
+     *  which is how a phantom row read as an unexplained stall (live, 2026-09-20: a 7500 MINIMA leg that the
+     *  1024-block lookup could not find because it had never been broadcast). */
+    static String recordedTxnSummary(int recordedCount) {
+        if (recordedCount > 0) return "Recorded transactions: " + recordedCount + " (listed above).";
+        return "Recorded transactions: NONE. This row was saved before its broadcast, and no transaction id was "
+                + "ever returned — so the leg was almost certainly never posted to the chain. Nothing is locked "
+                + "and nothing needs refunding; the row clears itself at the refund block.";
     }
 
     /** Body of the "Add ETH for gas" notification. RULE 1: the wallet is named IN FULL, because this is the
