@@ -288,6 +288,8 @@ public class MainActivity extends AppCompatActivity {
         ensureChannel();
         requestNotifPermission();
 
+        // NOTE: this FIRST render runs before node/minima/engine exist — view builders must be null-safe
+        // about them (see nodeOfflineText()). 0.1.62 dereferenced node here and crashed every launch.
         render();
         if (!prefs.getBoolean("seen_welcome", false)) ui.post(this::showWelcome);
         node = new NodeApi(this, this::onPaired);
@@ -520,7 +522,7 @@ public class MainActivity extends AppCompatActivity {
         // Say WHICH fault this is. A wedged node and a disabled app both stop the app dead, but the
         // remedies are opposite, and telling a user to enable an already-enabled app wastes the one
         // moment they are looking at the screen.
-        if (!enabled) pairingBanner.setText(node.offlineMessage());
+        if (!enabled) pairingBanner.setText(nodeOfflineText());
         pairingBanner.setVisibility(enabled ? View.GONE : View.VISIBLE);
         SwapLog.d("fg paired=" + enabled);
         if (enabled) {
@@ -2064,7 +2066,7 @@ public class MainActivity extends AppCompatActivity {
         col.addView(seg);
 
         if (!paired) {
-            col.addView(dimNote(node.offlineMessage()));
+            col.addView(dimNote(nodeOfflineText()));
             swapStages(col);
             return;
         }
@@ -2899,7 +2901,7 @@ public class MainActivity extends AppCompatActivity {
             col.addView(err);
         }
 
-        if (!paired) col.addView(dimNote(node.offlineMessage()));
+        if (!paired) col.addView(dimNote(nodeOfflineText()));
     }
 
     /** Fire any balance pulse that was armed while the Wallet tab wasn't showing (its balance views didn't exist). */
@@ -3571,6 +3573,14 @@ public class MainActivity extends AppCompatActivity {
         ScrollView s = new ScrollView(this);
         s.addView(v);
         return s;
+    }
+
+    /** The offline explanation, safe before {@link #node} exists. onCreate calls render() BEFORE it
+     *  constructs NodeApi, so every view builder must tolerate a null node — 0.1.62 shipped without this
+     *  guard and crashed on launch. With no NodeApi there is no verdict yet, which is exactly the
+     *  "nothing has replied" case. */
+    private String nodeOfflineText() {
+        return node == null ? NodeApi.offlineMessage(NodeApi.Offline.UNREACHABLE, false) : node.offlineMessage();
     }
 
     private TextView buildPairingBanner() {
