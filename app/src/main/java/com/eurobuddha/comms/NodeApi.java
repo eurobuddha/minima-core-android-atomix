@@ -77,6 +77,16 @@ public class NodeApi {
     private Boolean mEnabled = null;          // null until the first signal
     private long mLastOkMs = 0;               // last time ANY node reply arrived
     private int mConsecTimeouts = 0;
+    // WHY we are not talking to the node. Silence and refusal are different faults with different
+    // remedies, and only the node can tell us it refused: "enabled":false arrives in a REPLY. Timing out
+    // proves nothing about permissions — it proves we got no answer. Conflating them (the old
+    // noteEnabled(false) on the timeout path) told a user whose node was wedged to go and enable an app
+    // that was already enabled. Proven live 2026-09-21: a node four days up, its Dalvik heap at 93% of
+    // the 512MB cap, thrashing GC and no longer following the chain, while AtomiX blamed the Apps list.
+    private Offline mOffline = Offline.UNREACHABLE;
+
+    /** Why the node is not usable. REFUSED is a verdict the node gave us; UNREACHABLE is our own silence. */
+    public enum Offline { ENABLED, REFUSED, UNREACHABLE }
     // Writes (send/txnpost/…) grind proof-of-work for minutes on the node's SINGLE command thread, so
     // reads queued behind one routinely time out — that's "busy", not "dead". While a write is pending,
     // read timeouts don't count toward unpairing and reRegister() must not drop the write's reply.
@@ -93,6 +103,7 @@ public class NodeApi {
                 final boolean enabled = zResponse.optBoolean("enabled", false);
                 mMain.post(() -> {
                     if (mReleased || dead()) return;   // MA-12: a late register reply after onDestroy must not touch state
+                    mOffline = enabled ? Offline.ENABLED : Offline.REFUSED;   // a reply either way
                     noteEnabled(enabled);
                 });
             }
@@ -111,6 +122,29 @@ public class NodeApi {
     }
 
     public boolean isEnabled() { return mEnabled != null && mEnabled; }
+
+    /** Why we are offline, as the UI should explain it. */
+    public Offline offline() { return mOffline; }
+
+    /** True once ANY node reply has arrived in this process — proof the pairing itself is good. */
+    public boolean everReplied() { return mLastOkMs > 0; }
+
+    /** What to tell the user when the node is unusable. Static + pure so the wording is unit-testable.
+     *  Three distinct faults, three distinct remedies — never one message that guesses:
+     *   REFUSED      the node replied "enabled":false. Enabling it in Minima Core is the fix.
+     *   UNREACHABLE after a good reply — the pairing is proven, so the node itself stopped answering
+     *               (busy on a long write, wedged, or killed). Restarting Minima Core is the fix.
+     *   UNREACHABLE having never heard back — genuinely ambiguous, so say both possibilities. */
+    public static String offlineMessage(Offline why, boolean everReplied) {
+        if (why == Offline.REFUSED) return "Enable AtomiX in Minima Core → Apps to connect to your node.";
+        if (everReplied) return "Minima Core has stopped responding. It is enabled — it is busy or needs "
+                + "restarting. Open Minima Core, then come back.";
+        return "Can't reach Minima Core. Check it is installed and running, and that AtomiX is enabled in "
+                + "Minima Core → Apps.";
+    }
+
+    /** Instance form of {@link #offlineMessage} for the current state. */
+    public String offlineMessage() { return offlineMessage(mOffline, everReplied()); }
 
     public long lastOkMs() { return mLastOkMs; }
 
@@ -165,9 +199,13 @@ public class NodeApi {
             if (isWrite) mPendingWrites--;
             // The "paired-then-node-died" detector touches the pairing listener, so skip it on a dead host;
             // but still deliver the error so the caller (scanner/SignGate lambda) never hangs (MA-11 parity).
-            if (!dead() && mPendingWrites == 0 && ++mConsecTimeouts >= TIMEOUTS_TO_UNPAIR) noteEnabled(false);
+            if (!dead() && mPendingWrites == 0 && ++mConsecTimeouts >= TIMEOUTS_TO_UNPAIR) {
+                mOffline = Offline.UNREACHABLE;   // silence, NOT a permissions verdict
+                noteEnabled(false);
+            }
             if (funds) WriteSafety.uncertain(writeId);
-            try { if (cb != null) cb.onError(funds ? ERR_WRITE_UNCERTAIN : "Minima Core didn't respond. Is it installed, running and enabled?"); }
+            try { if (cb != null) cb.onError(funds ? ERR_WRITE_UNCERTAIN
+                    : offlineMessage(Offline.UNREACHABLE, mLastOkMs > 0)); }
             finally { finishDestroy(); }
         };
         ref[0] = timeout;
@@ -200,12 +238,14 @@ public class NodeApi {
                     // "enabled":false only appears on the gating reply; real command
                     // responses omit the key, so default true.
                     if (!zResponse.optBoolean("enabled", true)) {
+                        mOffline = Offline.REFUSED;   // the node ANSWERED and said no — the one real "not enabled"
                         if (!dead()) noteEnabled(false);
                         if (cb != null) cb.onError(ERR_NOT_ENABLED);
                         return;
                     }
                     // A successful command means the node ran it as an enabled app — if we thought we
                     // were unpaired (e.g. the register reply got lost), this is the recovery signal.
+                    mOffline = Offline.ENABLED;
                     if (!dead()) noteEnabled(true);
                     if (cb != null) cb.onResult(zResponse);
                     } catch (RuntimeException callbackFailure) {

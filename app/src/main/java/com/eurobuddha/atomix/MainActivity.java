@@ -517,6 +517,10 @@ public class MainActivity extends AppCompatActivity {
 
     private void onPaired(boolean enabled) {
         paired = enabled;
+        // Say WHICH fault this is. A wedged node and a disabled app both stop the app dead, but the
+        // remedies are opposite, and telling a user to enable an already-enabled app wastes the one
+        // moment they are looking at the screen.
+        if (!enabled) pairingBanner.setText(node.offlineMessage());
         pairingBanner.setVisibility(enabled ? View.GONE : View.VISIBLE);
         SwapLog.d("fg paired=" + enabled);
         if (enabled) {
@@ -2060,7 +2064,7 @@ public class MainActivity extends AppCompatActivity {
         col.addView(seg);
 
         if (!paired) {
-            col.addView(dimNote("Connect your node in Minima Core → Apps to start swapping."));
+            col.addView(dimNote(node.offlineMessage()));
             swapStages(col);
             return;
         }
@@ -2895,7 +2899,7 @@ public class MainActivity extends AppCompatActivity {
             col.addView(err);
         }
 
-        if (!paired) col.addView(dimNote("Connect your node in Minima Core → Apps to see your balances."));
+        if (!paired) col.addView(dimNote(node.offlineMessage()));
     }
 
     /** Fire any balance pulse that was armed while the Wallet tab wasn't showing (its balance views didn't exist). */
@@ -3573,7 +3577,8 @@ public class MainActivity extends AppCompatActivity {
         TextView t = new TextView(this);
         // The node lists companions by their app LABEL — this one registers as "AtomiX", so naming the legacy
         // app here sent users hunting Minima Core → Apps for an entry that isn't there.
-        t.setText("Enable AtomiX in Minima Core → Apps to connect to your node.");
+        // Text is set per-state in onPaired(); this is only the first paint before any verdict exists.
+        t.setText(NodeApi.offlineMessage(NodeApi.Offline.UNREACHABLE, false));
         t.setTextColor(Design.ON_ACCENT()); t.setBackgroundColor(Design.ACCENT());
         t.setPadding(dp(16), dp(10), dp(16), dp(10)); t.setTextSize(13f); t.setTypeface(Design.sansBold());
         return t;
