@@ -40,6 +40,20 @@ public class NodeApi {
         return mContext.getSharedPreferences("atomix_write_safety", Context.MODE_PRIVATE);
     }
     public boolean hasInterruptedWrite() { return WriteSafety.interrupted(writePrefs()); }
+
+    /** Plain-language account of the pending write - what it was, when, and whether the node is
+     *  implicated - or null when nothing is pending. */
+    public String interruptedWriteDetail() { return WriteSafety.describe(writePrefs()); }
+
+    private static String sLoggedInterrupted = "";
+    /** Log the pending write's cause once per distinct cause, not once per refused publish -
+     *  the reprice loop retries every 90s and would otherwise bury the log in duplicates. */
+    private void logInterruptedOnce() {
+        String detail = WriteSafety.describe(writePrefs());
+        if (detail == null || detail.equals(sLoggedInterrupted)) return;
+        sLoggedInterrupted = detail;
+        android.util.Log.w("SwapPub", "write pause latched: " + detail);
+    }
     /** Invoked only by the explicit restart-and-reconcile action in Wallet. */
     public boolean acknowledgeInterruptedWrite() { return WriteSafety.acknowledge(writePrefs()); }
 
@@ -181,7 +195,11 @@ public class NodeApi {
         if (mReleased) { if (cb != null) mMain.post(() -> cb.onError("released")); return; }
         final boolean funds = WriteSafety.writesFunds(command) && !command.matches(".*(?:^|\\s)dryrun:true(?:\\s|$).*");
         final String writeId = java.util.UUID.randomUUID().toString();
-        if (funds && !WriteSafety.begin(writePrefs(), writeId)) {
+        if (funds && !WriteSafety.begin(writePrefs(), writeId, command)) {
+            // One line naming the ORIGINAL cause, on every refusal. The latch outlives the logcat
+            // buffer, so a refusal read hours later otherwise says only "a write lost its reply"
+            // with no way back to which write or why.
+            logInterruptedOnce();
             if (cb != null) mMain.post(() -> cb.onError(ERR_WRITE_UNCERTAIN));
             return;
         }
@@ -203,7 +221,7 @@ public class NodeApi {
                 mOffline = Offline.UNREACHABLE;   // silence, NOT a permissions verdict
                 noteEnabled(false);
             }
-            if (funds) WriteSafety.uncertain(writeId);
+            if (funds) WriteSafety.uncertain(writePrefs(), writeId);
             try { if (cb != null) cb.onError(funds ? ERR_WRITE_UNCERTAIN
                     : offlineMessage(Offline.UNREACHABLE, mLastOkMs > 0)); }
             finally { finishDestroy(); }

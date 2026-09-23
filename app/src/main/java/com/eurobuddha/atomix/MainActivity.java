@@ -2831,12 +2831,17 @@ public class MainActivity extends AppCompatActivity {
     private void renderWalletTab(LinearLayout col) {
         if (node != null && node.hasInterruptedWrite()) {
             TextView resolve = Design.pill(this, "Resolve interrupted write", Design.SURFACE2(), Design.RED());
+            // Say WHICH write and WHY. The old text told everyone to "First restart MinimaCore",
+            // which is right only for a timeout; for the other causes the node already answered (or
+            // was never asked) and restarting it achieves nothing - observed live twice, 2026-09-23.
+            String detail = node.interruptedWriteDetail();
             resolve.setOnClickListener(v -> new AlertDialog.Builder(this)
                     .setTitle("Resolve interrupted write")
-                    .setMessage("A node write lost its reply and may have completed. First restart MinimaCore to stop any old command, "
-                            + "then check your transactions and balances. Clearing this pause does not undo or retry a transaction.")
+                    .setMessage((detail == null ? "A node write lost its reply and may have completed." : detail)
+                            + "\n\nCheck your transactions and balances before clearing this. Clearing the "
+                            + "pause does not undo or retry a transaction.")
                     .setNegativeButton("Keep paused", null)
-                    .setPositiveButton("I restarted and checked", (d, w) -> {
+                    .setPositiveButton("I have checked", (d, w) -> {
                         toast(node.acknowledgeInterruptedWrite() ? "Pause cleared. Review balances before starting a new trade." : "A write is still active; keep paused.");
                         render();
                     }).show());
