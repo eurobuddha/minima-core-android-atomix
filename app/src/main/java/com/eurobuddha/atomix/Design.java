@@ -118,6 +118,94 @@ public final class Design {
         return t;
     }
 
+    /**
+     * A pill that reads as a CONTROL rather than a status badge.
+     *
+     * The header had the currency switch ({@code ACCENT_SOFT} fill, {@code ACCENT} text, radius 14)
+     * sitting 8dp from the Mainnet chip, which is the same fill, the same text colour, the same
+     * radius - and is not tappable. Users were not missing a button; they were correctly reading a
+     * badge, because it was dressed as one. Two things separate them here, and NEITHER of them
+     * moves: a leading glyph, and an accent stroke the badge does not have. Motion is a bonus on
+     * top (see {@link #glow}), never the thing carrying the affordance - it is off whenever the
+     * system says no animations, and a control that only announces itself while animating would
+     * then be back to invisible.
+     */
+    public static TextView actionPill(Context c, String glyph, String text, int bg, int fg) {
+        TextView t = pill(c, glyph + "  " + text, bg, fg);
+        t.setBackground(actionPillBg(c, bg, fg, 0f));
+        return t;
+    }
+
+    /** Background for {@link #actionPill}. {@code lift} 0..1 brightens the stroke for the glow. */
+    static GradientDrawable actionPillBg(Context c, int bg, int accent, float lift) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(bg);
+        d.setCornerRadius(dp(c, 14));
+        d.setStroke(Math.max(1, dp(c, 1)), strokeAlpha(accent, lift));
+        return d;
+    }
+
+    /**
+     * Stroke colour for a given glow {@code lift}.
+     *
+     * Pure so the alpha ramp is testable without a device. Kept deliberately shy of full opacity at
+     * rest: the resting stroke has to be visible against ACCENT_SOFT in DAYLIGHT without turning
+     * the header into a warning, and ACCENT is a strong orange/green at full alpha.
+     */
+    static int strokeAlpha(int accent, float lift) {
+        float f = lift < 0f ? 0f : (lift > 1f ? 1f : lift);
+        int alpha = Math.round(0x66 + f * (0xFF - 0x66));   // 40% at rest -> 100% at peak
+        return (alpha << 24) | (accent & 0x00FFFFFF);
+    }
+
+    /** How hard the currency pill glows. Cycled on the pill by long-press while we tune it. */
+    public enum Glow {
+        OFF(0f, 0), SUBTLE(0.45f, 2600), MEDIUM(0.75f, 2000), STRONG(1f, 1500);
+        public final float peak;      // how far the stroke brightens
+        public final int periodMs;    // one full breath
+        Glow(float peak, int periodMs) { this.peak = peak; this.periodMs = periodMs; }
+        public Glow next() { return values()[(ordinal() + 1) % values().length]; }
+    }
+
+    private static final String KEY_GLOW = "ccyglow";
+
+    public static Glow glowLevel(Context c) {
+        String v = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_GLOW, Glow.SUBTLE.name());
+        try { return Glow.valueOf(v); } catch (IllegalArgumentException e) { return Glow.SUBTLE; }
+    }
+
+    public static Glow cycleGlow(Context c) {
+        Glow next = glowLevel(c).next();
+        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_GLOW, next.name()).apply();
+        return next;
+    }
+
+    /**
+     * Breathe the stroke of an {@link #actionPill}. Returns the animator so the CALLER can cancel it -
+     * that is not optional here. {@code render()} rebuilds the whole view tree every 30s or so, and an
+     * Animator is not a Handler callback, so {@code removeCallbacksAndMessages(null)} in onDestroy
+     * does not touch it. Without an explicit cancel this leaks one live animator per render, each
+     * holding a detached view.
+     *
+     * Returns null when there is nothing to run - OFF, or the system has animations disabled. A null
+     * return is the normal quiet case, not a failure: the stroke and glyph still mark the control.
+     */
+    public static ValueAnimator glow(final Context c, final TextView pill, int bg, final int accent, Glow level) {
+        if (level == Glow.OFF || !ValueAnimator.areAnimatorsEnabled()) {
+            pill.setBackground(actionPillBg(c, bg, accent, 0f));
+            return null;
+        }
+        ValueAnimator a = ValueAnimator.ofFloat(0f, level.peak);
+        a.setDuration(Math.max(1, level.periodMs / 2));
+        a.setRepeatCount(ValueAnimator.INFINITE);
+        a.setRepeatMode(ValueAnimator.REVERSE);
+        a.setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator());
+        a.addUpdateListener(an -> pill.setBackground(
+                actionPillBg(c, bg, accent, (float) an.getAnimatedValue())));
+        a.start();
+        return a;
+    }
+
     /** A rounded filled background (no border). */
     public static GradientDrawable roundBg(Context c, int color, int radiusDp) {
         GradientDrawable d = new GradientDrawable();

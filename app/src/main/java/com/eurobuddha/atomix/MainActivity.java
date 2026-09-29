@@ -170,6 +170,14 @@ public class MainActivity extends AppCompatActivity {
     // can re-arm it; nulled on dismiss.
     private Runnable pegTickRef;
 
+    // The currency pill's glow. render() rebuilds the whole view tree (every ~30s, and on every dialog
+    // dismiss and tab change), so the pill is a BRAND NEW TextView each time and this animator must be
+    // cancelled and re-started with it. An Animator is not a Handler callback, so the blanket
+    // ui.removeCallbacksAndMessages(null) in onDestroy does NOT stop it: without the explicit cancel
+    // below we would accumulate one live animator per render, each retaining a detached view.
+    private android.animation.ValueAnimator ccyGlowAnim;
+    private TextView ccyPillRef;
+
     // Balance-pulse feedback: bounce the headline balances when a swap NEWLY completes (incl. while backgrounded).
     private TextView minimaBalView, ethBalView;
     private final List<TextView> tokenBalViews = new ArrayList<>();
@@ -319,6 +327,7 @@ public class MainActivity extends AppCompatActivity {
         FOREGROUND = true;     // Activity polls while visible; SwapService stands down
         startWatcher();
         if (pegTickRef != null) ui.post(pegTickRef);   // MI-12: re-arm the peg-preview poll if its dialog is still open (the tick self-cancels if not)
+        if (ccyPillRef != null) startCcyGlow(ccyPillRef);   // the pill survived the pause; re-arm exactly one animator on it
         checkForNewCompletion();   // a swap that completed while we were away → refresh + pulse on return
     }
 
@@ -327,6 +336,7 @@ public class MainActivity extends AppCompatActivity {
         FOREGROUND = false;    // hand off to the background SwapService
         stopWatcher();
         if (pegTickRef != null) ui.removeCallbacks(pegTickRef);   // MI-12: stop the 2s peg-preview poll while backgrounded
+        stopCcyGlow();   // never breathe a pill nobody is looking at
     }
 
     @Override protected void onDestroy() {
@@ -336,10 +346,23 @@ public class MainActivity extends AppCompatActivity {
         // none fires against the shut-down io pool. The background Service resumes the in-flight swaps from the DB.
         SWEEP_ACTIVE = false; sweepRun = null; sweepWatchdog = null;
         ui.removeCallbacksAndMessages(null);
+        stopCcyGlow(); ccyPillRef = null;   // an Animator is not a Handler callback - the line above misses it
         stopWatcher();
         if (engine != null) engine.shutdown();
         if (node != null) node.onDestroy();
         io.shutdownNow();
+    }
+
+    /** (Re)start the currency pill's glow on the CURRENT pill, cancelling any previous one. */
+    private void startCcyGlow(TextView pill) {
+        stopCcyGlow();
+        ccyPillRef = pill;
+        ccyGlowAnim = Design.glow(this, pill, Design.ACCENT_SOFT(), Design.ACCENT(), Design.glowLevel(this));
+    }
+
+    /** Cancel the glow. Safe to call repeatedly and with nothing running. */
+    private void stopCcyGlow() {
+        if (ccyGlowAnim != null) { ccyGlowAnim.cancel(); ccyGlowAnim = null; }
     }
 
     private void startWatcher() {
@@ -1986,10 +2009,29 @@ public class MainActivity extends AppCompatActivity {
 
         // Currency selector — the active market's identity (accent-tinted). Tap to switch MINIMA ↔ mxUSDT: the
         // whole app re-themes to that currency and market-making moves to it (one currency at a time).
-        TextView ccyPill = Design.pill(this, TradingContext.active().coinLabel, Design.ACCENT_SOFT(), Design.ACCENT());
+        //
+        // actionPill, not pill: this sat 8dp from the Mainnet chip wearing the SAME fill, text colour and
+        // radius as that chip, which is not tappable - so people read it as a badge and never tried it.
+        // The ⇄ and the accent stroke are what distinguish it, and both are static; the glow is a bonus.
+        TradingContext target = TradingContext.active().other();
+        TextView ccyPill = Design.actionPill(this, "⇄", TradingContext.active().coinLabel,
+                Design.ACCENT_SOFT(), Design.ACCENT());
         ccyPill.setTextSize(12f);
+        // The app's first accessibility label. A glyph-only affordance is no affordance to a screen
+        // reader, and this control decides which market your money is in.
+        ccyPill.setContentDescription("Trading " + TradingContext.active().coinLabel
+                + ". Tap to switch to " + target.coinLabel + ".");
         ccyPill.setOnClickListener(v -> switchCurrencyDialog());
+        // Long-press cycles the glow strength while we tune it — long-press is free on this view and the
+        // idiom already exists on the wallet card. Toasts the level so a screenshot records which is which.
+        ccyPill.setOnLongClickListener(v -> {
+            Design.Glow g = Design.cycleGlow(this);
+            toast("Pill glow: " + g.name().toLowerCase(java.util.Locale.ROOT));
+            startCcyGlow(ccyPill);
+            return true;
+        });
         Design.pressable(ccyPill);
+        startCcyGlow(ccyPill);
         LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         clp.rightMargin = dp(8);
         header.addView(ccyPill, clp);
