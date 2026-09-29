@@ -119,59 +119,52 @@ public final class Design {
     }
 
     /**
-     * A pill that reads as a CONTROL rather than a status badge.
+     * The currency switch: a pill whose ring MOVES, drawn in the OTHER currency's accent.
      *
-     * The header had the currency switch ({@code ACCENT_SOFT} fill, {@code ACCENT} text, radius 14)
-     * sitting 8dp from the Mainnet chip, which is the same fill, the same text colour, the same
-     * radius - and is not tappable. Users were not missing a button; they were correctly reading a
-     * badge, because it was dressed as one. Two things separate them here, and NEITHER of them
-     * moves: a leading glyph, and an accent stroke the badge does not have. Motion is a bonus on
-     * top (see {@link #glow}), never the thing carrying the affordance - it is off whenever the
-     * system says no animations, and a control that only announces itself while animating would
-     * then be back to invisible.
+     * Two earlier attempts are worth not repeating. The control first looked exactly like the Mainnet
+     * status pill 8dp away - same fill, same text colour, same radius - which is why people read it as
+     * a badge and never tried it. Replacing that with a 1px border that breathed fixed the confusion
+     * with the badge and communicated nothing about what the button DOES; it was too quiet to notice
+     * and too static to read as an invitation.
+     *
+     * What carries meaning here is the COLOUR of the moving part: it is the currency you would switch
+     * TO. An orange dot orbiting the green dollar pill says "MINIMA is over there" continuously, while
+     * the label still names the market your money is actually in. That distinction is not cosmetic -
+     * settlement is currency-agnostic and history is currency-scoped, so a chip that periodically
+     * displayed the currency you are NOT trading would be a real-funds hazard at a glance. This says
+     * the same thing without ever lying.
+     *
+     *   dollar market (green pill)  -> an ORANGE DOT orbits the perimeter
+     *   MINIMA market (orange pill) -> a GREEN ARC of glow sweeps around the edge
      */
     public static TextView actionPill(Context c, String glyph, String text, int bg, int fg) {
         TextView t = pill(c, glyph + "  " + text, bg, fg);
-        t.setBackground(actionPillBg(c, bg, fg, 0f));
+        t.setTextColor(fg);
+        int padH = dp(c, 12), padV = dp(c, 7);
+        t.setPadding(padH, padV, padH, padV);
         return t;
     }
 
-    /** Background for {@link #actionPill}. {@code lift} 0..1 brightens the stroke for the glow. */
-    static GradientDrawable actionPillBg(Context c, int bg, int accent, float lift) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(bg);
-        d.setCornerRadius(dp(c, 14));
-        d.setStroke(Math.max(1, dp(c, 1)), strokeAlpha(accent, lift));
-        return d;
+    /** The moving ring for the active currency, in the other currency's accent. */
+    public static CcyRing ccyRing(Context c, int bodyColor, int otherAccent, boolean minimaActive) {
+        return new CcyRing(bodyColor, otherAccent,
+                minimaActive ? CcyRing.Style.SWEEP : CcyRing.Style.ORBIT,
+                dp(c, 14), Math.max(2f, dp(c, 2)), Math.max(2.5f, dp(c, 3)));
     }
 
-    /**
-     * Stroke colour for a given glow {@code lift}.
-     *
-     * Pure so the alpha ramp is testable without a device. Kept deliberately shy of full opacity at
-     * rest: the resting stroke has to be visible against ACCENT_SOFT in DAYLIGHT without turning
-     * the header into a warning, and ACCENT is a strong orange/green at full alpha.
-     */
-    static int strokeAlpha(int accent, float lift) {
-        float f = lift < 0f ? 0f : (lift > 1f ? 1f : lift);
-        int alpha = Math.round(0x66 + f * (0xFF - 0x66));   // 40% at rest -> 100% at peak
-        return (alpha << 24) | (accent & 0x00FFFFFF);
-    }
-
-    /** How hard the currency pill glows. Cycled on the pill by long-press while we tune it. */
+    /** How fast the ring travels. Cycled on the pill by long-press. */
     public enum Glow {
-        OFF(0f, 0), SUBTLE(0.45f, 2600), MEDIUM(0.75f, 2000), STRONG(1f, 1500);
-        public final float peak;      // how far the stroke brightens
-        public final int periodMs;    // one full breath
-        Glow(float peak, int periodMs) { this.peak = peak; this.periodMs = periodMs; }
+        OFF(0), CALM(4200), LIVELY(2400), INSISTENT(1300);
+        public final int periodMs;   // one full lap
+        Glow(int periodMs) { this.periodMs = periodMs; }
         public Glow next() { return values()[(ordinal() + 1) % values().length]; }
     }
 
     private static final String KEY_GLOW = "ccyglow";
 
     public static Glow glowLevel(Context c) {
-        String v = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_GLOW, Glow.SUBTLE.name());
-        try { return Glow.valueOf(v); } catch (IllegalArgumentException e) { return Glow.SUBTLE; }
+        String v = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_GLOW, Glow.LIVELY.name());
+        try { return Glow.valueOf(v); } catch (IllegalArgumentException e) { return Glow.LIVELY; }
     }
 
     public static Glow cycleGlow(Context c) {
@@ -181,27 +174,27 @@ public final class Design {
     }
 
     /**
-     * Breathe the stroke of an {@link #actionPill}. Returns the animator so the CALLER can cancel it -
-     * that is not optional here. {@code render()} rebuilds the whole view tree every 30s or so, and an
-     * Animator is not a Handler callback, so {@code removeCallbacksAndMessages(null)} in onDestroy
-     * does not touch it. Without an explicit cancel this leaks one live animator per render, each
-     * holding a detached view.
+     * Drive the ring. Returns the animator so the CALLER can cancel it - not optional: render()
+     * rebuilds the view tree every ~30s and an Animator is not a Handler callback, so the blanket
+     * removeCallbacksAndMessages(null) in onDestroy does not touch it. Without an explicit cancel this
+     * leaks one live animator per render, each holding a detached view.
      *
-     * Returns null when there is nothing to run - OFF, or the system has animations disabled. A null
-     * return is the normal quiet case, not a failure: the stroke and glyph still mark the control.
+     * Returns null when there is nothing to run - OFF, or the system has animations disabled - and in
+     * that case paints the ring as a full static rim so the control is still marked. Motion is the
+     * point, but it must not be the ONLY signal.
      */
-    public static ValueAnimator glow(final Context c, final TextView pill, int bg, final int accent, Glow level) {
+    public static ValueAnimator glow(final TextView pill, final CcyRing ring, Glow level) {
+        pill.setBackground(ring);
         if (level == Glow.OFF || !ValueAnimator.areAnimatorsEnabled()) {
-            pill.setBackground(actionPillBg(c, bg, accent, 0f));
+            ring.setPhase(0f, true);
             return null;
         }
-        ValueAnimator a = ValueAnimator.ofFloat(0f, level.peak);
-        a.setDuration(Math.max(1, level.periodMs / 2));
+        ValueAnimator a = ValueAnimator.ofFloat(0f, 1f);
+        a.setDuration(level.periodMs);
         a.setRepeatCount(ValueAnimator.INFINITE);
-        a.setRepeatMode(ValueAnimator.REVERSE);
-        a.setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator());
-        a.addUpdateListener(an -> pill.setBackground(
-                actionPillBg(c, bg, accent, (float) an.getAnimatedValue())));
+        a.setRepeatMode(ValueAnimator.RESTART);
+        a.setInterpolator(new android.view.animation.LinearInterpolator());   // a lap, not a bounce
+        a.addUpdateListener(an -> ring.setPhase((float) an.getAnimatedValue(), false));
         a.start();
         return a;
     }

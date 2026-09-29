@@ -357,7 +357,11 @@ public class MainActivity extends AppCompatActivity {
     private void startCcyGlow(TextView pill) {
         stopCcyGlow();
         ccyPillRef = pill;
-        ccyGlowAnim = Design.glow(this, pill, Design.ACCENT_SOFT(), Design.ACCENT(), Design.glowLevel(this));
+        // The ring is painted in the OTHER currency's accent — it is pointing at where the tap goes.
+        TradingContext active = TradingContext.active();
+        CcyRing ring = Design.ccyRing(this, Design.ACCENT_SOFT(), active.other().accent,
+                active == TradingContext.MINIMA);
+        ccyGlowAnim = Design.glow(pill, ring, Design.glowLevel(this));
     }
 
     /** Cancel the glow. Safe to call repeatedly and with nothing running. */
