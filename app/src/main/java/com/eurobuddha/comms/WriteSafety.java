@@ -57,8 +57,15 @@ final class WriteSafety {
             why(prefs, id, WHY_INCOMPLETE);
         }
     }
-    static synchronized void callbackFailed(SharedPreferences prefs, String id) {
-        if (prefs.getString("pending", "").isEmpty()) prefs.edit().putString("pending", id).commit();
+    static synchronized void callbackFailed(SharedPreferences prefs, String id, String command) {
+        // Stamp the SAME three fields begin() does. Writing only the id left describe() with no verb
+        // and no "N min ago" for precisely the cause where the command most likely DID complete on
+        // the node - the one the user most needs the detail for.
+        if (prefs.getString("pending", "").isEmpty()) {
+            prefs.edit().putString("pending", id)
+                        .putString("pending_cmd", verb(command))
+                        .putLong("pending_at", System.currentTimeMillis()).commit();
+        }
         why(prefs, id, WHY_CALLBACK);
     }
     /** Record the reason, but only against the write that is actually pending. */

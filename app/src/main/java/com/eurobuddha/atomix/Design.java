@@ -139,7 +139,6 @@ public final class Design {
      */
     public static TextView actionPill(Context c, String glyph, String text, int bg, int fg) {
         TextView t = pill(c, glyph + "  " + text, bg, fg);
-        t.setTextColor(fg);
         int padH = dp(c, 12), padV = dp(c, 7);
         t.setPadding(padH, padV, padH, padV);
         return t;

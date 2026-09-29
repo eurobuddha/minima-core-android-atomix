@@ -108,8 +108,18 @@ public class WriteSafetyTest {
 
     @Test public void aCallbackFailureSaysTheCommandProbablyCompleted() {
         assertTrue(WriteSafety.begin(prefs, "a", "consolidate"));
-        WriteSafety.callbackFailed(prefs, "a");
+        WriteSafety.callbackFailed(prefs, "a", "consolidate");
         assertTrue(WriteSafety.describe(prefs).contains("most likely completed"));
+    }
+
+    /** The cause where the command most likely DID complete on the node is the one the user most
+     *  needs the detail for - so it must carry the verb and the timing, not just an id. */
+    @Test public void aCallbackFailureOnAnEmptyLatchStillRecordsWhatAndWhen() {
+        WriteSafety.callbackFailed(prefs, "orphan", "txnpost id:x");
+        String d = WriteSafety.describe(prefs);
+        assertTrue(d, d.contains("'txnpost'"));
+        assertTrue("must be able to say how long ago", d.contains("min ago"));
+        assertTrue(d, d.contains("most likely completed"));
     }
 
     @Test public void nothingPendingDescribesNothing() {

@@ -47,11 +47,18 @@ public class NodeApi {
 
     private static String sLoggedInterrupted = "";
     /** Log the pending write's cause once per distinct cause, not once per refused publish -
-     *  the reprice loop retries every 90s and would otherwise bury the log in duplicates. */
+     *  the reprice loop retries every 90s and would otherwise bury the log in duplicates.
+     *
+     *  Dedup on the write's STABLE identity (its id + recorded reason), never on the rendered
+     *  sentence: describe() embeds "about N min ago", so keying on the prose let a fresh line
+     *  through every single minute - roughly what it was meant to prevent. */
     private void logInterruptedOnce() {
-        String detail = WriteSafety.describe(writePrefs());
-        if (detail == null || detail.equals(sLoggedInterrupted)) return;
-        sLoggedInterrupted = detail;
+        android.content.SharedPreferences p = writePrefs();
+        String key = p.getString("pending", "") + "/" + p.getString("pending_why", "");
+        if (key.equals("/") || key.equals(sLoggedInterrupted)) return;
+        String detail = WriteSafety.describe(p);
+        if (detail == null) return;
+        sLoggedInterrupted = key;
         android.util.Log.w("SwapPub", "write pause latched: " + detail);
     }
     /** Invoked only by the explicit restart-and-reconcile action in Wallet. */
@@ -267,7 +274,7 @@ public class NodeApi {
                     if (!dead()) noteEnabled(true);
                     if (cb != null) cb.onResult(zResponse);
                     } catch (RuntimeException callbackFailure) {
-                        if (funds) WriteSafety.callbackFailed(writePrefs(), writeId);
+                        if (funds) WriteSafety.callbackFailed(writePrefs(), writeId, command);
                         if (cb != null) try { cb.onError(funds ? ERR_WRITE_UNCERTAIN : "Bad node reply"); } catch (RuntimeException ignored) {}
                     } finally { finishDestroy(); }
                 });

@@ -357,6 +357,13 @@ public class MainActivity extends AppCompatActivity {
     private void startCcyGlow(TextView pill) {
         stopCcyGlow();
         ccyPillRef = pill;
+        // Gate the START, not just the stop. onPause cancels the animator, but render() is NOT
+        // guarded on paused state (only isFinishing/isDestroyed/modalOpen/swapInputFocused) and
+        // engine callbacks keep posting it while backgrounded — onSwapsChanged and onFailed both
+        // do. A swap settling while the user is in another app would otherwise rebuild the header
+        // and start a fresh infinite animator nobody can see, undoing the onPause cancel. onResume
+        // re-arms on ccyPillRef, so nothing is lost by declining here.
+        if (!FOREGROUND) return;
         // The ring is painted in the OTHER currency's accent — it is pointing at where the tap goes.
         TradingContext active = TradingContext.active();
         CcyRing ring = Design.ccyRing(this, Design.ACCENT_SOFT(), active.other().accent,

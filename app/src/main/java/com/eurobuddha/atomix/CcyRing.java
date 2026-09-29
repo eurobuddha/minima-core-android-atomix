@@ -46,6 +46,14 @@ public class CcyRing extends Drawable {
     private final float[] pos = new float[2];
     private final float[] tan = new float[2];
 
+    // draw() runs on every animator frame - 60fps, continuously, for as long as the screen is up - so
+    // nothing in it may allocate. Both shaders and both matrices are built once per bounds change and
+    // then only MUTATED: the sweep is spun with setRotate, the halo is moved with setTranslate.
+    private SweepGradient sweep;
+    private RadialGradient haloShader;
+    private final Matrix spin = new Matrix();
+    private final Matrix haloMove = new Matrix();
+
     private final float radius, stroke, dotR;
     private final int otherAccent;
     private final Style style;
@@ -87,6 +95,19 @@ public class CcyRing extends Drawable {
         ringPath.reset();
         ringPath.addRoundRect(rect, radius, radius, Path.Direction.CW);
         measure.setPath(ringPath, true);
+
+        if (rect.isEmpty()) { sweep = null; haloShader = null; return; }
+
+        // The sweep is anchored at the pill's centre and rotated per frame.
+        sweep = new SweepGradient(rect.centerX(), rect.centerY(),
+                new int[]{ alpha(otherAccent, 0), alpha(otherAccent, 0), otherAccent,
+                           alpha(otherAccent, 0), alpha(otherAccent, 0) },
+                new float[]{ 0f, 0.55f, 0.75f, 0.95f, 1f });
+        // The halo is built at the ORIGIN and translated to the dot each frame, so its geometry
+        // never has to be rebuilt as the dot travels.
+        haloShader = new RadialGradient(0f, 0f, dotR * 3f,
+                new int[]{ alpha(otherAccent, 0xB0), alpha(otherAccent, 0) },
+                new float[]{ 0f, 1f }, Shader.TileMode.CLAMP);
     }
 
     @Override public void draw(Canvas canvas) {
@@ -104,15 +125,10 @@ public class CcyRing extends Drawable {
             // A rotating arc of glow: a sweep gradient that is transparent for most of the turn and
             // peaks in one short band, spun by `phase`. Drawn along the rounded-rect stroke, so the
             // bright band tracks the pill's actual edge rather than a circle.
-            float cx = rect.centerX(), cy = rect.centerY();
-            SweepGradient sg = new SweepGradient(cx, cy,
-                    new int[]{ alpha(otherAccent, 0), alpha(otherAccent, 0), otherAccent,
-                               alpha(otherAccent, 0), alpha(otherAccent, 0) },
-                    new float[]{ 0f, 0.55f, 0.75f, 0.95f, 1f });
-            Matrix m = new Matrix();
-            m.setRotate(phase * 360f, cx, cy);
-            sg.setLocalMatrix(m);
-            ringPaint.setShader(sg);
+            if (sweep == null) return;
+            spin.setRotate(phase * 360f, rect.centerX(), rect.centerY());
+            sweep.setLocalMatrix(spin);
+            ringPaint.setShader(sweep);
             ringPaint.setColor(otherAccent);
             canvas.drawPath(ringPath, ringPaint);
             // A faint constant rim underneath so the edge never fully disappears between passes.
@@ -131,9 +147,10 @@ public class CcyRing extends Drawable {
         if (len <= 0f) return;
         measure.getPosTan(phase * len, pos, tan);
 
-        halo.setShader(new RadialGradient(pos[0], pos[1], dotR * 3f,
-                new int[]{ alpha(otherAccent, 0xB0), alpha(otherAccent, 0) },
-                new float[]{ 0f, 1f }, Shader.TileMode.CLAMP));
+        if (haloShader == null) return;
+        haloMove.setTranslate(pos[0], pos[1]);
+        haloShader.setLocalMatrix(haloMove);
+        halo.setShader(haloShader);
         canvas.drawCircle(pos[0], pos[1], dotR * 3f, halo);
         canvas.drawCircle(pos[0], pos[1], dotR, dotPaint);
     }
