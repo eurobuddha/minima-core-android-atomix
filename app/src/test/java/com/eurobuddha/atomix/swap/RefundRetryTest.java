@@ -116,6 +116,25 @@ public class RefundRetryTest {
         verify(minima, never()).refund(any(JSONObject.class), any(MinimaHtlc.PostCb.class));
     }
 
+    /**
+     * A FAILED scan is not evidence the coin is gone, so it must not trigger a signed refund.
+     * MinimaHtlc.refund signs BEFORE txncheck, so an attempt made while the node is unreachable burns a
+     * one-time Winternitz leaf and cannot possibly succeed. Empty result -> act; error -> wait.
+     */
+    @Test public void aFailedScanDoesNotTriggerARefund() {
+        SwapDb.Swap s = new SwapDb.Swap();
+        s.hash = HASH; s.status = SwapDb.ST_ERROR; s.myLegIsMinima = true; s.myTimelock = 2241192;
+        when(db.allSwaps()).thenReturn(Collections.singletonList(s));
+        when(db.rememberedLockCoin(HASH)).thenReturn(new JSONObject());   // a record EXISTS — still must not fire
+
+        doAnswer(inv -> { ((java.util.function.Consumer<String>) inv.getArgument(4))
+                .accept("node unreachable"); return null; })             // the scan ERRORS
+            .when(minima).scanHtlcByHashDeep(eq(HASH), anyInt(), anyInt(), any(), any());
+
+        engine.sweepExpiredMinima(2242106);
+        verify(minima, never()).refund(any(JSONObject.class), any(MinimaHtlc.PostCb.class));
+    }
+
     /** Seeing my own lock records it, so the refund can outlive the scan window. Write-once. */
     @Test public void seeingMyOwnLockRecordsTheCoinEvenBeforeItExpires() throws Exception {
         engine.checkExpiredMinima(myExpiredCoin(), 2241000);   // not yet expired — still must record

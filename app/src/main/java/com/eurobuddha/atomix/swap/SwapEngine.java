@@ -758,7 +758,12 @@ public final class SwapEngine {
                 }
             }
             if (!found) refundFromRecord(hash);
-        }, e -> { SwapLog.w("refundScan " + hash + " ERR: " + e); refundFromRecord(hash); });
+            // Deliberately NOT on the error path below: an empty scan is a result, a FAILED scan is not.
+            // Refunding on a node error would sign against a coin we could not look up, and MinimaHtlc.refund
+            // signs BEFORE txncheck - so every failed attempt burns a one-time Winternitz leaf for no possible
+            // benefit, in exactly the condition (node unreachable) where there is nothing to gain. The sweep
+            // retries on its own window.
+        }, e -> SwapLog.w("refundScan " + hash + " ERR: " + e + " (unknown, not gone — retrying next window)"));
     }
 
     /**

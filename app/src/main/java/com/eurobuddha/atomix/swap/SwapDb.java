@@ -162,8 +162,14 @@ public final class SwapDb {
      *
      * Write-once: the first sighting wins, so a later scan cannot overwrite a good record with a worse one.
      */
+    private final java.util.Set<String> recordedLockCoins = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
     public synchronized void rememberLockCoin(String hash, String coinid, String amount, String tokenid, String owner) {
         if (hash == null || coinid == null || coinid.isEmpty()) return;
+        // Cache only hashes we have actually WRITTEN (see the end of this method). Marking on entry would
+        // make a call that returns early — no swap row yet — permanently skip the retry, which is worse than
+        // the SELECT it saves.
+        if (recordedLockCoins.contains(norm(hash))) return;
         try (android.database.Cursor c = helper.getReadableDatabase().rawQuery(
                 "SELECT mycoinid FROM swaps WHERE hash=?", new String[]{norm(hash)})) {
             if (c.moveToFirst()) {
@@ -177,13 +183,14 @@ public final class SwapDb {
         v.put("mycointoken", tokenid);
         v.put("mycoinowner", owner);
         helper.getWritableDatabase().update("swaps", v, "hash=?", new String[]{norm(hash)});
+        recordedLockCoins.add(norm(hash));   // written — later cycles can skip the read
     }
 
     /** The remembered lock coin as the JSON shape MinimaHtlc.refund() consumes, or null if we never saw it. */
     public synchronized org.json.JSONObject rememberedLockCoin(String hash) {
         if (hash == null) return null;
         try (android.database.Cursor c = helper.getReadableDatabase().rawQuery(
-                "SELECT mycoinid, mycoinamount, mycointoken, mycoinowner FROM swaps WHERE hash=?",
+                "SELECT mycoinid, mycoinamount, mycointoken, mycoinowner, mytimelock FROM swaps WHERE hash=?",
                 new String[]{norm(hash)})) {
             if (!c.moveToFirst()) return null;
             String coinid = c.getString(0);
@@ -192,11 +199,21 @@ public final class SwapDb {
             org.json.JSONArray state = new org.json.JSONArray();
             try {
                 coin.put("coinid", coinid);
+                // Both fields, matching a REAL coin's shape. A token coin carries amount (raw, scaled by the
+                // token's decimals) AND tokenamount (the human value); MinimaHtlc.coinAmount prefers
+                // tokenamount, which is what we stored. Writing it to only one field would leave a
+                // reconstructed coin whose `amount` silently means something different from a live one's -
+                // a ~10^36 discrepancy on a fund path for whoever reads it next.
+                coin.put("tokenamount", c.getString(1));
                 coin.put("amount", c.getString(1));
                 coin.put("tokenid", c.getString(2));
-                // refund() reads the signer from state port 0 and the timelock from port 3; only port 0 is
-                // needed to BUILD the spend, and the node re-checks the timelock itself when it runs the script.
+                // Port 0 is the refund signer, which is all MinimaHtlc.refund() needs. Port 3 (the timelock)
+                // is carried too so this coin is valid for EITHER path: checkExpiredMinima opens with
+                // `parseBlock(stateAt(coin,3)) < 0 -> return`, so a coin without it would be dropped there in
+                // silence - the exact shape of failure this whole record exists to prevent.
                 state.put(new org.json.JSONObject().put("port", 0).put("data", c.getString(3)));
+                state.put(new org.json.JSONObject().put("port", 3).put("data", String.valueOf(c.getLong(4))));
+                state.put(new org.json.JSONObject().put("port", 5).put("data", norm(hash)));
                 coin.put("state", state);
             } catch (org.json.JSONException impossible) { return null; }
             return coin;
