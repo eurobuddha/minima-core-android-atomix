@@ -535,9 +535,17 @@ public final class SwapEngine {
                 } else if (SwapDb.ST_COMPLETE.equals(s.status)) {
                     L.add(myLeg + "claimed by the counterparty (complete)");
                 } else {
-                    L.add(myLeg + "no matching unspent coin returned by the " + REFUND_SCAN_DEPTH
-                            + "-block lookup. The saved lock record alone does not prove broadcast or confirmation."
-                            + " See the recorded-transaction line below; a spent/refunded coin or older unavailable history can also produce an empty result.");
+                    // NEVER render an empty bounded scan as "spent". The lookup walks back a fixed number of
+                    // blocks from the tip, so a lock that is simply OLD returns nothing while sitting perfectly
+                    // unspent on chain — observed live 2026-10-01 on a 1,304-block-old lock the owner was told
+                    // was "spent/claimed". Say which of the two it is, and what happens next.
+                    boolean recorded = db.rememberedLockCoin(hash) != null;
+                    L.add(myLeg + "not returned by the " + REFUND_SCAN_DEPTH + "-block lookup. This does NOT mean "
+                            + "it was spent — the lookup only reaches " + REFUND_SCAN_DEPTH + " blocks back, so a "
+                            + "lock older than that returns nothing whether or not it is still there."
+                            + (recorded
+                                ? " The coin was recorded when it was in range, so the refund is built from that record and does not need the scan."
+                                : " No coin was recorded for this swap, so it needs manual recovery — the coin id can be read from an archive node."));
                 }
             } else {
                 boolean stillLocked = eth.canCollect(s.contractId);
@@ -740,13 +748,59 @@ public final class SwapEngine {
         if (selected == null || !tryEthAttempt("refundScan:" + selected.hash)) return;
         final String hash = selected.hash;
         minima.scanHtlcByHashDeep(hash, 2, REFUND_SCAN_DEPTH, coins -> {
+            boolean found = false;
             for (int i = 0; i < coins.length(); i++) {
                 JSONObject coin = coins.optJSONObject(i);
                 if (coin == null) continue;
-                if (isMyOwnedKey(MinimaHtlc.stateAt(coin, 0)) && sameHash(MinimaHtlc.stateAt(coin, 5), hash))
+                if (isMyOwnedKey(MinimaHtlc.stateAt(coin, 0)) && sameHash(MinimaHtlc.stateAt(coin, 5), hash)) {
+                    found = true;
                     checkExpiredMinima(coin, block);
+                }
             }
-        }, e -> SwapLog.w("refundScan " + hash + " ERR: " + e));
+            if (!found) refundFromRecord(hash);
+        }, e -> { SwapLog.w("refundScan " + hash + " ERR: " + e); refundFromRecord(hash); });
+    }
+
+    /**
+     * Refund a lock the chain scan can no longer SEE, from what we recorded when we could.
+     *
+     * `coins depth:` is a fixed walk back from the tip, so a lock becomes invisible once it ages past the
+     * window — and from then on the engine could never refund it, because finding it was a precondition of
+     * refunding it. Observed live 2026-10-01: a 26.99025 MxUSD lock, 1,304 blocks old, provably UNSPENT in
+     * the archive, invisible to the app, and reported to its owner as "spent/claimed" on the strength of an
+     * empty scan. Waiting could never have fixed it; every new block made it worse.
+     *
+     * An empty scan is not evidence the coin is gone, so this does not need it to be. The spend is built from
+     * the recorded coin and the NODE decides: a coin that really was spent, or a timelock not yet passed,
+     * fails at txncheck and nothing is broadcast. The caller has already established from the DB that this
+     * swap is non-terminal and past its own timelock.
+     */
+    private void refundFromRecord(String hash) {
+        JSONObject coin = db.rememberedLockCoin(hash);
+        if (coin == null) {
+            // Nothing recorded — the lock predates the record (v3 DBs) or we never saw it in range.
+            SwapLog.w("refund " + hash + ": out of scan range and no recorded coin — needs manual recovery");
+            return;
+        }
+        if (db.haveCollectExpired(hash) || !tryEthAttempt("refundM:" + hash)) return;
+        SwapLog.w("refund " + hash + ": coin is outside the " + REFUND_SCAN_DEPTH
+                + "-block lookup — refunding from the recorded coin instead");
+        submitMinimaRefund(hash, coin);
+    }
+
+    /** The refund submit + bookkeeping, shared by the scan path and the recorded-coin path. */
+    private void submitMinimaRefund(final String hash, final JSONObject coin) {
+        minima.refund(coin, new MinimaHtlc.PostCb() {
+            @Override public void ok(String txpowid) {
+                db.logEvent(hash, SwapDb.EV_MINIMA_REFUND_SUBMITTED, coin.optString("tokenid", "0x00"), MinimaHtlc.coinAmount(coin), txpowid);
+                notifier.onSwapsChanged();
+                SwapLog.d("refund SUBMITTED " + hash + " tx=" + txpowid + " — awaiting confirmation");
+            }
+            @Override public void err(String m) {
+                SwapLog.w("refund ERR " + hash + ": " + m + " (retries after the window)");
+                // leave the attempt timestamp → the next poll after ETH_RETRY_SECS retries it
+            }
+        });
     }
 
     /** Hashes of active swaps where I must CLAIM a mxUSDT counter-leg (my own leg is the ETH one): I hold the
@@ -852,8 +906,15 @@ public final class SwapEngine {
     /** (package-private for tests) */
     void checkExpiredMinima(JSONObject coin, int block) {
         long timelock = parseBlock(MinimaHtlc.stateAt(coin, 3));   // MI-1: -1 on garbage/overflow (never 0)
+        String seenHash = MinimaHtlc.stateAt(coin, 5);
+        // Record the coin the FIRST time we see it, whether or not it is expired yet. `coins depth:` walks
+        // back a fixed number of blocks from the tip, so this lock will age out of view (256 on the hot path,
+        // 1024 on the expired sweep) and from then on we could never refund it, because we could never find
+        // it again. Write-once, so the earliest sighting is the one kept.
+        db.rememberLockCoin(seenHash, coin.optString("coinid", ""), MinimaHtlc.coinAmount(coin),
+                coin.optString("tokenid", "0x00"), MinimaHtlc.stateAt(coin, 0));
         if (timelock < 0 || block <= timelock) return;             // unparseable timelock → NEVER treat as expired
-        String hash = MinimaHtlc.stateAt(coin, 5);
+        String hash = seenHash;
         // SELF-HEALING gate, identical to the claim path above. The old guard was `inflight.add("refundM:")`
         // cleared ONLY inside ok()/err() — so when a node command's callback was lost (NodeApi drops pending
         // callbacks once the hosting Activity is finishing) the marker was never released and the refund NEVER
@@ -862,17 +923,7 @@ public final class SwapEngine {
         // not, and a real 35.014005 MINIMA lock sat refundable-but-unrefunded because of it. A timestamp cannot
         // leak: worst case a lost callback costs one ETH_RETRY_SECS window before the next attempt.
         if (db.haveCollectExpired(hash) || !tryEthAttempt("refundM:" + hash)) return;   // MA-20: atomic due-check-and-mark
-        minima.refund(coin, new MinimaHtlc.PostCb() {
-            @Override public void ok(String txpowid) {
-                db.logEvent(hash, SwapDb.EV_MINIMA_REFUND_SUBMITTED, coin.optString("tokenid", "0x00"), MinimaHtlc.coinAmount(coin), txpowid);
-                notifier.onSwapsChanged();
-                SwapLog.d("refund SUBMITTED " + hash + " tx=" + txpowid + " — awaiting confirmation");
-            }
-            @Override public void err(String m) {
-                SwapLog.w("refund ERR " + hash + ": " + m + " (retries after the window)");
-                // leave the attempt timestamp → the next poll after ETH_RETRY_SECS retries it
-            }
-        });
+        submitMinimaRefund(hash, coin);
     }
 
     /** Reuse the ETH settlement rule: submission records are retryable; only chain evidence is terminal.

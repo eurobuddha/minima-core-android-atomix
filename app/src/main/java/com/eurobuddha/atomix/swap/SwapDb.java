@@ -152,6 +152,57 @@ public final class SwapDb {
         public long updated;
     }
 
+    /**
+     * Remember the coin WE locked for this swap, the first time the engine sees it on-chain.
+     *
+     * Refunding our own lock must never depend on rediscovering it: `coins depth:` is a fixed walk back
+     * from the tip, so a lock ages out of view (256 blocks on the hot path, 1024 on the expired sweep) and
+     * the engine then cannot refund it because it cannot find it. Stored while the coin is still in range,
+     * these four values are everything MinimaHtlc.refund() needs to build the spend later.
+     *
+     * Write-once: the first sighting wins, so a later scan cannot overwrite a good record with a worse one.
+     */
+    public synchronized void rememberLockCoin(String hash, String coinid, String amount, String tokenid, String owner) {
+        if (hash == null || coinid == null || coinid.isEmpty()) return;
+        try (android.database.Cursor c = helper.getReadableDatabase().rawQuery(
+                "SELECT mycoinid FROM swaps WHERE hash=?", new String[]{norm(hash)})) {
+            if (c.moveToFirst()) {
+                String existing = c.getString(0);
+                if (existing != null && !existing.isEmpty()) return;   // already recorded
+            } else return;                                             // no such swap row
+        }
+        ContentValues v = new ContentValues();
+        v.put("mycoinid", coinid);
+        v.put("mycoinamount", amount);
+        v.put("mycointoken", tokenid);
+        v.put("mycoinowner", owner);
+        helper.getWritableDatabase().update("swaps", v, "hash=?", new String[]{norm(hash)});
+    }
+
+    /** The remembered lock coin as the JSON shape MinimaHtlc.refund() consumes, or null if we never saw it. */
+    public synchronized org.json.JSONObject rememberedLockCoin(String hash) {
+        if (hash == null) return null;
+        try (android.database.Cursor c = helper.getReadableDatabase().rawQuery(
+                "SELECT mycoinid, mycoinamount, mycointoken, mycoinowner FROM swaps WHERE hash=?",
+                new String[]{norm(hash)})) {
+            if (!c.moveToFirst()) return null;
+            String coinid = c.getString(0);
+            if (coinid == null || coinid.isEmpty()) return null;
+            org.json.JSONObject coin = new org.json.JSONObject();
+            org.json.JSONArray state = new org.json.JSONArray();
+            try {
+                coin.put("coinid", coinid);
+                coin.put("amount", c.getString(1));
+                coin.put("tokenid", c.getString(2));
+                // refund() reads the signer from state port 0 and the timelock from port 3; only port 0 is
+                // needed to BUILD the spend, and the node re-checks the timelock itself when it runs the script.
+                state.put(new org.json.JSONObject().put("port", 0).put("data", c.getString(3)));
+                coin.put("state", state);
+            } catch (org.json.JSONException impossible) { return null; }
+            return coin;
+        }
+    }
+
     public synchronized void upsertSwap(Swap s) {
         ContentValues v = new ContentValues();
         v.put("hash", norm(s.hash));
@@ -344,7 +395,7 @@ public final class SwapDb {
 
     private static final class Helper extends SQLiteOpenHelper {
         /** v2 added market_trades; v3 tagged its rows with the market they were observed in. */
-        Helper(Context ctx) { super(ctx, "atomix.db", null, 3); }
+        Helper(Context ctx) { super(ctx, "atomix.db", null, 4); }
 
         @Override public void onCreate(SQLiteDatabase db) {
             db.execSQL("CREATE TABLE secrets (hash TEXT PRIMARY KEY, secret TEXT, added INTEGER)");
@@ -355,13 +406,35 @@ public final class SwapDb {
             db.execSQL("CREATE TABLE swaps (hash TEXT PRIMARY KEY, role TEXT, direction TEXT, "
                     + "selltoken TEXT, sellamount TEXT, buytoken TEXT, buyamount TEXT, counterparty TEXT, "
                     + "status TEXT, contractid TEXT, mytimelock INTEGER, mylegminima INTEGER, "
-                    + "created INTEGER, updated INTEGER)");
+                    + "created INTEGER, updated INTEGER, "
+                    // the coin WE locked — a refund is built from these, never from a depth-bounded scan
+                    + "mycoinid TEXT, mycoinamount TEXT, mycointoken TEXT, mycoinowner TEXT)");
             createMarket(db);
         }
 
         @Override public void onUpgrade(SQLiteDatabase db, int oldV, int newV) {
             createMarket(db);   // v1→v2: add the market_trades table (idempotent)
             tagMarketTokens(db);// v2→v3: tag each print with its market (idempotent)
+            addLockCoin(db);    // v3→v4: remember the coin we locked, so a refund never needs to FIND it
+        }
+
+        /**
+         * v3→v4. Remember our own Minima lock's coin, so refunding it never depends on a chain SCAN.
+         *
+         * `coins depth:` walks back a fixed number of blocks from the tip, so a lock becomes invisible to
+         * the app once it ages past that window - 256 blocks on the hot path, 1024 on the expired sweep -
+         * and from then on the engine can never refund it, because it can no longer find it. Observed live
+         * 2026-10-01 on a 26.99025 MxUSD lock that was 1,304 blocks old: provably unspent in the archive,
+         * invisible to the app, and reported as "spent/claimed" from the empty scan result.
+         *
+         * We CREATED this coin; needing to rediscover it was the mistake. These four columns are everything
+         * MinimaHtlc.refund() consumes, so the refund can be built straight from the row.
+         */
+        static void addLockCoin(SQLiteDatabase db) {
+            for (String col : new String[]{"mycoinid TEXT", "mycoinamount TEXT", "mycointoken TEXT", "mycoinowner TEXT"}) {
+                try { db.execSQL("ALTER TABLE swaps ADD COLUMN " + col); }
+                catch (android.database.SQLException alreadyThere) { /* idempotent: re-run is a no-op */ }
+            }
         }
 
         @Override public void onDowngrade(SQLiteDatabase db, int oldV, int newV) {

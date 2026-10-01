@@ -4,6 +4,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -72,6 +73,55 @@ public class RefundRetryTest {
                         .put("3", "2241192")      // timelock
                         .put("4", "0xCOUNTERPARTY")
                         .put("5", HASH));
+    }
+
+    // ===== 1b. a lock that has aged out of EVERY scan window must still be refundable =====
+    //
+    // Live 2026-10-01: a 26.99025 MxUSD lock, 1,304 blocks old, provably UNSPENT in the archive, invisible to
+    // both the 256-block hot scan and the 1024-block sweep, and reported to its owner as "spent/claimed" purely
+    // because the scan came back empty. Nothing could ever have refunded it — finding it was a precondition of
+    // refunding it, and every new block made it further out of reach.
+
+    /** The scan returns nothing: the refund must still be built, from the coin recorded while it was in range. */
+    @Test public void aLockPastEveryScanWindowIsRefundedFromTheRecordedCoin() throws Exception {
+        SwapDb.Swap s = new SwapDb.Swap();
+        s.hash = HASH; s.status = SwapDb.ST_ERROR; s.myLegIsMinima = true; s.myTimelock = 2241192;
+        when(db.allSwaps()).thenReturn(Collections.singletonList(s));
+        when(db.rememberedLockCoin(HASH)).thenReturn(new JSONObject()
+                .put("coinid", "0x" + "77".repeat(32))
+                .put("tokenid", "0x00")
+                .put("amount", "26.99025")
+                .put("state", new org.json.JSONArray().put(
+                        new JSONObject().put("port", 0).put("data", MY_PK))));
+
+        doAnswer(inv -> { ((java.util.function.Consumer<org.json.JSONArray>) inv.getArgument(3))
+                .accept(new org.json.JSONArray()); return null; })      // empty scan — the coin is out of range
+            .when(minima).scanHtlcByHashDeep(eq(HASH), anyInt(), anyInt(), any(), any());
+
+        engine.sweepExpiredMinima(2242106);
+        verify(minima, times(1)).refund(any(JSONObject.class), any(MinimaHtlc.PostCb.class));
+    }
+
+    /** Nothing recorded (a pre-migration lock): do NOT invent a spend — say so and leave it for recovery. */
+    @Test public void withNoRecordedCoinNoRefundIsFabricated() {
+        SwapDb.Swap s = new SwapDb.Swap();
+        s.hash = HASH; s.status = SwapDb.ST_ERROR; s.myLegIsMinima = true; s.myTimelock = 2241192;
+        when(db.allSwaps()).thenReturn(Collections.singletonList(s));
+        when(db.rememberedLockCoin(HASH)).thenReturn(null);
+        doAnswer(inv -> { ((java.util.function.Consumer<org.json.JSONArray>) inv.getArgument(3))
+                .accept(new org.json.JSONArray()); return null; })
+            .when(minima).scanHtlcByHashDeep(eq(HASH), anyInt(), anyInt(), any(), any());
+
+        engine.sweepExpiredMinima(2242106);
+        verify(minima, never()).refund(any(JSONObject.class), any(MinimaHtlc.PostCb.class));
+    }
+
+    /** Seeing my own lock records it, so the refund can outlive the scan window. Write-once. */
+    @Test public void seeingMyOwnLockRecordsTheCoinEvenBeforeItExpires() throws Exception {
+        engine.checkExpiredMinima(myExpiredCoin(), 2241000);   // not yet expired — still must record
+        verify(db, times(1)).rememberLockCoin(eq(HASH), eq("0x" + "77".repeat(32)),
+                any(), any(), eq(MY_PK));
+        verify(minima, never()).refund(any(JSONObject.class), any(MinimaHtlc.PostCb.class));
     }
 
     // ================= 2. the refund must survive a callback that never arrives =================
