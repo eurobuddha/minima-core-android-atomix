@@ -28,3 +28,25 @@ logical change = one version = one commit = one push, in order. Enforced by a
 pre-commit hook (.githooks/pre-commit, install once: sh .githooks/install.sh)
 that blocks a code change with no version bump. Do NOT bypass with --no-verify.
 Docs/config-only commits need no bump.
+
+## Block-as-key-uses (minima-core 1.1.2.31+) — operational rules, recorded 2026-10-05
+
+Upstream nodes can now run `-blockaskeyuses` (upstream Android 1.7 forces it; our MinimaBlock app
+`org.minimarex.minimablock` does too). Under it, new keys are 128×4 Winternitz trees and key uses
+track the chain-tip block number. AtomiX **code needs no change** — it signs via
+`txnsign publickey:auto|<state key>` and never reads `uses` — but two operational rules are hard:
+
+1. **Drain all in-flight swaps before ANY wallet/mode migration.** The HTLC script takes its keys
+   from coin state (`PREVSTATE(0)` owner / `PREVSTATE(4)` counterparty). A party that loses the
+   ability to sign with the key already baked into a live lock's state loses that leg: a claimer
+   who can't sign before the timelock forfeits what they already paid; an owner who can't sign
+   can't refund. A seed restored under the other key mode produces DIFFERENT keys, so the old
+   state keys are simply gone.
+2. **The persisted swap identity does not survive a mode switch.** `swap_pk`/`swap_addr`
+   (MinimaHtlc, MDS KV `swap_identity`) is a legacy-shape wallet key published to counterparties.
+   After moving to a block-mode wallet, IdentityWatch halts trading until a new identity is
+   picked, and counterparties must be given the new maker key.
+
+The HTLC address itself embeds no keys and is identical under both modes:
+`MxG080CRJB1D4NHGRYGNF7Q52FK7023UM3FUUPVD1W1WCQZSA8MDQ25982N842G`
+(hex `0x0CDCD61692F186EB0BBCFA289F438043F586FF7B3F6864193358E29166E8454A`).
