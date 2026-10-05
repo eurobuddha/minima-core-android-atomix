@@ -92,6 +92,23 @@ public class GateTest {
                 engine.acceptTakerSellMinima(sellCoin("0.2", "0.1"), USDT));
     }
 
+    /** REGRESSION (live 2026-10-05): a take priced EXACTLY on the bid. 44.4 × 0.99 is exactly 43.956, but as a
+     *  DOUBLE product it is 43.955999999999996 — the JS mirrors (atomix-mds / desktop) declined this real take
+     *  silently every poll until the taker refunded at timelock (fixed in mds 0.1.38 / desktop 0.17.31). This
+     *  gate uses BigDecimal and was never affected; this test pins that exactness so a future "simplification"
+     *  to double arithmetic fails loudly instead of losing trades by 4 femto-USDT. */
+    @Test public void acceptsAnExactlyPricedSell() throws Exception {
+        Order o = new Order();
+        Order.Pair p = new Order.Pair(true, 0, 0, 1);
+        p.bids.add(new Order.Level(0.99, 5500));
+        o.pairs.put("USDT", p);
+        engine.setMyOrder(o);
+        assertTrue("44.4 mxUSDT for exactly 44.4 × 0.99 = 43.956 USDT must be accepted",
+                engine.acceptTakerSellMinima(sellCoin("44.4", "43.956"), USDT));
+        assertFalse("one µUSDT above the exact price must still be rejected",
+                engine.acceptTakerSellMinima(sellCoin("44.4", "43.956001"), USDT));
+    }
+
     // ---- acceptTakerBuyMinima: taker buys mxUSDT, I SELL (ask ladder) ----
 
     private static EthHtlc.Contract buyContract(BigInteger usdtLocked, BigInteger mxRequested) {
