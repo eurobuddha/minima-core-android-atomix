@@ -600,6 +600,7 @@ public class SwapService extends Service {
         // A background service can't launch another app's Activity on Android 10+ — the notification tap
         // IS the legal cross-app launch path (user-initiated PendingIntent).
         Intent launch = getPackageManager().getLaunchIntentForPackage("org.minimarex.minimacore");
+        if (launch == null) launch = getPackageManager().getLaunchIntentForPackage("org.minimarex.minimablock");
         android.app.PendingIntent pi = android.app.PendingIntent.getActivity(this, 13,
                 launch != null ? launch : new Intent(this, MainActivity.class),
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);

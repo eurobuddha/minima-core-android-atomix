@@ -155,7 +155,7 @@ public final class EthHtlc {
             c.amount = (BigInteger) d.get(4).getValue();
             c.requestAmount = (BigInteger) d.get(5).getValue();
             c.hashlock = Numeric.toHexString((byte[]) d.get(6).getValue());
-            c.timelock = ((BigInteger) d.get(7).getValue()).longValueExact();
+            c.timelock = new java.math.BigDecimal((BigInteger) d.get(7).getValue()).longValueExact();
             c.withdrawn = (Boolean) d.get(8).getValue();
             c.refunded = (Boolean) d.get(9).getValue();
             c.preimage = Numeric.toHexString((byte[]) d.get(10).getValue());

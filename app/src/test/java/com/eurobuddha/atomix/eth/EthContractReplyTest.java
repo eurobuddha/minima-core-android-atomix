@@ -34,4 +34,15 @@ public class EthContractReplyTest {
         when(rpc.ethCall(anyString(), anyString())).thenReturn(reply);
         try { htlc.getContract(CID); fail("Invalid state accepted"); } catch (Exception expected) { }
     }
+    @Test public void timelockConversionPreservesValueAndRejectsOverflow() throws Exception {
+        for (java.math.BigInteger timelock : new java.math.BigInteger[]{java.math.BigInteger.valueOf(1800000000L), java.math.BigInteger.ONE.shiftLeft(63)}) {
+            String[] words = new String[12];
+            java.util.Arrays.fill(words, "0".repeat(64));
+            words[0] = "0".repeat(63) + "1"; // non-zero owner, existing contract
+            words[7] = String.format("%064x", timelock);
+            when(rpc.ethCall(anyString(), anyString())).thenReturn("0x" + String.join("", words));
+            if (timelock.bitLength() <= 63) assertEquals(timelock.longValue(), htlc.getContract(CID).timelock);
+            else { try { htlc.getContract(CID); fail("Overflow accepted"); } catch (Exception expected) {} }
+        }
+    }
 }
