@@ -32,7 +32,7 @@ Docs/config-only commits need no bump.
 ## Block-as-key-uses (minima-core 1.1.2.31+) — operational rules, recorded 2026-10-05
 
 Upstream nodes can now run `-blockaskeyuses` (upstream Android 1.7 forces it; our MinimaBlock app
-`org.minimarex.minimablock` does too). Under it, new keys are 128×4 Winternitz trees and key uses
+`com.eurobuddha.minimablock` does too). Under it, new keys are 128×4 Winternitz trees and key uses
 track the chain-tip block number. AtomiX **code needs no change** — it signs via
 `txnsign publickey:auto|<state key>` and never reads `uses` — but two operational rules are hard:
 
