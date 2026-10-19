@@ -38,3 +38,15 @@ SHA256 f3944db7220815598ff78270d86eb3c585340e3b66a2b18b43b619cae199c4a7
 Reviewed complete changed RPC/signing code and regression suite; approve this bounded
 repair. Shared allocation/unknown outcomes/event validation remain open. No live
 transactions, installations or publication. Full standalone parity is unfinished.
+
+Event discovery checkpoint0.1.75/175
+Reused existing strict contract tuple and exact integer checks for event parsing.
+Malformed/partial RPC logs or mismatched vault/receiver/range fail the whole batch,
+so the existing scanner retries without advancing its discovery bookmark. Removed
+and incomplete events cannot reach the responder. Existing eth_call recovery stays.
+277 tests in each debug/release suite pass with no failures/errors/skips. Release
+lint has zero errors;194 warnings. Reviewed full changed code, callers and tests.
+Signed APK package/version/certificate and ZIP integrity verified.
+SHA256 c85375a4a6ad8ad64c91ef602976ad3aa233f7fda06bcb62f45b2efc42ed800e
+Full parity remains unfinished; nonce coordination and uncertain broadcasts remain
+open. No installation, publication or real transaction.
