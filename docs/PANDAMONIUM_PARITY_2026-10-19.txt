@@ -25,3 +25,16 @@ eca1383c9d27683a281fbe6355356267877dc2dd14d963d7cc289ca0700e517f
 Partial parity only: financial context/evidence/recovery and shared ETH nonce
 review remain open. No live transaction, device install or publication.
 Pinned integrated source staging was detached at 3e787c1 before standalone edits.
+
+Nonce validation checkpoint 0.1.74/174
+Reused integrated nonce RPC validation and signing bounds; standalone node transport,
+fees and existing authorization behavior preserved. AtomiX uses BigInteger counters.
+Missing/malformed/noncanonical replies cannot become nonce zero; fallback remains
+available. Padded ABI DATA parsing unchanged. Exhausted accounts cannot sign.
+267 tests in each debug/release suite pass with zero failures/errors/skips.
+Release lint passes without errors; existing warnings remain. Signed local candidate
+package/version, ZIP integrity and family certificate verified.
+SHA256 f3944db7220815598ff78270d86eb3c585340e3b66a2b18b43b619cae199c4a7
+Reviewed complete changed RPC/signing code and regression suite; approve this bounded
+repair. Shared allocation/unknown outcomes/event validation remain open. No live
+transactions, installations or publication. Full standalone parity is unfinished.
