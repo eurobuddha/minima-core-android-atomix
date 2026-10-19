@@ -103,6 +103,7 @@ public class SwapService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
+        com.eurobuddha.minimaapi.ethereum.EthereumTransactions.initialize(getApplicationContext());
         createChannels();
         // If the OS refuses the foreground service (e.g. a residual dataSync time-budget on Android 14),
         // bail gracefully instead of crashing — WorkManager/AlarmManager relaunch will retry.

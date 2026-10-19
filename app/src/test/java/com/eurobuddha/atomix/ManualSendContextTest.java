@@ -52,7 +52,7 @@ public class ManualSendContextTest {
         when(rpc.getBalance(anyString())).thenReturn(BigInteger.TEN.pow(18));
         when(rpc.ethCall(anyString(),anyString())).thenReturn("0x"+String.format("%064x",BigInteger.valueOf(50_000_000)));
         when(rpc.getTransactionCount(anyString())).thenReturn(BigInteger.valueOf(4));
-        when(rpc.sendRawTransaction(anyString())).thenReturn(HASH);EthTx.resetAll();
+        com.eurobuddha.atomix.eth.JournalFixture.install();com.eurobuddha.atomix.eth.JournalFixture.wire(rpc);EthTx.resetAll();
     }
     @After public void cleanup()throws Exception {Dialog d=ShadowDialog.getLatestDialog();if(d!=null)d.dismiss();idle();((ExecutorService)field("io").get(activity)).shutdownNow();jobs.clear();}
     @Test public void editedOrSwitchedMaxCannotOverwriteTheForm()throws Exception {
@@ -87,20 +87,27 @@ public class ManualSendContextTest {
         Dialog confirm=review(true,"0.1");String content=contentText(confirm.getWindow().getDecorView());assertTrue(content.contains(FIRST.getAddress()));assertTrue(content.contains(TO));assertTrue(content.contains("0.00002362"));
         when(rpc.callStr(eq("eth_gasPrice"),any())).thenReturn("0x77359400");
         when(rpc.sendRawTransaction(anyString())).thenAnswer(inv->{SignedRawTransaction raw=(SignedRawTransaction)TransactionDecoder.decode(inv.getArgument(0));
-            assertEquals(FIRST.getAddress(),raw.getFrom());assertEquals(TO,raw.getTo());assertEquals(BigInteger.TEN.pow(17),raw.getValue());assertEquals(REVIEWED,raw.getGasPrice());return HASH;});
+            assertEquals(FIRST.getAddress(),raw.getFrom());assertEquals(TO,raw.getTo());assertEquals(BigInteger.TEN.pow(17),raw.getValue());assertEquals(REVIEWED,raw.getGasPrice());return com.eurobuddha.atomix.eth.JournalFixture.accept(inv.getArgument(0));});
         positive(confirm).performClick();idle();job();verify(rpc,times(1)).callStr(eq("eth_gasPrice"),any());verify(rpc,times(1)).sendRawTransaction(anyString());
     }
     @Test public void reviewedTokenAmountAndContractRemainExact()throws Exception {
         Dialog confirm=review(false,"1.1234567");
         when(rpc.sendRawTransaction(anyString())).thenAnswer(inv->{RawTransaction raw=TransactionDecoder.decode(inv.getArgument(0));
             assertEquals(EthNet.MAINNET.tokens[0].address,raw.getTo());assertEquals(BigInteger.ZERO,raw.getValue());
-            assertEquals(EthSend.buildTransferData(TO,BigInteger.valueOf(1_123_456)).substring(2),raw.getData());assertEquals(REVIEWED,raw.getGasPrice());return HASH;});
+            assertEquals(EthSend.buildTransferData(TO,BigInteger.valueOf(1_123_456)).substring(2),raw.getData());assertEquals(REVIEWED,raw.getGasPrice());return com.eurobuddha.atomix.eth.JournalFixture.accept(inv.getArgument(0));});
         positive(confirm).performClick();idle();job();verify(rpc).sendRawTransaction(anyString());
     }
-    @Test public void rpcFailureMessageSurvivesContextCleanup()throws Exception {
-        Dialog confirm=review(true,"0.1");when(rpc.sendRawTransaction(anyString())).thenThrow(new java.io.IOException("fixture RPC unavailable"));
+    @Test public void uncertainSendCopiesTheActualHashAndDoesNotClaimRejection()throws Exception {
+        Dialog confirm=review(true,"0.1");
+        java.util.concurrent.atomic.AtomicReference<String> hash=new java.util.concurrent.atomic.AtomicReference<>();
+        when(rpc.sendRawTransaction(anyString())).thenAnswer(inv->{
+            hash.set(Hash.sha3((String)inv.getArgument(0)));throw new java.io.IOException("fixture lost response");
+        });
         positive(confirm).performClick();idle();job();
-        assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("fixture RPC unavailable"));
+        assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("Transaction outcome unknown"));
+        assertNotNull(hash.get());
+        android.content.ClipboardManager clipboard=(android.content.ClipboardManager)activity.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+        assertEquals(hash.get(),clipboard.getPrimaryClip().getItemAt(0).getText().toString());
     }
     @Test public void rejectedExecutorDoesNotCrashOrDispatch()throws Exception {
         Dialog confirm=review(true,"0.1");doThrow(new RejectedExecutionException()).when(worker).execute(any());

@@ -127,3 +127,74 @@ future balances. Withdrawal publication still needs its tiny native posting cost
 if unavailable the old on-chain quote can only expire or be superseded after funding.
 Fresh ERC20 bid-side funding and shared ETH nonce/uncertain-send recovery remain
 separate open full-review work. This checkpoint does not complete standalone parity.
+
+Ethereum submission recovery parity: standalone AtomiX0.1.78/code178
+
+Problem and behavior
+The old process-local nonce counter could forget a signed send after restart or a
+lost RPC response, and its two-minute timeout could reuse that nonce for another
+operation. Reused the exact EthereumTransactions.java from Pandamonium9eec40a,
+integrated AtomiX EthRpc/EthHtlc, EthTx with only its standalone error string, and
+adapt-pandamonium-ethereum-submissions.py's saved-counter-leg timelock rule.
+The journal saves signed public transactions before broadcasting and retains nonce
+ownership across restart, endpoint changes and uncertain outcomes. A stable lock,
+withdraw or refund operation retries its original intent; fee replacement retains
+nonce/payment/calldata and stays inside the caller's reviewed fee bounds. Missing
+or malformed RPC envelopes cannot supply a nonce or acknowledge a send. Responses
+are bounded at4MiB. Both Activity and background Service initialize the same private
+SQLite journal before constructing their clients. The existing no-backup manifest
+and IPC key derivation remain. No private keys are stored in this journal.
+Unknown manual sends copy their full actual transaction hash and state that the
+outcome is unknown. They are not presented as rejected sends. An automated responder
+retry retains the persisted timelock; an expired saved lock cannot create a new lock.
+
+Reuse and validation
+Source: apks/base/build/multilingual-2026-10-16/minimaapi/src/main/java/com/eurobuddha/
+minimaapi/ethereum/EthereumTransactions.java; integrated/atomix/src/main/java/com/
+eurobuddha/atomix/eth/{EthTx,EthRpc,EthHtlc}.java; canonical atomix tests; shared
+EthereumTransactionsTest/EthereumFundingSnapshotTest. Standalone ETH Wallet's
+WalletJournalPersistenceTest supplied actual SQLite reopen and startup fixtures.
+No new dependencies. Existing minimaapi.aar was inspected and has no conflicting
+Ethereum classes. Shared journal SHA256 (identical to Pandamonium):
+47a79bf41aff1ece7e8bafb6a3b7220a3fa7126dd41cf11dcca23873a3cffd5e
+Historical Astra.md and SECURIRY_REVIEW.md were read; their untracked files and the
+existing graph cache changes are preserved outside this source commit.
+
+Code review
+MAJOR resolved: losing an outstanding nonce on timeout/restart could replace another
+payment or lock. Inspected the journal, client boundaries, all changed methods,
+manual-send and responder callers, persistence/authorization tests and final diff.
+The port retains existing byte encoding, gas formulas and key derivation. Startup
+tests mock sodium and transport so the real Activity/Service lifecycle and SQLite
+can run without native Android libraries, IPC, network or funds. The first debug
+run caught two fixture incompatibilities (old incomplete RPC envelope and Android
+sodium initialization on macOS); corrected both before final validation.
+Verdict: approve this bounded recovery port after the checks below. The full review
+and standalone parity remain unfinished; this is not an all-features safety claim.
+
+Final checks
+356debug and356release JVM tests passed, zero failures/errors/skips. Includes real
+SQLite reopen, identical-byte retry after lost response, corrupt-storage refusal,
+concurrent allocation, fee-review bounds, exact clipboard hash, strict RPC envelopes,
+size bounds, preserved/expired responder timelocks, and Activity/Service cold start.
+Offline signed assembleRelease and lintRelease passed; lint0errors/0fatal/195warnings.
+Actual APK ZIP integrity, package/version, DEX journal/retry/message presence and
+family signing certificate verified. APK Signature Scheme v2, RSA4096.
+Candidate: dist/atomix-0.1.78-candidate.apk
+com.eurobuddha.atomix0.1.78/versionCode178;22563630bytes
+SHA256:faa376fb3c50bbdf4867c41b5b41bb73b0a3bb4666e7bbbe135eb972b0279e01
+Certificate SHA256:eca1383c9d27683a281fbe6355356267877dc2dd14d963d7cc289ca0700e517f
+No real transaction, device installation or publication. Generated APK/checksum
+remain outside the source commit.
+
+Still open
+Next port: fresh Ethereum bid backing and pending token-debit reservation from
+Pandamonium's atomix-bid-backing adapter. Remaining engine context/authorization,
+receipt/reorg handling, gas/allowance review, journal retention and full manual
+pending/history/recovery UI need the wider review. Accepted-but-unacknowledged UI
+outcomes still need a persistent user request identity review. The standalone
+journal coordinates this APK's Activity/Service only, not other APKs or devices
+sharing the same Ethereum key. No migration of old pre-upgrade unjournaled raw
+transactions is possible from the former in-memory counter. MDS/desktop mirrors,
+other standalone parity and Fold2.0.10 verification remain open. Public2.0.0 is
+unchanged. Do not publish this candidate as a completed full-review release.

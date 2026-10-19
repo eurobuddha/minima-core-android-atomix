@@ -270,6 +270,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
+        com.eurobuddha.minimaapi.ethereum.EthereumTransactions.initialize(getApplicationContext());
         ls = Sodium.get();
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         TradingContext.load(prefs);   // the selected currency — BEFORE Design.load so the theme opens in the right identity
@@ -3875,7 +3876,11 @@ public class MainActivity extends AppCompatActivity {
                         // hash to the clipboard so the user can look up their own send on a block explorer.
                         ui.post(() -> { copy(tx, "Sent — full tx hash copied (updates once mined)"); fetchEthBalances(true); });
                     } catch (Exception e) {
-                        ui.post(() -> toast("Send failed: " + e.getMessage()));
+                        if (e instanceof com.eurobuddha.minimaapi.ethereum.EthereumTransactions.Uncertain) {
+                            String hash = ((com.eurobuddha.minimaapi.ethereum.EthereumTransactions.Uncertain)e).hash;
+                            SwapLog.w("manual send outcome unknown tx=" + hash);
+                            ui.post(() -> copy(hash, "Transaction outcome unknown — full hash copied. Check it before sending again."));
+                        } else ui.post(() -> toast("Send failed: " + e.getMessage()));
                     } finally { context.cancel(); }
                 }); })
                 .setOnDismissListener(ignored -> { if (!submitted.get()) context.cancel(); })
