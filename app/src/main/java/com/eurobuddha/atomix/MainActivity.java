@@ -1118,6 +1118,10 @@ public class MainActivity extends AppCompatActivity {
     private void pushOrderEdit(Order o) {
         if (IdentityWatch.halted()) { toast("Halted: app keys don't match your node"); return; }
         if (identity == null || myMinimaPk == null || !wallet.ready()) return;
+        // Saved configuration contains pairs only; attach identities just as baseOrder() does.
+        o.minimaPublicKey = myMinimaPk;
+        o.ethAddress = wallet.address();
+        o.usdtAvail = parseD(Util.tidyAmount(tokenBals.get("USDT")), 0);
         final boolean live = o.hasLiquidity();
         final int peg = live ? PriceOracle.applyPeg(o, prefs) : PriceOracle.PEG_OFF;
         if (peg == PriceOracle.PEG_STALE) {
