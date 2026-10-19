@@ -1,0 +1,27 @@
+AtomiX standalone repair checkpoint: 0.1.73/code173
+
+Read the existing Astra.md incident handoff and SECURIRY_REVIEW.md before porting.
+These are historical findings, not a current verified finding list. Preserve both
+untracked files; they are not part of this commit.
+
+Reuses scripts/adapt-pandamonium-atomix-languages.py's two-row market header and
+wallet controls, 48dp theme/market actions, accessible theme label, and readable
+secondary/selected/green-accent text. Reuses its secure private-key dialog and
+sensitive clipboard flag on the explicit Copy key button.
+Standalone labels remain ordinary strings; no host localization dependency added.
+Native dialog styles remain unchanged; AppCompat/language-dialog parity is open.
+
+Review: inspected the complete changed methods, Design helper and themes,
+callers, build dependencies and existing tests. Reviewed final diff. No new
+correctness finding in this bounded UI port. Transaction engines unchanged.
+Validation: offline debug and release unit tests, signed assembleRelease and
+lintRelease passed. 260 tests in each variant; lint: 0 errors, 194 warnings.
+Actual APK package/version/certificate verified.
+Local candidate: dist/atomix-0.1.73-candidate.apk
+SHA256: dfff076a6e9ab7c8405c57702eae5e37f22e6825ffc2eb5d146cb5a3f084ed47
+Certificate SHA256:
+eca1383c9d27683a281fbe6355356267877dc2dd14d963d7cc289ca0700e517f
+
+Partial parity only: financial context/evidence/recovery and shared ETH nonce
+review remain open. No live transaction, device install or publication.
+Pinned integrated source staging was detached at 3e787c1 before standalone edits.

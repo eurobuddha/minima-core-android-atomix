@@ -1776,7 +1776,7 @@ public class MainActivity extends AppCompatActivity {
 
             ImageView ic = new ImageView(this);
             ic.setImageResource(icons[i]);
-            ic.setColorFilter(sel ? Design.ACCENT() : Design.DIM());
+            ic.setColorFilter(sel ? Design.TEXT() : Design.DIM());
             ic.setLayoutParams(new LinearLayout.LayoutParams(dp(22), dp(22)));
             tabIcons[i] = ic;
 
@@ -1786,7 +1786,7 @@ public class MainActivity extends AppCompatActivity {
             p.setTextSize(10.5f);
             p.setTypeface(Design.sans());
             p.setPadding(0, dp(4), 0, 0);
-            p.setTextColor(sel ? Design.ACCENT() : Design.DIM());
+            p.setTextColor(sel ? Design.TEXT() : Design.DIM());
             tabPills[i] = p;
 
             cell.addView(ic);
@@ -1806,8 +1806,8 @@ public class MainActivity extends AppCompatActivity {
         for (int i = 0; i < tabPills.length; i++) {
             boolean sel = i == currentTab;
             if (tabCells[i] != null) tabCells[i].setBackground(Design.roundBg(this, sel ? Design.ACCENT_SOFT() : 0x00000000, 14));
-            if (tabIcons[i] != null) tabIcons[i].setColorFilter(sel ? Design.ACCENT() : Design.DIM());
-            if (tabPills[i] != null) tabPills[i].setTextColor(sel ? Design.ACCENT() : Design.DIM());
+            if (tabIcons[i] != null) tabIcons[i].setColorFilter(sel ? Design.TEXT() : Design.DIM());
+            if (tabPills[i] != null) tabPills[i].setTextColor(sel ? Design.TEXT() : Design.DIM());
         }
     }
 
@@ -2024,14 +2024,18 @@ public class MainActivity extends AppCompatActivity {
         // actionPill, not pill: this sat 8dp from the Mainnet chip wearing the SAME fill, text colour and
         // radius as that chip, which is not tappable - so people read it as a badge and never tried it.
         // The ⇄ and the accent stroke are what distinguish it, and both are static; the glow is a bonus.
+        LinearLayout marketHeader = new LinearLayout(this);
+        marketHeader.setOrientation(LinearLayout.HORIZONTAL);
+        marketHeader.setGravity(Gravity.CENTER_VERTICAL);
         TradingContext target = TradingContext.active().other();
         TextView ccyPill = Design.actionPill(this, "⇄", TradingContext.active().coinLabel,
-                Design.ACCENT_SOFT(), Design.ACCENT());
+                Design.ACCENT_SOFT(), Design.TEXT());
         ccyPill.setTextSize(12f);
         // The app's first accessibility label. A glyph-only affordance is no affordance to a screen
         // reader, and this control decides which market your money is in.
         ccyPill.setContentDescription("Trading " + TradingContext.active().coinLabel
                 + ". Tap to switch to " + target.coinLabel + ".");
+        ccyPill.setMinimumHeight(dp(48));
         ccyPill.setOnClickListener(v -> switchCurrencyDialog());
         // Long-press cycles the glow strength while we tune it — long-press is free on this view and the
         // idiom already exists on the wallet card. Toasts the level so a screenshot records which is which.
@@ -2045,18 +2049,21 @@ public class MainActivity extends AppCompatActivity {
         startCcyGlow(ccyPill);
         LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         clp.rightMargin = dp(8);
-        header.addView(ccyPill, clp);
+        marketHeader.addView(ccyPill, clp);
 
         TextView theme = Design.pill(this, Design.isDark() ? "☾" : "☀", Design.SURFACE2(), Design.DIM());
         theme.setTextSize(13f);
+        theme.setContentDescription(Design.isDark() ? "Switch to light theme" : "Switch to dark theme");
+        theme.setMinimumHeight(dp(48)); theme.setMinimumWidth(dp(48));
         theme.setOnClickListener(v -> toggleTheme());
         Design.pressable(theme);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         tlp.rightMargin = dp(8);
         header.addView(theme, tlp);
 
-        header.addView(mainnetChip());
         col.addView(header);
+        marketHeader.addView(mainnetChip());
+        col.addView(marketHeader);
 
         TextView sub = new TextView(this);
         sub.setText("v" + BuildConfig.VERSION_NAME + (chainBlock > 0 ? "  ·  block " + chainBlock : "") + "  ·  real funds");
@@ -2078,7 +2085,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dp(6), dp(6)); dlp.rightMargin = dp(6);
         chip.addView(dot, dlp);
         TextView t = new TextView(this);
-        t.setText("Mainnet"); t.setTextColor(Design.ACCENT()); t.setTextSize(11f); t.setTypeface(Design.sansBold());
+        t.setText("Mainnet"); t.setTextColor(Design.TEXT()); t.setTextSize(11f); t.setTypeface(Design.sansBold());
         chip.addView(t);
         return chip;
     }
@@ -2943,12 +2950,18 @@ public class MainActivity extends AppCompatActivity {
             send.setOnClickListener(v -> sendDialog());
             TextView exportKey = Design.pill(this, "🔑  Export key", Design.SURFACE2(), Design.DIM());
             exportKey.setOnClickListener(v -> exportKeyDialog());
-            LinearLayout.LayoutParams gap = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-            gap.rightMargin = dp(8);
-            walletActions.addView(refreshBal, gap);
-            walletActions.addView(fund, gap);
-            walletActions.addView(send, gap);
-            walletActions.addView(exportKey);
+            walletActions.setOrientation(LinearLayout.VERTICAL);
+            for (TextView[] pair : new TextView[][]{{refreshBal, fund}, {send, exportKey}}) {
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                for (TextView action : pair) {
+                    action.setMinimumHeight(dp(48));
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                    lp.setMargins(dp(2), dp(3), dp(2), dp(3));
+                    row.addView(action, lp);
+                }
+                walletActions.addView(row);
+            }
             col.addView(walletActions);
         }
 
@@ -3832,12 +3845,27 @@ public class MainActivity extends AppCompatActivity {
         key.setTextIsSelectable(true);
         box.addView(key);
 
-        dialog()
+        AlertDialog secret = dialog()
                 .setTitle("ETH private key")
                 .setView(wrapScroll(box))
-                .setPositiveButton("Copy key", (d, w) -> copy(pk, "Private key copied"))
+                .setPositiveButton("Copy key", (d, w) -> copyPrivateKey(pk))
                 .setNegativeButton("Close", null)
-                .show();
+                .create();
+        if (secret.getWindow() != null) secret.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+        secret.show();
+    }
+
+    private void copyPrivateKey(String value) {
+        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (cm == null) return;
+        ClipData clip = ClipData.newPlainText("AtomiX", value);
+        if (Build.VERSION.SDK_INT >= 33) {
+            android.os.PersistableBundle extras = new android.os.PersistableBundle();
+            extras.putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true);
+            clip.getDescription().setExtras(extras);
+        }
+        cm.setPrimaryClip(clip);
+        toast("Private key copied");
     }
 
     private String shortAddr(String a) {
