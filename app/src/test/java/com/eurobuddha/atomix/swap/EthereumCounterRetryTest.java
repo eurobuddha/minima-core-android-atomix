@@ -26,8 +26,8 @@ public class EthereumCounterRetryTest {
     @After public void cleanup(){engine.shutdown();}
     void attempt()throws Exception {
         JSONObject coin=new JSONObject().put("amount","2").put("state",new JSONObject().put("1","3").put("6",ADDRESS));
-        Method m=SwapEngine.class.getDeclaredMethod("lockEthCounterLeg",JSONObject.class,String.class,String.class);m.setAccessible(true);
-        m.invoke(engine,coin,HASH,EthNet.MAINNET.tokens[0].address);
+        Method m=SwapEngine.class.getDeclaredMethod("lockEthCounterLeg",JSONObject.class,String.class,String.class,TradingContext.class,java.util.function.BooleanSupplier.class);m.setAccessible(true);
+        m.invoke(engine,coin,HASH,EthNet.MAINNET.tokens[0].address,TradingContext.MINIMA,(java.util.function.BooleanSupplier)()->true);
     }
     @Test public void retryKeepsPersistedTimelockBeforeSendingAgain()throws Exception {
         SwapDb.Swap saved=new SwapDb.Swap();saved.myTimelock=now+600;saved.myLegIsMinima=false;when(db.getSwap(HASH)).thenReturn(saved);

@@ -1,0 +1,91 @@
+Standalone AtomiX OTC and responder parity —2026-10-19
+
+Source reuse
+Donor: Pandamonium worktree apks/base/build/multilingual-2026-10-16 at09f1f04.
+Read the source diffs and relevant callers/tests before porting. Reused the complete
+reviewed integrated/atomix/src/main/java/com/eurobuddha/atomix/swap/{SwapEngine,
+MinimaHtlc,OtcController,OtcDb,OtcMessage,OtcOffer,OtcBook,SwapDb,SwapTake}.java and
+TradingContext.java. All10 classes match the host after changing the isolated transport namespace back
+to com.eurobuddha.comms and the shared compatibility repair below. No new dependencies.
+The standalone SDK, journal initialization, signing implementation and previous
+funding/publication/saved-order identity repairs are preserved.
+
+Behavior now shared
+- An OTC first leg saves its recovery hash before submission. Unknown responses do
+  not reopen agreement or generate a second lock. The secret, requested amount and
+  swap row are saved atomically; storage failure prevents first-leg submission.
+- Negotiation and execution use exact persisted snapshots. Stale dialogs, repeated
+  callbacks, concurrent Activity/Service actions and pruning cannot overwrite a
+  different agreement or recreate a removed deal. Terms must be finite, positive
+  and nonzero at settlement precision; malformed sides/availability are rejected.
+- Each OTC scan/offer/deal/notification retains its market. Legacy rows with unknown
+  currency remain visible with actions disabled. OTC cards show the stored currency
+  and a switch hint. Stale counter actions are blocked; stale consent errors refresh
+  the cards. A completed market take notifies its original market.
+- Minima/Ethereum responder guards retain market, publication generation, terms,
+  endpoint and attempt ownership through delayed reads and dispatch. A late callback
+  cannot release a newer attempt. Queued worker cancellation cleans up only once.
+- Minima signing/posting carries authorization through SignGate and the standalone
+  SDK. Unknown post results retain recovery evidence. Complete typed chain evidence
+  is required before finalizing a Minima claim/refund, retaining the existing depth
+  threshold. The inspection report no longer treats no local receipt as proof that
+  nothing was sent or locked.
+
+Tests and adaptations
+Copied13 host swap regression classes, including the latest OtcFirstLegTest and
+OtcConsentTest. Updated fixtures preserve the stronger guarded method signatures.
+GuardedCounterLegTest reuses the standalone PublishQueueTest.QueuedRequest instead
+of DirectNodeApi.Request: it exercises the real NodeApi and SignGate against the
+controlled SDK queue. Existing GuardedCommandTest separately verifies actual SDK
+main-thread/discovery/broadcast cancellation. No production direct-node dependency
+was added to the standalone APK.
+OtcMarketUiTest reuses OrderEditIdentityTest's unstarted Robolectric Activity fixture
+and checks actual cards/actions for both markets, foreign deals, unknown legacy
+currencies and stale counter actions. No test initializes a live node or signs/sends
+real transactions. All identities and chain responses are synthetic.
+
+Code review
+MAJOR parity gaps resolved: lost-response duplicate OTC locks; stale consent writes;
+wrong-market deal actions; stale responder dispatch and late-attempt cleanup;
+incomplete chain evidence; misleading claims that missing receipts prove no lock.
+Inspected the complete changed blocks, dependency boundaries and existing/new tests.
+Reviewed10-class equality against the tested host donor, the minimal MainActivity
+adaptation and the SDK test adaptation. Existing wire formats, key derivation,
+transaction amounts and destinations remain unchanged. No migrations or generated
+binaries/credentials are included. Existing Astra.md, SECURIRY_REVIEW.md and graph
+cache changes are preserved outside the commit.
+Verdict: approve this bounded parity port after the validation below. This is not a
+claim that the complete AtomiX or Pandamonium review has finished.
+
+Still open
+AtomiX remaining manual market/quote/confirmation forms and their context handling,
+initiator context changes through final dispatch, allowance/gas review, pending-state
+presentation, receipt/reorg review and journal retention require the wider review.
+The standalone SQLite Ethereum journal coordinates this APK's Activity/Service;
+it does not coordinate other APKs/devices using the same key. An old AGREED deal
+already reset by a previous release cannot safely be assigned an unrelated saved
+hash. Prepared unknown swaps remain in existing chain recovery; this patch does not
+invent a replacement transaction when nothing can prove the prior outcome.
+MDS/desktop mirrors, other standalone apps and physical Fold checks remain open.
+No install/publication or live transaction occurred. The host compatibility repair is being validated for Pandamonium2.0.13;
+public/device2.0.0 is unchanged.
+
+Android compatibility found during release lint
+MAJOR: BigInteger.intValueExact requires API31, but the APK supports API28. Reused
+EthHtlc's existing exact BigDecimal conversion, preserving the rejection of overflow
+and malformed evidence. Applied the same one-line correction to Pandamonium's
+MinimaHtlc and canonical chain-evidence adapter. No minimum-SDK increase or lint
+suppression. The original host app lint invocation did not check dependency code;
+that broader audit is being run separately with the real host SDK configuration.
+
+Final validation and signed artifact
+526 debug and 526 release JVM tests pass, zero failures/errors/skips. Final offline
+release/test/lint run succeeds in49s. Lint:0 errors,0 fatal,195 warnings (unchanged).
+APK ZIP integrity, package/version and actual compiled first-leg preparation order
+verify. Both first-leg DEX paths call prepareInitiator and onPrepared before lock
+submission. APK Signature Scheme v2 verifies with the RSA4096 family certificate.
+Package com.eurobuddha.atomix; version0.1.81, versionCode181.
+Artifact: dist/atomix-0.1.81-candidate.apk (22,596,398 bytes)
+SHA256:19848eb8263d292d4873faef7d5a0e854578c5bf1c6894150236b998584a0e7e
+Certificate SHA256:eca1383c9d27683a281fbe6355356267877dc2dd14d963d7cc289ca0700e517f
+Generated APK and checksum remain outside Git. No installation or publication.

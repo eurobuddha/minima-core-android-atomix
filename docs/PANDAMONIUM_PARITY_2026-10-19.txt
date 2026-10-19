@@ -204,3 +204,12 @@ context, SDK dispatch guards and strict send receipts are now ported and tested.
 See BID_FUNDING_PARITY_2026-10-19.txt for431debug/release tests, source SDK provenance,
 signed artifact and remaining engine/UX/device review work. This supersedes the
 "Next port" item above; it does not close the full parity/review goal.
+
+Checkpoint0.1.81: OTC consent/market/first-leg recovery, responder dispatch guards,
+complete Minima chain evidence and honest inspection text now match the reviewed
+Pandamonium source. Actual OTC cards use the persisted currency and hide actions
+for other/unknown markets.526 tests pass in each debug/release variant; signed APK
+and certificate verified. Lint uncovered an Android9–11 API incompatibility; the
+existing BigDecimal exact conversion fixes it in both codebases. See
+OTC_RESPONDER_PARITY_2026-10-19.txt for evidence and remaining full-review work.
+No installation or publication.

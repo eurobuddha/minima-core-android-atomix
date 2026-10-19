@@ -1647,7 +1647,7 @@ public class MainActivity extends AppCompatActivity {
                         if (sweepRun == null) { orderStatus = "✓ Buy started, but the maker's contact key is missing — they may not see it."; render(); }
                         return;
                     }
-                    SwapTake.send(node, crypto, maker.commsPublicId, identity.publicId(), hash, new CommsTransport.SendCb() {
+                    SwapTake.send(node, crypto, maker.commsPublicId, identity.publicId(), hash, maker.market(), new CommsTransport.SendCb() {
                         @Override public void onSent(String txpowid) { if (sweepRun == null) { orderStatus = "✓ Buy started — maker notified, watching."; render(); } }
                         @Override public void onFailed(String message) { if (sweepRun == null) { orderStatus = "Buy locked, but maker notify failed: " + message; render(); } }
                     });
@@ -4074,6 +4074,10 @@ public class MainActivity extends AppCompatActivity {
         if (!any) { TextView none = new TextView(this); none.setText("No OTC LPs online right now."); none.setTextColor(Design.DIM()); none.setTextSize(13f); none.setTypeface(Design.sans()); none.setPadding(0, 0, 0, dp(10)); col.addView(none); }
     }
 
+    private String otcCurrency(OtcDb.Deal deal) {
+        return deal.market() == null ? "Unknown currency" : deal.market().coinLabel;
+    }
+
     private void renderOtcDeals(LinearLayout col) {
         otcSectionHead(col, "MY DEALS");
         java.util.List<OtcDb.Deal> deals = otcDb == null ? new java.util.ArrayList<>() : otcDb.allDeals();
@@ -4085,11 +4089,16 @@ public class MainActivity extends AppCompatActivity {
                     ? (OtcDb.ROLE_INSTIGATOR.equals(d.role) ? "BUY " : "SELL ")
                     : (OtcDb.ROLE_INSTIGATOR.equals(d.role) ? "SELL " : "BUY ");
             TextView t = new TextView(this);
-            t.setText(dir + d.amount + " " + ccy() + " @ " + d.price + " USDT");
+            t.setText(dir + d.amount + " " + otcCurrency(d) + " @ " + d.price + " USDT");
             t.setTextColor(Design.TEXT()); t.setTextSize(15f); t.setTypeface(Design.sansBold()); box.addView(t);
             TextView st = new TextView(this);
             st.setText(otcStatusText(d)); st.setTextColor(otcStatusColor(d)); st.setTextSize(12.5f); st.setTypeface(Design.sans()); st.setPadding(0, dp(4), 0, dp(2)); box.addView(st);
-            if (otc != null && OtcDb.TURN_ME.equals(d.whoseTurn) && (OtcDb.ST_PROPOSED.equals(d.status) || OtcDb.ST_COUNTERED.equals(d.status))) {
+            if (!d.inActiveMarket()) {
+                box.addView(fieldLabel(d.market() == null
+                        ? "The currency for this deal is not recognised. Trading actions are disabled."
+                        : "Switch to " + d.market().coinLabel + " to manage this deal."));
+            }
+            if (d.inActiveMarket() && otc != null && OtcDb.TURN_ME.equals(d.whoseTurn) && (OtcDb.ST_PROPOSED.equals(d.status) || OtcDb.ST_COUNTERED.equals(d.status))) {
                 LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setPadding(0, dp(8), 0, 0);
                 TextView acc = Design.pill(this, "Accept", Design.IN(), Design.ON_ACCENT());
                 acc.setOnClickListener(v -> {
@@ -4112,7 +4121,10 @@ public class MainActivity extends AppCompatActivity {
     private OtcController.SendResult otcRes(String okMsg) {
         return new OtcController.SendResult() {
             @Override public void ok() { ui.post(() -> { toast(okMsg); if (currentTab == TAB_OTC && !modalOpen) render(); }); }
-            @Override public void err(String m) { ui.post(() -> toast("OTC: " + m)); }
+            @Override public void err(String m) { ui.post(() -> {
+                toast("OTC: " + m);
+                if (OtcController.CHANGED_ERROR.equals(m) && currentTab == TAB_OTC && !modalOpen) render();
+            }); }
         };
     }
 
@@ -4178,6 +4190,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void otcCounterDialog(final OtcDb.Deal d) {
+        if (!d.inActiveMarket()) { toast(OtcController.MARKET_ERROR); return; }
         LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(4), dp(4), dp(4), dp(4));
         box.addView(fieldLabel(ccy() + " amount"));
         final EditText amtE = new EditText(this); decimalInput(amtE); amtE.setText(d.amount); amtE.setTextColor(Design.TEXT()); amtE.setTextSize(16f); amtE.setTypeface(Design.mono()); box.addView(amtE);

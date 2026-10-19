@@ -80,7 +80,12 @@ public final class SwapEngine {
         void notify(String title, String body);   // OS notification for a meaningful transition
         void onSwapsChanged();                     // ask the UI to re-render swap cards
     }
-    public interface StartCb { void ok(String hash); void err(String msg); }
+    public interface StartCb {
+        /** Persist the recovery identity before the first leg is submitted. False stops submission. */
+        default boolean onPrepared(String hash) { return true; }
+        void ok(String hash);
+        void err(String msg);
+    }
     public interface ConfirmCb { void done(boolean onChain); }
     public interface InspectCb { void report(java.util.List<String> lines); }
 
@@ -224,8 +229,47 @@ public final class SwapEngine {
     int cpInFlightSizeForTest() { synchronized (CP_LOCKING) { return cpInFlight.size(); } }
     static synchronized void resetFragmentationNoteForTest() { lastFragmentationNoteMs = 0; }
 
+    // The existing CP maps reserve coins; this identity additionally owns delayed callbacks.
+    // All accesses use their existing CP_LOCKING monitor, shared by Activity and Service engines.
+    private static final Map<String, CounterLeg> cpAttempts = new HashMap<>();
+    private final class CounterLeg {
+        final EthHtlc.Contract contract;
+        final String hash;
+        final com.eurobuddha.atomix.TradingContext market;
+        final long generation;
+        final EthNet network = net;
+        final EthRpc connection = rpc;
+        CounterLeg(EthHtlc.Contract contract, com.eurobuddha.atomix.TradingContext market, long generation) {
+            this.contract = contract; hash = contract.hashlock; this.market = market; this.generation = generation;
+        }
+        boolean owned() { synchronized (CP_LOCKING) { return cpAttempts.get(hash) == this; } }
+        boolean current() {
+            synchronized (CP_LOCKING) {
+                return owned() && CP_LOCKING.containsKey(hash) && cpInFlight.containsKey(hash)
+                        && !io.isShutdown() && !halted() && network == net && connection == rpc
+                        && generation == PublishGate.gen() && market == com.eurobuddha.atomix.TradingContext.active()
+                        && market.tokenId.equalsIgnoreCase(minima.activeToken());
+            }
+        }
+        boolean authorized() { return current() && terms(); }
+        // Reuse the original acceptance boundaries immediately before creating a new liability.
+        boolean terms() {
+            if (contract.otc) {
+                OtcDb.Deal deal = otcLpDeal(hash);
+                return deal != null && otcVerifyBuy(contract, deal);
+            }
+            return myOrder != null && myOrder.market() == market && acceptTakerBuyMinima(contract);
+        }
+        void release() {
+            synchronized (CP_LOCKING) {
+                if (!owned()) return;
+                releaseCpLeg(hash); inflight.remove("cpMin:" + hash);
+            }
+        }
+    }
+
     private void releaseCpLeg(String hash) {
-        synchronized (CP_LOCKING) { cpInFlight.remove(hash); cpLockSince.remove(hash); CP_LOCKING.remove(hash); }
+        synchronized (CP_LOCKING) { cpInFlight.remove(hash); cpLockSince.remove(hash); CP_LOCKING.remove(hash); cpAttempts.remove(hash); }
     }
 
     /** Fresh bid backing through the existing worker/main callback boundary, then fresh Minima backing. */
@@ -337,7 +381,9 @@ public final class SwapEngine {
         if (hash != null && !hash.isEmpty()) { incoming.add(MinimaHtlc.normKey(hash)); SwapLog.d("RX buy handshake hash=" + hash); }
     }
     public SwapDb db() { return db; }
-    public void shutdown() { io.shutdownNow(); }
+    public void shutdown() {
+        for (Runnable task : io.shutdownNow()) if (task instanceof IoTask) ((IoTask) task).cancelQueued();
+    }
 
     private boolean ready() { return rpc != null && net != null && wallet.ready() && myMinimaPk != null && minima.ready(); }
     private String myEth() { return wallet.address(); }
@@ -352,7 +398,13 @@ public final class SwapEngine {
     /** As above, with the OTC bit: {@code otc=true} sets HTLC state[7]=TRUE so the ladder auto-responder skips it
      *  and only the negotiated OTC responder locks the counter-leg. */
     public void startMinimaToErc20(Order maker, String sellMinima, String tokenSymbol, String buyTokenAmount, boolean otc, StartCb result) {
+        startMinimaToErc20(maker, sellMinima, tokenSymbol, buyTokenAmount, otc, com.eurobuddha.atomix.TradingContext.active(), result);
+    }
+
+    void startMinimaToErc20(Order maker, String sellMinima, String tokenSymbol, String buyTokenAmount, boolean otc, com.eurobuddha.atomix.TradingContext market, StartCb result) {
         if (!ready()) { result.err("Not ready"); return; }
+        if (market == null || market != com.eurobuddha.atomix.TradingContext.active() || !market.tokenId.equalsIgnoreCase(minima.activeToken())) { result.err(OtcController.MARKET_ERROR); return; }
+        if (!otc && (maker == null || maker.market != market)) { result.err(SwapOrderBook.MARKET_ERROR); return; }
         // M3: a responder burst-lock (or a coin-split) draws mxUSDT from the SAME coin pool that this
         // user-initiated node-auto-select lock does; both could pick the same coin → one tx is rejected as a
         // double-spend (fund-safe) but can leave a phantom LOCKED row. Decline briefly while a responder lock or
@@ -365,14 +417,17 @@ public final class SwapEngine {
             }
         }
         final StartCb cb = new StartCb() {
+            public boolean onPrepared(String hash) { return result.onPrepared(hash); }
             public void ok(String hash) { synchronized (CP_LOCKING) { inflight.remove("sell"); } result.ok(hash); }
             public void err(String error) { synchronized (CP_LOCKING) { inflight.remove("sell"); } result.err(error); }
         };
         final String reqToken = "ETH:" + token.address;
         minima.generateSecret(new MinimaHtlc.SecretCb() {
             @Override public void ok(String secret, String hash) {
+                if (market != com.eurobuddha.atomix.TradingContext.active()) { cb.err(OtcController.MARKET_ERROR); return; }
                 minima.currentBlock(new MinimaHtlc.BlockCb() {
                     @Override public void ok(int block) {
+                        if (market != com.eurobuddha.atomix.TradingContext.active()) { cb.err(OtcController.MARKET_ERROR); return; }
                         final int timelock = block + TIMELOCK_BLOCKS;
                         // M2: record the secret + swap row BEFORE the lock broadcast (parity with
                         // startErc20ToMinima). If lock() mines but its response is lost, the secret + row survive
@@ -380,12 +435,17 @@ public final class SwapEngine {
                         // checkExpiredMinima) reclaims the coin at the timelock regardless of the DB. A row whose
                         // broadcast never landed is a harmless phantom (no coin at the HTLC address for this hash
                         // → no responder engages, nothing to refund).
-                        db.insertSecret(hash, secret);
-                        db.insertMyHtlc(hash, buyTokenAmount, reqToken);
                         SwapDb.Swap s = baseSwap(hash, "INITIATOR", "MINIMA_TO_ERC20",
-                                com.eurobuddha.atomix.TradingContext.active().coinLabel, sellMinima, tokenSymbol, buyTokenAmount, maker.ethAddress);
+                                market.coinLabel, sellMinima, tokenSymbol, buyTokenAmount, maker.ethAddress);
                         s.myTimelock = timelock; s.myLegIsMinima = true; s.status = SwapDb.ST_STARTED;
-                        db.upsertSwap(s);
+                        try {
+                            db.prepareInitiator(s, secret, buyTokenAmount, reqToken);
+                            if (!cb.onPrepared(hash)) {
+                                cb.err("The swap lock was not submitted because recovery data could not be saved."); return;
+                            }
+                        } catch (RuntimeException storageFailure) {
+                            cb.err("The swap lock was not submitted because recovery data could not be saved."); return;
+                        }
                         notifier.onSwapsChanged();
                         minima.lock(sellMinima, buyTokenAmount, token.address, maker.minimaPublicKey,
                                 myEth(), hash, timelock, otc ? "TRUE" : "FALSE", new MinimaHtlc.PostCb() {
@@ -412,21 +472,33 @@ public final class SwapEngine {
      *  derived from the LP's side; amounts from the negotiated terms (USDT = amount × price, at 6-dp). Returns the
      *  hashlock via cb — the caller then sends an EXECUTE message so the LP responds against this exact hash. */
     public void executeOtcDeal(OtcDb.Deal deal, StartCb cb) {
+        if (!OtcController.validDeal(deal)) { cb.err("enter amount + price"); return; }
+        final com.eurobuddha.atomix.TradingContext market = deal == null ? null : deal.market();
+        if (market == null || market != com.eurobuddha.atomix.TradingContext.active()
+                || !market.tokenId.equalsIgnoreCase(minima.activeToken())) {
+            cb.err(OtcController.MARKET_ERROR); return;
+        }
         Order lp = new Order();
         lp.minimaPublicKey = deal.peerMinimaPk;
         lp.ethAddress = deal.peerEthAddr;
         lp.commsPublicId = deal.peerCommsId;
         String usdt = dec(deal.amount).multiply(dec(deal.price)).setScale(6, java.math.RoundingMode.DOWN).toPlainString();
         if (OtcOffer.LP_SELLS_MINIMA.equals(deal.side))
-            startErc20ToMinima(lp, "USDT", usdt, deal.amount, true, cb);   // LP sells mxUSDT → I BUY: lock USDT
+            startErc20ToMinima(lp, "USDT", usdt, deal.amount, true, market, cb);   // LP sells mxUSDT → I BUY: lock USDT
         else
-            startMinimaToErc20(lp, deal.amount, "USDT", usdt, true, cb);    // LP buys mxUSDT → I SELL: lock mxUSDT
+            startMinimaToErc20(lp, deal.amount, "USDT", usdt, true, market, cb);    // LP buys mxUSDT → I SELL: lock mxUSDT
     }
 
     /** As above, with the OTC bit: {@code otc=true} sets the ETH contract's otc flag so the ladder auto-responder
      *  skips it and only the negotiated OTC responder locks the counter-leg. */
     public void startErc20ToMinima(Order maker, String tokenSymbol, String sellTokenAmount, String buyMinima, boolean otc, StartCb cb) {
+        startErc20ToMinima(maker, tokenSymbol, sellTokenAmount, buyMinima, otc, com.eurobuddha.atomix.TradingContext.active(), cb);
+    }
+
+    void startErc20ToMinima(Order maker, String tokenSymbol, String sellTokenAmount, String buyMinima, boolean otc, com.eurobuddha.atomix.TradingContext market, StartCb cb) {
         if (!ready()) { cb.err("Not ready"); return; }
+        if (market == null || market != com.eurobuddha.atomix.TradingContext.active() || !market.tokenId.equalsIgnoreCase(minima.activeToken())) { cb.err(OtcController.MARKET_ERROR); return; }
+        if (!otc && (maker == null || maker.market != market)) { cb.err(SwapOrderBook.MARKET_ERROR); return; }
         final EthNet.Token token = net.token(tokenSymbol);
         if (token == null) { cb.err("Unknown token " + tokenSymbol); return; }
         // M1: request the mxUSDT at the 6dp trade grain. The responder locks grain(amount) (6dp), so a >6dp
@@ -435,8 +507,10 @@ public final class SwapEngine {
         final String reqMinima = MinimaHtlc.grain(buyMinima);
         minima.generateSecret(new MinimaHtlc.SecretCb() {
             @Override public void ok(String secret, String hash) {
+                if (market != com.eurobuddha.atomix.TradingContext.active()) { cb.err(OtcController.MARKET_ERROR); return; }
                 submitIo(() -> {
                     try {
+                        if (market != com.eurobuddha.atomix.TradingContext.active()) { ui.post(() -> cb.err(OtcController.MARKET_ERROR)); return; }
                         Credentials creds = wallet.creds();
                         EthHtlc eth = new EthHtlc(rpc, creds, net);
                         BigInteger sellRaw = parseUnits(sellTokenAmount, token.decimals);
@@ -444,6 +518,7 @@ public final class SwapEngine {
                         ensureAllowanceBlocking(eth, token.address, sellRaw);
                         // F2: base the timelock on CHAIN time (what the vault enforces), not the device clock.
                         final long timelock = ethChainNow() + TIMELOCK_SECS;
+                        if (market != com.eurobuddha.atomix.TradingContext.active()) { ui.post(() -> cb.err(OtcController.MARKET_ERROR)); return; }
                         // CR-1: record the secret + swap row SYNCHRONOUSLY (on this io thread) BEFORE the lock
                         // broadcast. These were posted to the UI thread, but a busy or destroyed main thread can
                         // DROP the post while newContract has already mined — and there is NO contractsAsSender
@@ -452,13 +527,18 @@ public final class SwapEngine {
                         // db.allSwaps() and refunds at timelock even if the broadcast response is lost. A row whose
                         // broadcast never landed is a harmless phantom (getContract → null → no-op). Only the UI
                         // callback goes to ui.post.
-                        db.insertSecret(hash, secret);
-                        db.insertMyHtlc(hash, reqMinima, "minima");
                         SwapDb.Swap s = baseSwap(hash, "INITIATOR", "ERC20_TO_MINIMA",
-                                tokenSymbol, sellTokenAmount, com.eurobuddha.atomix.TradingContext.active().coinLabel, reqMinima, maker.minimaPublicKey);
+                                tokenSymbol, sellTokenAmount, market.coinLabel, reqMinima, maker.minimaPublicKey);
                         s.myTimelock = timelock; s.myLegIsMinima = false; s.status = SwapDb.ST_STARTED;
                         s.contractId = EthHtlc.contractId(hash);
-                        db.upsertSwap(s);
+                        try {
+                            db.prepareInitiator(s, secret, reqMinima, "minima");
+                            if (!cb.onPrepared(hash)) {
+                                ui.post(() -> cb.err("The swap lock was not submitted because recovery data could not be saved.")); return;
+                            }
+                        } catch (RuntimeException storageFailure) {
+                            ui.post(() -> cb.err("The swap lock was not submitted because recovery data could not be saved.")); return;
+                        }
                         ui.post(notifier::onSwapsChanged);
                         String txhash = eth.newContract(myMinimaPk, maker.ethAddress, hash,
                                 BigInteger.valueOf(timelock), token.address, sellRaw, reqRaw, otc);
@@ -644,19 +724,11 @@ public final class SwapEngine {
         ui.post(() -> cb.report(out));
     }
 
-    /** The recorded-transaction line, which is printed on EVERY inspection — including, and especially, when
-     *  there is nothing to print. The swap row and the secret are written BEFORE the lock is broadcast (see
-     *  startMinimaToErc20's M2 note) so that a lost reply cannot strand a claimable leg; the flip side is that a
-     *  row exists even when the broadcast never happened, and logEvent only runs on the PostCb.ok path. So "no
-     *  recorded transaction" is not an absence of evidence — it is the evidence: nothing was ever posted.
-     *  Before this line the report said "Check the recorded transaction below" and then printed nothing at all,
-     *  which is how a phantom row read as an unexplained stall (live, 2026-09-20: a 7500 MINIMA leg that the
-     *  1024-block lookup could not find because it had never been broadcast). */
+    /** A missing local acknowledgement cannot distinguish an unposted write from a lost reply.
+     * The swap and secret are saved before broadcast; only PostCb.ok records the transaction id. */
     static String recordedTxnSummary(int recordedCount) {
         if (recordedCount > 0) return "Recorded transactions: " + recordedCount + " (listed above).";
-        return "Recorded transactions: NONE. This row was saved before its broadcast, and no transaction id was "
-                + "ever returned — so the leg was almost certainly never posted to the chain. Nothing is locked "
-                + "and nothing needs refunding; the row clears itself at the refund block.";
+        return "Recorded transactions: NONE. No transaction id is recorded locally. A broadcast may have completed despite a lost reply. Check the on-chain state before retrying or deciding whether funds need recovery.";
     }
 
     /** Body of the "Add ETH for gas" notification. RULE 1: the wallet is named IN FULL, because this is the
@@ -873,6 +945,8 @@ public final class SwapEngine {
 
     /** Port of _checkCanSwapCoin: I am the receiver(state[4]) of a Minima HTLC coin. (package-private for tests) */
     void checkCanSwapCoin(JSONObject coin, int block) {
+        final com.eurobuddha.atomix.TradingContext market = com.eurobuddha.atomix.TradingContext.active();
+        final long generation = PublishGate.gen();
         String hash = MinimaHtlc.stateAt(coin, 5);
         if (hash.isEmpty()) return;
         int timelock = parseInt(MinimaHtlc.stateAt(coin, 3));
@@ -925,7 +999,7 @@ public final class SwapEngine {
         // against my active-currency order/price would misprice the counter-leg. Claiming a coin I'm OWED (secret
         // known, above) and refunding my own expired coins (checkExpiredMinima) stay token-agnostic; only this
         // new-liability path is gated.
-        if (halted()) return;   // node/app key mismatch — take on no new counter-leg liability
+        if (io.isShutdown() || halted()) return;   // stopped host/key mismatch: no new liability
         if (!minima.activeToken().equalsIgnoreCase(coin.optString("tokenid", "0x00"))) return;
         if (db.haveSentCounterParty(hash)) return;
         if (timelock - block < CP_BLOCKS_CHECK) return;                    // first leg too close to expiry
@@ -935,9 +1009,13 @@ public final class SwapEngine {
             OtcDb.Deal d = otcLpDeal(hash);
             if (d == null || !otcVerifySell(coin, d, reqTokenAddr)) return;
         } else if (!acceptTakerSellMinima(coin, reqTokenAddr)) return;   // must match my published order
-        if (!inflight.add("cpEth:" + hash)) return;
+        final JSONObject operationCoin;
+        try { operationCoin = new JSONObject(coin.toString()); }
+        catch (org.json.JSONException invalid) { return; }
+        final java.util.function.BooleanSupplier authorized = ethCounterLegGuard(operationCoin, hash, reqTokenAddr, market, generation);
+        if (!authorized.getAsBoolean() || !inflight.add("cpEth:" + hash)) return;
         // CR-2: if the pool is shut down mid-call, release the marker we just claimed so the hash isn't wedged.
-        submitIo(() -> lockEthCounterLeg(coin, hash, reqTokenAddr), () -> inflight.remove("cpEth:" + hash));
+        submitIo(() -> lockEthCounterLeg(operationCoin, hash, reqTokenAddr, market, authorized), () -> inflight.remove("cpEth:" + hash));
     }
 
     /** TEST SEAM: the retry window is ETH_RETRY_SECS of real time, so a test proves the self-healing re-fire by
@@ -1013,13 +1091,35 @@ public final class SwapEngine {
     }
 
     /** [io] lock the ETH counter-leg for a mxUSDT→ERC20 swap I'm responding to (now+1800s). */
-    private void lockEthCounterLeg(JSONObject coin, String hash, String reqTokenAddr) {
+    // Capture the same market/generation boundary used by the Minima responder before entering the IO queue.
+    private java.util.function.BooleanSupplier ethCounterLegGuard(JSONObject coin, String hash, String reqTokenAddr,
+            com.eurobuddha.atomix.TradingContext market, long generation) {
+        final EthNet network = net;
+        final EthRpc connection = rpc;
+        final String ownerKey = myMinimaPk, ownerEth = myEth();
+        return () -> {
+            if (io.isShutdown() || halted() || network != net || connection != rpc
+                    || generation != PublishGate.gen() || market != com.eurobuddha.atomix.TradingContext.active()
+                    || !market.tokenId.equalsIgnoreCase(minima.activeToken())
+                    || !market.tokenId.equalsIgnoreCase(coin.optString("tokenid", "0x00"))
+                    || !java.util.Objects.equals(ownerKey, myMinimaPk) || !java.util.Objects.equals(ownerEth, myEth())) return false;
+            if ("TRUE".equals(MinimaHtlc.stateAt(coin, 7))) {
+                OtcDb.Deal deal = otcLpDeal(hash);
+                return deal != null && otcVerifySell(coin, deal, reqTokenAddr);
+            }
+            return myOrder != null && myOrder.market() == market && acceptTakerSellMinima(coin, reqTokenAddr);
+        };
+    }
+
+    private void lockEthCounterLeg(JSONObject coin, String hash, String reqTokenAddr,
+                                   com.eurobuddha.atomix.TradingContext market,
+                                   java.util.function.BooleanSupplier authorized) {
         try {
-            if (halted()) { inflight.remove("cpEth:" + hash); return; }   // belt: never commit ETH while mismatched
+            EthTx.requireAuthorized(authorized);
             EthNet.Token token = net.tokenByAddress(reqTokenAddr);
             if (token == null) { inflight.remove("cpEth:" + hash); return; }
             Credentials creds = wallet.creds();
-            EthHtlc eth = new EthHtlc(rpc, creds, net);
+            EthHtlc eth = new EthHtlc(rpc, creds, net, authorized);
             String tokenHuman = MinimaHtlc.stateAt(coin, 1);               // ERC20 amount the maker requested
             String reqMinimaHuman = MinimaHtlc.coinAmount(coin);        // mxUSDT they locked
             String receiverEth = MinimaHtlc.stateAt(coin, 6);             // maker's ETH address (ownereth)
@@ -1040,13 +1140,14 @@ public final class SwapEngine {
             final long timelock = existing != null && !existing.myLegIsMinima && existing.myTimelock > 0
                     ? existing.myTimelock : chainNow + CP_SECS;
             if (timelock <= chainNow) throw new java.io.IOException("Saved Ethereum counter-leg expired; no new lock was sent.");
+            EthTx.requireAuthorized(authorized);
             // CR-1: record the swap row SYNCHRONOUSLY (this io thread) BEFORE the broadcast, and log EV_CPSENT
             // synchronously AFTER it — both were in ui.post()s that a destroyed main thread can DROP. Losing the
             // row leaves a mined counter-leg with nothing to refund it (no contractsAsSender scan); losing
             // EV_CPSENT leaves haveSentCounterParty false, so the responder re-locks and DOUBLE-locks the leg.
             // The cpEth marker is likewise released here on the io thread, not in a droppable post.
             SwapDb.Swap s = baseSwap(hash, "RESPONDER", "MINIMA_TO_ERC20",
-                    token.symbol, tokenHuman, com.eurobuddha.atomix.TradingContext.active().coinLabel, reqMinimaHuman, receiverEth);
+                    token.symbol, tokenHuman, market.coinLabel, reqMinimaHuman, receiverEth);
             s.myTimelock = timelock; s.myLegIsMinima = false; s.contractId = EthHtlc.contractId(hash);
             s.status = SwapDb.ST_LOCKED;
             db.upsertSwap(s);
@@ -1076,6 +1177,7 @@ public final class SwapEngine {
             // Prune stale CP_LOCKING markers (owning engine died mid-flight so its confirm-release never ran;
             // the DB row + haveSentCounterParty already dedup). Bounds the static map in a long-running process.
             CP_LOCKING.entrySet().removeIf(e -> nowUnix() - e.getValue() > CP_LOCK_TIMEOUT_SECS);
+            cpAttempts.keySet().retainAll(CP_LOCKING.keySet());
         }
         for (String h : pendLegs) {
             Long since = cpLockSince.get(h);
@@ -1083,7 +1185,13 @@ public final class SwapEngine {
             // so a leg whose lock callback was lost (dropped on a finishing Activity) doesn't leak the marker and
             // wedge that hash forever.
             if (since != null && nowUnix() - since > CP_LOCK_TIMEOUT_SECS) { releaseCpLeg(h); inflight.remove("cpMin:" + h); continue; }
-            confirmMyLock(h, true, onChain -> { if (onChain) { releaseCpLeg(h); inflight.remove("cpMin:" + h); } });
+            final CounterLeg attempt;
+            synchronized (CP_LOCKING) { attempt = cpAttempts.get(h); }
+            confirmMyLock(h, true, onChain -> {
+                synchronized (CP_LOCKING) {
+                    if (onChain && cpAttempts.get(h) == attempt) { releaseCpLeg(h); inflight.remove("cpMin:" + h); }
+                }
+            });
         }
 
         // PRIMARY (works on free/keyless RPCs): for every known swap, read its ETH leg by deterministic
@@ -1367,6 +1475,8 @@ public final class SwapEngine {
 
     /** Port of _checkCanCollectETHCoin: I am the receiver of an ETH HTLC contract. */
     private void checkCanCollectEth(EthHtlc eth, EthHtlc.Contract c, int minimaBlock) throws Exception {
+        final com.eurobuddha.atomix.TradingContext market = com.eurobuddha.atomix.TradingContext.active();
+        final long generation = PublishGate.gen();
         String hash = c.hashlock;
         String secret = db.getSecret(hash);
 
@@ -1387,7 +1497,7 @@ public final class SwapEngine {
         }
 
         // I don't know the secret → I'm an ERC20→mxUSDT responder; lock the mxUSDT counter-leg.
-        if (halted()) return;   // node/app key mismatch — take on no new counter-leg liability
+        if (io.isShutdown() || halted()) return;   // stopped host/key mismatch: no new liability
         if (db.haveSentCounterParty(hash)) return;
         // Persistent dedup (survives a restart / a lost txnpost response that the in-memory CP_LOCKING can't):
         // lockMinimaCounterLeg records the swap row BEFORE broadcast, so a row here means this hash is already
@@ -1421,7 +1531,7 @@ public final class SwapEngine {
             cpLockSince.put(hash, nowUnix());   // MA-18: inside the CP_LOCKING monitor with cpInFlight (lines 202-203)
         }
         if (!inflight.add("cpMin:" + hash)) { releaseCpLeg(hash); return; }
-        lockMinimaCounterLeg(c, minimaBlock);
+        lockMinimaCounterLeg(c, minimaBlock, market, generation);
     }
 
     /** Tell the maker (once) why a handshake-announced buy was declined, so a reject isn't silent. */
@@ -1431,87 +1541,112 @@ public final class SwapEngine {
     }
 
     /** Lock the mxUSDT counter-leg for an ERC20→mxUSDT swap I'm responding to (block+36). */
-    private void lockMinimaCounterLeg(EthHtlc.Contract c, int minimaBlock) {
+    private void lockMinimaCounterLeg(EthHtlc.Contract c, int minimaBlock,
+                                      com.eurobuddha.atomix.TradingContext market, long generation) {
         final String hash = c.hashlock;
+        final CounterLeg attempt;
+        synchronized (CP_LOCKING) {
+            if (!CP_LOCKING.containsKey(hash) || !cpInFlight.containsKey(hash) || cpAttempts.containsKey(hash)) return;
+            attempt = new CounterLeg(c, market, generation);
+            cpAttempts.put(hash, attempt);
+        }
+        if (!attempt.current()) { attempt.release(); return; }
         if (isConsolidating()) {
-            releaseCpLeg(hash); inflight.remove("cpMin:" + hash);
+            attempt.release();
             declineCpNote(hash, "Consolidation in progress. Retry after confirmation. Deal: " + hash);
             return;
         }
         final int timelock = minimaBlock + CP_BLOCKS;
         final String reqMinimaHuman = EthWallet.format(c.requestAmount, 18, 18);   // mxUSDT they want from me
         final String receiverPubkey = c.minimaPublicKey;                           // initiator's Minima pubkey
-        ui.post(() -> minima.myFreeCoins(coins -> {
-            // Gather DISTINCT confirmed coins totalling ≥ the lock amount (largest-first → fewest inputs), skipping
-            // any coin reserved by another in-flight burst lock. This fills a deal larger than any SINGLE coin (like
-            // a wallet send auto-selecting UTXOs) while burst siblings still never double-select. Pick + reserve atomically.
-            final java.math.BigDecimal need = new java.math.BigDecimal(reqMinimaHuman);
-            final java.util.List<String> pickIds = new java.util.ArrayList<>();
-            java.math.BigDecimal pickSumTmp = java.math.BigDecimal.ZERO, freeTotal = java.math.BigDecimal.ZERO;
-            synchronized (CP_LOCKING) {                       // single monitor for all cpInFlight mutations
-                java.util.Set<String> used = new java.util.HashSet<>();   // coinids reserved by other in-flight locks (values are comma-joined lists)
-                for (String v : cpInFlight.values()) if (v != null && !v.isEmpty()) for (String u : v.split(",")) if (!u.isEmpty()) used.add(u);
-                java.util.List<String> ids = new java.util.ArrayList<>();
-                java.util.List<java.math.BigDecimal> amts = new java.util.ArrayList<>();
-                for (int i = 0; i < coins.length(); i++) {
-                    JSONObject cc = coins.optJSONObject(i); if (cc == null) continue;
-                    String cid = cc.optString("coinid", ""), amt = MinimaHtlc.coinAmount(cc);
-                    if (cid.isEmpty() || used.contains(cid)) continue;
-                    try { java.math.BigDecimal a = new java.math.BigDecimal(amt); ids.add(cid); amts.add(a); freeTotal = freeTotal.add(a); } catch (Exception ignore) {}
+        if (!ui.post(() -> {
+            if (!attempt.current() || !attempt.terms()) { attempt.release(); return; }
+            minima.myFreeCoins(coins -> {
+                if (!attempt.current() || !attempt.terms()) { attempt.release(); return; }
+                // Gather DISTINCT confirmed coins totalling ≥ the lock amount (largest-first → fewest inputs), skipping
+                // any coin reserved by another in-flight burst lock. This fills a deal larger than any SINGLE coin (like
+                // a wallet send auto-selecting UTXOs) while burst siblings still never double-select. Pick + reserve atomically.
+                final java.math.BigDecimal need = new java.math.BigDecimal(reqMinimaHuman);
+                final java.util.List<String> pickIds = new java.util.ArrayList<>();
+                java.math.BigDecimal pickSumTmp = java.math.BigDecimal.ZERO, freeTotal = java.math.BigDecimal.ZERO;
+                synchronized (CP_LOCKING) {                       // single monitor for all cpInFlight mutations
+                    if (!attempt.current()) { attempt.release(); return; }
+                    java.util.Set<String> used = new java.util.HashSet<>();   // coinids reserved by other in-flight locks (values are comma-joined lists)
+                    for (String v : cpInFlight.values()) if (v != null && !v.isEmpty()) for (String u : v.split(",")) if (!u.isEmpty()) used.add(u);
+                    java.util.List<String> ids = new java.util.ArrayList<>();
+                    java.util.List<java.math.BigDecimal> amts = new java.util.ArrayList<>();
+                    for (int i = 0; i < coins.length(); i++) {
+                        JSONObject cc = coins.optJSONObject(i); if (cc == null) continue;
+                        String cid = cc.optString("coinid", ""), amt = MinimaHtlc.coinAmount(cc);
+                        if (cid.isEmpty() || used.contains(cid)) continue;
+                        try { java.math.BigDecimal a = new java.math.BigDecimal(amt); ids.add(cid); amts.add(a); freeTotal = freeTotal.add(a); } catch (Exception ignore) {}
+                    }
+                    Integer[] ord = new Integer[ids.size()];
+                    for (int i = 0; i < ord.length; i++) ord[i] = i;
+                    java.util.Arrays.sort(ord, (x, y) -> amts.get(y).compareTo(amts.get(x)));   // largest-first
+                    for (int oi = 0; oi < ord.length && pickSumTmp.compareTo(need) < 0 && pickIds.size() < MAX_LOCK_COINS; oi++) {
+                        pickIds.add(ids.get(ord[oi])); pickSumTmp = pickSumTmp.add(amts.get(ord[oi]));
+                    }
+                    if (pickSumTmp.compareTo(need) >= 0) cpInFlight.put(hash, android.text.TextUtils.join(",", pickIds));
+                    else pickIds.clear();
                 }
-                Integer[] ord = new Integer[ids.size()];
-                for (int i = 0; i < ord.length; i++) ord[i] = i;
-                java.util.Arrays.sort(ord, (x, y) -> amts.get(y).compareTo(amts.get(x)));   // largest-first
-                for (int oi = 0; oi < ord.length && pickSumTmp.compareTo(need) < 0 && pickIds.size() < MAX_LOCK_COINS; oi++) {
-                    pickIds.add(ids.get(ord[oi])); pickSumTmp = pickSumTmp.add(amts.get(ord[oi]));
+                if (pickIds.isEmpty()) {   // can't cover `need` right now — DON'T hang silently; tell the LP why
+                    attempt.release();
+                    declineCpNote(hash, freeTotal.compareTo(need) < 0
+                            ? "Can't fill deal — need " + reqMinimaHuman + " mxUSDT, only " + freeTotal.toPlainString() + " free"
+                            : "mxUSDT too fragmented to lock " + reqMinimaHuman + " in one tx — consolidate your coins");
+                    return;
                 }
-                if (pickSumTmp.compareTo(need) >= 0) cpInFlight.put(hash, android.text.TextUtils.join(",", pickIds));
-                else pickIds.clear();
-            }
-            if (pickIds.isEmpty()) {   // can't cover `need` right now — DON'T hang silently; tell the LP why
-                releaseCpLeg(hash); inflight.remove("cpMin:" + hash);
-                declineCpNote(hash, freeTotal.compareTo(need) < 0
-                        ? "Can't fill deal — need " + reqMinimaHuman + " mxUSDT, only " + freeTotal.toPlainString() + " free"
-                        : "mxUSDT too fragmented to lock " + reqMinimaHuman + " in one tx — consolidate your coins");
-                return;
-            }
-            final String totalSel = pickSumTmp.toPlainString();
-            // RECORD-BEFORE-BROADCAST (mirrors lockEthCounterLeg's Fix D): persist the swap row NOW, so a process
-            // kill or a lost txnpost response between broadcast and ok() can't re-lock this hash on restart. The
-            // row (gated in checkCanCollectEth via getSwap!=null) is the only restart-proof dedup the mxUSDT leg
-            // has (no on-chain hash-uniqueness). EV_CPSENT stays AFTER (→ haveSentCounterParty).
-            EthNet.Token tk = net.tokenByAddress(c.tokenContract);
-            String sym = tk == null ? "token" : tk.symbol;
-            SwapDb.Swap s = baseSwap(hash, "RESPONDER", "ERC20_TO_MINIMA",
-                    com.eurobuddha.atomix.TradingContext.active().coinLabel, reqMinimaHuman, sym, EthWallet.format(c.amount, decimalsOf(c.tokenContract), 18),
-                    receiverPubkey);
-            s.myTimelock = timelock; s.myLegIsMinima = true; s.contractId = c.contractId;
-            s.status = SwapDb.ST_LOCKED;
-            db.upsertSwap(s);
-            notifier.onSwapsChanged();
-            minima.lockFromCoins(pickIds, totalSel, reqMinimaHuman, reqMinimaHuman, "minima", receiverPubkey,
-                    myEth(), hash, timelock, "FALSE", new MinimaHtlc.PostCb() {
-                @Override public void ok(String txpowid) {
-                    db.logEvent(hash, SwapDb.EV_CPSENT, "minima", reqMinimaHuman, txpowid);
-                    notifier.notify("Locked your " + com.eurobuddha.atomix.TradingContext.active().coinLabel, "Waiting for the counterparty to reveal the secret");
-                    notifier.onSwapsChanged();
-                    inflight.remove("cpMin:" + hash);
-                    // keep cpInFlight[hash] reserved until the lock CONFIRMS (freed in runEthChecks) — holds the coin
+                final String totalSel = pickSumTmp.toPlainString();
+                // RECORD-BEFORE-BROADCAST (mirrors lockEthCounterLeg's Fix D): persist the swap row NOW, so a process
+                // kill or a lost txnpost response between broadcast and ok() can't re-lock this hash on restart. The
+                // row (gated in checkCanCollectEth via getSwap!=null) is the only restart-proof dedup the mxUSDT leg
+                // has (no on-chain hash-uniqueness). EV_CPSENT stays AFTER (→ haveSentCounterParty).
+                EthNet.Token tk = net.tokenByAddress(c.tokenContract);
+                String sym = tk == null ? "token" : tk.symbol;
+                SwapDb.Swap s = baseSwap(hash, "RESPONDER", "ERC20_TO_MINIMA",
+                        attempt.market.coinLabel, reqMinimaHuman, sym, EthWallet.format(c.amount, decimalsOf(c.tokenContract), 18),
+                        receiverPubkey);
+                s.myTimelock = timelock; s.myLegIsMinima = true; s.contractId = c.contractId;
+                s.status = SwapDb.ST_LOCKED;
+                synchronized (CP_LOCKING) {
+                    if (!attempt.current() || !attempt.terms()) { attempt.release(); return; }
+                    try { db.upsertSwap(s); }
+                    catch (RuntimeException storageFailure) {
+                        attempt.release(); SwapLog.w("Counter-leg could not be saved before signing"); return;
+                    }
                 }
-                @Override public void err(String m) {
-                    inflight.remove("cpMin:" + hash);
-                    // Retry ONLY if the failure provably didn't broadcast (build phase, no "POSTED:" tag); a
-                    // txnpost failure may have landed with a lost response → keep the row so we never re-lock.
-                    if (m == null || !m.startsWith("POSTED:")) db.deleteSwap(hash);
-                    releaseCpLeg(hash);
-                }
+                notifier.onSwapsChanged();
+                minima.lockFromCoins(pickIds, totalSel, reqMinimaHuman, reqMinimaHuman, "minima", receiverPubkey,
+                        myEth(), hash, timelock, "FALSE", attempt::authorized, new MinimaHtlc.PostCb() {
+                    @Override public void ok(String txpowid) {
+                        db.logEvent(hash, SwapDb.EV_CPSENT, "minima", reqMinimaHuman, txpowid);
+                        notifier.notify("Locked your " + attempt.market.coinLabel, "Waiting for the counterparty to reveal the secret");
+                        notifier.onSwapsChanged();
+                        synchronized (CP_LOCKING) {
+                            if (attempt.owned()) inflight.remove("cpMin:" + hash);
+                        }
+                        // keep cpInFlight[hash] reserved until the lock CONFIRMS (freed in runEthChecks) — holds the coin
+                    }
+                    @Override public void err(String m) {
+                        synchronized (CP_LOCKING) {
+                        if (!attempt.owned()) return;
+                        // Retry ONLY if the failure provably didn't broadcast (build phase, no "POSTED:" tag); a
+                        // txnpost failure may have landed with a lost response → keep the row so we never re-lock.
+                        if (m == null || !m.startsWith("POSTED:")) db.deleteSwap(hash);
+                        attempt.release();
+                        }
+                    }
+                });
+            }, e -> {
+                boolean report = attempt.current();
+                attempt.release();
+                if (!report) return;
+                SwapLog.w("Buy " + hash + " counter-leg declined: " + e);
+                if (e != null && e.startsWith(MinimaHtlc.ERR_TOO_MANY_COINS) && shouldNoteFragmentation())
+                    declineCpNote(hash, e + ". Open Wallet → Consolidate before accepting buys. Deal: " + hash);
             });
-        }, e -> {
-            releaseCpLeg(hash); inflight.remove("cpMin:" + hash);
-            SwapLog.w("Buy " + hash + " counter-leg declined: " + e);
-            if (e != null && e.startsWith(MinimaHtlc.ERR_TOO_MANY_COINS) && shouldNoteFragmentation())
-                declineCpNote(hash, e + ". Open Wallet → Consolidate before accepting buys. Deal: " + hash);
-        }));
+        })) attempt.release();
     }
 
     // ============================================================ order-match guards (fund safety)
@@ -1575,13 +1710,9 @@ public final class SwapEngine {
         if (otcDb == null) return null;
         OtcDb.Deal d = otcDb.dealByHash(hash);
         if (d == null || !OtcDb.ROLE_LP.equals(d.role)) return null;
-        // FUND-SAFETY (combine): an AGREED/EXECUTING OTC deal persists across a currency switch. Never respond to
-        // (lock the counter-leg for) a deal negotiated in a currency that is not the ACTIVE one — its amount/price
-        // are that currency's, so locking the now-active token against them would misprice. This is the single
-        // chokepoint for BOTH otcVerifyBuy (ETH-leg-first) and otcVerifySell (Minima-leg-first). (A pre-stamp
-        // legacy row has null currency → treated as active, matching old single-currency behaviour.)
-        if (d.currency != null && !d.currency.isEmpty()
-                && !com.eurobuddha.atomix.TradingContext.active().key.equals(d.currency)) return null;
+        // Both responder paths need explicit attribution. Unknown legacy deals remain visible,
+        // but cannot create a new liability using a guessed market. Existing claim/refund paths are separate.
+        if (!d.inActiveMarket() || !d.market().tokenId.equalsIgnoreCase(minima.activeToken())) return null;
         if (!OtcDb.ST_AGREED.equals(d.status) && !OtcDb.ST_EXECUTING.equals(d.status)) return null;
         String ss = swapStatus(hash);   // never re-respond to a hash whose swap already finished
         if (SwapDb.ST_COMPLETE.equals(ss) || SwapDb.ST_REFUNDED.equals(ss) || SwapDb.ST_ERROR.equals(ss)) return null;
@@ -1606,6 +1737,7 @@ public final class SwapEngine {
      *  counterparty, and both amounts must equal the negotiated terms. */
     /* package-private (not private) so unit tests can drive this OTC fund-safety boundary directly. */
     boolean otcVerifyBuy(EthHtlc.Contract c, OtcDb.Deal d) {
+        if (!OtcController.validDeal(d)) return false;
         if (!OtcOffer.LP_SELLS_MINIMA.equals(d.side)) return false;
         EthNet.Token usdt = net.token("USDT");
         if (usdt == null || c.tokenContract == null || !c.tokenContract.equalsIgnoreCase(usdt.address)) return false;  // MUST settle in real USDT
@@ -1614,7 +1746,7 @@ public final class SwapEngine {
         BigDecimal wantMinima = dec(d.amount), wantUsdt = dec(d.amount).multiply(dec(d.price));
         BigDecimal gotMinima = dec(EthWallet.format(c.requestAmount, 18, 18));                        // mxUSDT they request = what I lock
         BigDecimal gotUsdt = dec(EthWallet.format(c.amount, decimalsOf(c.tokenContract), 18));        // USDT they locked
-        return approxEq(gotMinima, wantMinima) && approxEq(gotUsdt, wantUsdt);
+        return gotMinima.signum() > 0 && gotUsdt.signum() > 0 && approxEq(gotMinima, wantMinima) && approxEq(gotUsdt, wantUsdt);
     }
 
     /** Verify an incoming Minima lock (instigator SELLS mxUSDT, I'm the LP buying) EXACTLY matches the agreed deal
@@ -1622,6 +1754,7 @@ public final class SwapEngine {
      *  token must be the agreed USDT, and both amounts must equal the negotiated terms. */
     /* package-private (not private) so unit tests can drive this OTC fund-safety boundary directly. */
     boolean otcVerifySell(JSONObject coin, OtcDb.Deal d, String reqTokenAddr) {
+        if (!OtcController.validDeal(d)) return false;
         if (!OtcOffer.LP_BUYS_MINIMA.equals(d.side)) return false;
         if (!minima.activeToken().equalsIgnoreCase(coin.optString("tokenid", "0x00"))) return false;  // active-currency token only (OTC negotiated live in the active market)
         if (!keyEq(MinimaHtlc.stateAt(coin, 4), myMinimaPk)) return false;                            // mxUSDT to me
@@ -1632,7 +1765,7 @@ public final class SwapEngine {
         BigDecimal wantMinima = dec(d.amount), wantUsdt = dec(d.amount).multiply(dec(d.price));
         BigDecimal gotMinima = dec(MinimaHtlc.coinAmount(coin));                    // mxUSDT they locked
         BigDecimal gotUsdt = dec(MinimaHtlc.stateAt(coin, 1));                        // USDT they request = what I lock
-        return approxEq(gotMinima, wantMinima) && approxEq(gotUsdt, wantUsdt);
+        return gotMinima.signum() > 0 && gotUsdt.signum() > 0 && approxEq(gotMinima, wantMinima) && approxEq(gotUsdt, wantUsdt);
     }
 
     private Order.Pair pairFor(String tokenAddr) {
@@ -1819,10 +1952,21 @@ public final class SwapEngine {
      *  claimed just before the call). Replaces bare io.execute(), which threw RejectedExecutionException on the
      *  calling thread — often a node callback thread — and could take down the process. */
     private void submitIo(Runnable task) { submitIo(task, null); }
+    private static final class IoTask implements Runnable {
+        final Runnable task, onReject;
+        final java.util.concurrent.atomic.AtomicInteger state = new java.util.concurrent.atomic.AtomicInteger();
+        IoTask(Runnable task, Runnable onReject) { this.task = task; this.onReject = onReject; }
+        public void run() {
+            if (!state.compareAndSet(0, 1)) return;
+            try { task.run(); } finally { state.set(2); }
+        }
+        void cancelQueued() { if (state.compareAndSet(0, 2) && onReject != null) onReject.run(); }
+    }
     private void submitIo(Runnable task, Runnable onReject) {
-        if (io.isShutdown()) { if (onReject != null) onReject.run(); return; }
-        try { io.execute(task); }
-        catch (java.util.concurrent.RejectedExecutionException e) { if (onReject != null) onReject.run(); }
+        IoTask queued = new IoTask(task, onReject);
+        if (io.isShutdown()) { queued.cancelQueued(); return; }
+        try { io.execute(queued); }
+        catch (java.util.concurrent.RejectedExecutionException e) { queued.cancelQueued(); }
     }
     private static long nowUnix() { return System.currentTimeMillis() / 1000L; }
 }

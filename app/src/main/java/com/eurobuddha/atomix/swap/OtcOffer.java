@@ -24,16 +24,21 @@ public final class OtcOffer {
     public String commsPublicId = "";     // 0x + boxPk + signPk — seals negotiation messages to the LP
     public long ts = 0;                   // freshest-per-signer wins
 
+    // Local scan provenance; never serialized or accepted from peer JSON.
+    com.eurobuddha.atomix.TradingContext market;
+
     // set on receive (NOT signed)
     public String signerPk = "";
     public String coinid = "";
 
     /** False ⇒ tombstone; publishing it withdraws the LP from the board. */
-    public boolean hasLiquidity() { return enable && (sellSize > 0 || buySize > 0); }
-    public boolean sells() { return enable && sellSize > 0; }
-    public boolean buys()  { return enable && buySize > 0; }
+    // Same finite-positive boundary as Order.finite; malformed peer sizes supply no liquidity.
+    public static double finite(double value) { return Double.isFinite(value) && value > 0 ? value : 0; }
+    public boolean hasLiquidity() { return sells() || buys(); }
+    public boolean sells() { return enable && finite(sellSize) > 0; }
+    public boolean buys()  { return enable && finite(buySize) > 0; }
     /** The LP's cap (mxUSDT) for a deal on {@code dealSide} (LP_SELLS_MINIMA / LP_BUYS_MINIMA). */
-    public double capFor(String dealSide) { return LP_SELLS_MINIMA.equals(dealSide) ? sellSize : buySize; }
+    public double capFor(String dealSide) { return LP_SELLS_MINIMA.equals(dealSide) ? finite(sellSize) : LP_BUYS_MINIMA.equals(dealSide) ? finite(buySize) : 0; }
 
     public JSONObject toJson() throws JSONException {
         JSONObject o = new JSONObject();
@@ -57,6 +62,7 @@ public final class OtcOffer {
             double size = o.optDouble("size", 0);
             if (LP_BUYS_MINIMA.equals(o.optString("side", LP_SELLS_MINIMA))) f.buySize = size; else f.sellSize = size;
         }
+        f.sellSize = finite(f.sellSize); f.buySize = finite(f.buySize);
         return f;
     }
 }

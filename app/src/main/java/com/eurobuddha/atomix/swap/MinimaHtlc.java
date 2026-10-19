@@ -271,6 +271,17 @@ public final class MinimaHtlc {
     public void lockFromCoins(List<String> coinids, String totalSelected, String amount, String requestAmount,
                               String reqToken, String receiverPubkey, String ownerEthKey, String hashlock,
                               int timelockBlock, String otc, PostCb cb) {
+        lockFromCoins(coinids, totalSelected, amount, requestAmount, reqToken, receiverPubkey,
+                ownerEthKey, hashlock, timelockBlock, otc, null, cb);
+    }
+
+    /** New responder liabilities retain their authorization through SignGate and the node worker. */
+    public void lockFromCoins(List<String> coinids, String totalSelected, String amount, String requestAmount,
+                              String reqToken, String receiverPubkey, String ownerEthKey, String hashlock,
+                              int timelockBlock, String otc, java.util.function.BooleanSupplier authorized, PostCb cb) {
+        final String token = activeToken;
+        final java.util.function.BooleanSupplier current = authorized == null ? null
+                : () -> token.equals(activeToken) && authorized.getAsBoolean();
         if (!ready()) { cb.err("Minima wallet not ready"); return; }
         if (coinids == null || coinids.isEmpty()) { cb.err("no coins to lock"); return; }
         // MA-19: reject non-hex/non-decimal before building any txn command (receiverPubkey can come from an
@@ -301,16 +312,16 @@ public final class MinimaHtlc {
         seq.add("txnstate id:" + id + " port:5 value:" + hashlock);
         seq.add("txnstate id:" + id + " port:6 value:" + ownerEthKey);
         seq.add("txnstate id:" + id + " port:7 value:" + otc);
-        seq.add("txnoutput id:" + id + " amount:" + amount + " address:" + HTLC_ADDRESS + " tokenid:" + activeToken + " storestate:true");
-        if (positive(change)) seq.add("txnoutput id:" + id + " amount:" + change + " address:" + myAddress + " tokenid:" + activeToken + " storestate:false");
+        seq.add("txnoutput id:" + id + " amount:" + amount + " address:" + HTLC_ADDRESS + " tokenid:" + token + " storestate:true");
+        if (positive(change)) seq.add("txnoutput id:" + id + " amount:" + change + " address:" + myAddress + " tokenid:" + token + " storestate:false");
         seq.add("txnsign id:" + id + " publickey:auto");
         addValidation(seq, id);
         // Split the broadcast (txnpost) from the build: a build failure PROVABLY didn't broadcast (caller may
         // retry); a txnpost failure MAY have broadcast with a lost response, so it's tagged "POSTED:" and the
         // caller must NOT retry (the mxUSDT leg has no on-chain hash-uniqueness → a retry would double-lock).
-        runSeq(seq, built -> cmd("txnpost id:" + id + " mine:true txndelete:true",
+        runSeq(seq, current, built -> cmd("txnpost id:" + id + " mine:true txndelete:true", current,
                 posted -> cb.ok(txpowOf(posted)),
-                e -> { deleteTxn(id); cb.err("POSTED:" + e); }),
+                e -> { deleteTxn(id); cb.err(NodeApi.ERR_COMMAND_CHANGED.equals(e) ? e : "POSTED:" + e); }),
             e -> { deleteTxn(id); cb.err(e); });
     }
 
@@ -613,13 +624,19 @@ public final class MinimaHtlc {
     // ---- command plumbing ----
 
     private void cmd(String command, Consumer<JSONObject> ok, Consumer<String> err) {
-        node.cmd(command, new NodeApi.Cb() {
+        cmd(command, null, ok, err);
+    }
+    private void cmd(String command, java.util.function.BooleanSupplier authorized,
+                     Consumer<JSONObject> ok, Consumer<String> err) {
+        NodeApi.Cb callback = new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
                 if (!j.optBoolean("status", true)) { err.accept(shortCmd(command) + ": " + j.optString("error", j.optString("message", "command failed"))); return; }
                 ok.accept(j);
             }
             @Override public void onError(String m) { err.accept(m); }
-        });
+        };
+        if (authorized == null) node.cmd(command, callback);
+        else node.cmd(command, authorized, callback);
     }
 
     /**
@@ -633,7 +650,11 @@ public final class MinimaHtlc {
      * single key so the maker's published key stays constant.
      */
     private void runSeq(List<String> cmds, Consumer<JSONObject> finalOk, Consumer<String> err) {
-        com.eurobuddha.comms.SignGate.submit(gate -> runSeqAt(cmds, 0,
+        runSeq(cmds, null, finalOk, err);
+    }
+    private void runSeq(List<String> cmds, java.util.function.BooleanSupplier authorized,
+                        Consumer<JSONObject> finalOk, Consumer<String> err) {
+        com.eurobuddha.comms.SignGate.submit(gate -> runSeqAt(cmds, 0, authorized,
                 r -> { gate.free(); finalOk.accept(r); },
                 e -> { gate.free(); err.accept(e); }));
     }
@@ -644,14 +665,15 @@ public final class MinimaHtlc {
     private void runSigned(String sendCmd, Consumer<JSONObject> ok, Consumer<String> err) {
         runSeq(java.util.Collections.singletonList(sendCmd), ok, err);
     }
-    private void runSeqAt(List<String> cmds, int i, Consumer<JSONObject> finalOk, Consumer<String> err) {
-        cmd(cmds.get(i), resp -> {
+    private void runSeqAt(List<String> cmds, int i, java.util.function.BooleanSupplier authorized,
+                          Consumer<JSONObject> finalOk, Consumer<String> err) {
+        cmd(cmds.get(i), authorized, resp -> {
             if (cmds.get(i).startsWith("txncheck ")) {
                 String invalid = transactionCheckFailure(resp);
                 if (invalid != null) { err.accept(invalid); return; }
             }
             if (i == cmds.size() - 1) finalOk.accept(resp);
-            else runSeqAt(cmds, i + 1, finalOk, err);
+            else runSeqAt(cmds, i + 1, authorized, finalOk, err);
         }, err);
     }
 
@@ -661,14 +683,26 @@ public final class MinimaHtlc {
         cmd("txpow onchain:" + txpowid, reply -> ok.accept(confirmedDepth(reply)), err);
     }
 
-    /** Reused from PandaPools ActivityLog.confirmationDepth; malformed evidence is never confirmation. */
+    /** Reuses NFT TransactionEvidence.inclusion's shape and height-consistency checks.
+     * Returns observed depth; the swap controller retains its existing settlement threshold. */
     static int confirmedDepth(JSONObject reply) {
         JSONObject r = reply == null ? null : reply.optJSONObject("response");
-        if (!checkFlag(reply, "status") || !checkFlag(r, "found")) return -1;
+        if (reply == null || !Boolean.TRUE.equals(reply.opt("status"))
+                || r == null || !Boolean.TRUE.equals(r.opt("found"))) return -1;
         try {
-            int depth = new java.math.BigDecimal(r.get("confirmations").toString()).intValueExact();
-            return depth < 0 ? -1 : depth;
+            Object raw = r.opt("blockid");
+            if (!(raw instanceof String) || !((String) raw).matches("(?i)0x[0-9a-f]{64}")) return -1;
+            if (new java.math.BigInteger(((String) raw).substring(2), 16).signum() == 0) return -1;
+            java.math.BigInteger block = whole(r, "block"), tip = whole(r, "tip"), depth = whole(r, "confirmations");
+            if (block.signum() <= 0 || !tip.subtract(block).equals(depth)) return -1;
+            return new java.math.BigDecimal(depth).intValueExact();
         } catch (Exception invalid) { return -1; }
+    }
+    private static java.math.BigInteger whole(JSONObject object, String key) {
+        Object raw = object.opt(key);
+        if (!(raw instanceof String) || !((String) raw).matches("[0-9]{1,30}"))
+            throw new IllegalArgumentException("Incomplete chain evidence");
+        return new java.math.BigInteger((String) raw);
     }
 
     private static void addValidation(List<String> seq, String id) {
