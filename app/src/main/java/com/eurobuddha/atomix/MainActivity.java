@@ -61,6 +61,7 @@ import com.eurobuddha.comms.Sodium;
 import com.eurobuddha.atomix.eth.EthNet;
 import com.eurobuddha.atomix.eth.EthRpc;
 import com.eurobuddha.atomix.eth.EthSend;
+import com.eurobuddha.atomix.eth.EthTx;
 import com.eurobuddha.atomix.eth.EthWallet;
 import com.eurobuddha.atomix.swap.MinimaHtlc;
 import com.eurobuddha.atomix.swap.Order;
@@ -116,8 +117,9 @@ public class MainActivity extends AppCompatActivity {
     private SharedPreferences prefs;
 
     private final EthWallet wallet = new EthWallet();
-    private EthNet net = EthNet.MAINNET;     // mainnet only
-    private EthRpc rpc;
+    private volatile EthNet net = EthNet.MAINNET;     // mainnet only
+    private volatile EthRpc rpc;
+    private volatile long manualSendGeneration;
 
     // identity + swap
     private CommsIdentity identity;
@@ -3710,8 +3712,33 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ---- manual Send (parity twin of the MDS wallet's Send — user decision 2026-07-19: both apps have it) ----
+    /** Reuses ETH Wallet's immutable owner/connection capture through the signing boundary. */
+    private final class ManualSendContext {
+        final org.web3j.crypto.Credentials owner = wallet.creds();
+        final EthRpc connection = rpc;
+        final EthNet network = net;
+        final EthNet.Token token = network.tokens[0];
+        final long generation = ++manualSendGeneration;
+        volatile boolean active = true;
+        boolean current() {
+            return active && owner != null && owner == wallet.creds() && connection == rpc && network == net
+                    && token == network.tokens[0] && generation == manualSendGeneration
+                    && !isFinishing() && !isDestroyed() && !io.isShutdown();
+        }
+        void cancel() { active = false; }
+    }
+
+    private void runManual(ManualSendContext context, Runnable task) {
+        if (!context.current()) { toast("Wallet session changed. Review again."); return; }
+        try { io.execute(task); }
+        catch (java.util.concurrent.RejectedExecutionException stopped) { context.cancel(); toast("Wallet session changed. Review again."); }
+    }
+
     private void sendDialog() {
         if (!wallet.ready()) { toast("ETH wallet not ready yet"); return; }
+        final ManualSendContext context = new ManualSendContext();
+        final java.util.concurrent.atomic.AtomicBoolean reviewing = new java.util.concurrent.atomic.AtomicBoolean();
+        final long[] maxRequest = {0};
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(20), dp(12), dp(20), dp(4));
@@ -3727,8 +3754,8 @@ public class MainActivity extends AppCompatActivity {
             ((android.graphics.drawable.GradientDrawable) usdtPill.getBackground()).setColor(!ethSel[0] ? Design.ACCENT() : Design.SURFACE2());
             usdtPill.setTextColor(!ethSel[0] ? Design.ON_ACCENT() : Design.DIM());
         };
-        ethPill.setOnClickListener(v -> { ethSel[0] = true; restyle.run(); });
-        usdtPill.setOnClickListener(v -> { ethSel[0] = false; restyle.run(); });
+        ethPill.setOnClickListener(v -> { ethSel[0] = true; maxRequest[0]++; restyle.run(); });
+        usdtPill.setOnClickListener(v -> { ethSel[0] = false; maxRequest[0]++; restyle.run(); });
         LinearLayout.LayoutParams tgap = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         tgap.rightMargin = dp(8);
         toggles.addView(ethPill, tgap);
@@ -3746,19 +3773,32 @@ public class MainActivity extends AppCompatActivity {
         decimalInput(amtE);
         amtE.setHint("0.00"); amtE.setTextColor(Design.TEXT()); amtE.setTextSize(17f); amtE.setTypeface(Design.mono());
         TextView maxB = Design.pill(this, "Max", Design.SURFACE2(), Design.TEXT());
-        maxB.setOnClickListener(v -> io.execute(() -> {
-            try {
-                if (ethSel[0]) {
-                    BigInteger gp = EthRpc.hexToBig(rpc.callStr("eth_gasPrice", new org.json.JSONArray()));
-                    BigInteger bf = rpc.baseFeePerGasOrZero();   // MA-6: reserve at the same effective price EthTx broadcasts at
-                    final String m = EthWallet.format(EthSend.maxEthSendWei(ethWeiRaw, gp, bf), 18, 8);
-                    ui.post(() -> amtE.setText(m));
-                } else {
-                    final String m = EthWallet.format(usdtRawBal, net.tokens[0].decimals, 6);
-                    ui.post(() -> amtE.setText(m));
-                }
-            } catch (Exception e) { ui.post(() -> toast("Could not read gas price — try again")); }
-        }));
+        maxB.setOnClickListener(v -> {
+            final boolean eth = ethSel[0];
+            final String typed = amtE.getText().toString();
+            final long request = ++maxRequest[0];
+            if (!context.current()) { toast("Wallet session changed. Review again."); return; }
+            runManual(context, () -> {
+                try {
+                    EthTx.requireAuthorized(context::current);
+                    final String amount;
+                    if (eth) {
+                        BigInteger gp = EthRpc.hexToBig(context.connection.callStr("eth_gasPrice", new org.json.JSONArray()));
+                        BigInteger bf = context.connection.baseFeePerGasOrZero();
+                        EthTx.requireFees(EthSend.effectiveGasPriceWei(gp, bf), EthSend.GAS_ETH);
+                        BigInteger balance = context.connection.getBalance(context.owner.getAddress());
+                        amount = EthWallet.format(EthSend.maxEthSendWei(balance, gp, bf), 18, 8);
+                    } else {
+                        BigInteger balance = EthWallet.erc20BalanceRaw(context.connection, context.token.address, context.owner.getAddress());
+                        amount = EthWallet.format(balance, context.token.decimals, context.token.decimals);
+                    }
+                    ui.post(() -> {
+                        if (context.current() && !reviewing.get() && request == maxRequest[0]
+                                && eth == ethSel[0] && typed.equals(amtE.getText().toString())) amtE.setText(amount);
+                    });
+                } catch (Exception e) { ui.post(() -> { if (context.current()) toast("Could not read gas price — try again"); }); }
+            });
+        });
         amtRow.addView(amtE, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         amtRow.addView(maxB);
         box.addView(amtRow);
@@ -3774,43 +3814,71 @@ public class MainActivity extends AppCompatActivity {
                 .setView(wrapScroll(box))
                 .setPositiveButton("Review", null)
                 .setNegativeButton("Cancel", null)
+                .setOnDismissListener(ignored -> { if (!reviewing.get()) context.cancel(); })
                 .show();
-        d.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+        d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            if (!context.current()) { toast("Wallet session changed. Review again."); return; }
+            d.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
             final boolean eth = ethSel[0];
             final String to = toE.getText().toString().trim(), amt = amtE.getText().toString().trim();
-            io.execute(() -> {
+            runManual(context, () -> {
                 try {
-                    BigInteger gp = EthRpc.hexToBig(rpc.callStr("eth_gasPrice", new org.json.JSONArray()));
-                    BigInteger bf = rpc.baseFeePerGasOrZero();   // MA-6: same effective price as the broadcast, so validation can't under-reserve
-                    final String err = EthSend.checkSend(eth, to, amt, ethWeiRaw, usdtRawBal, net.tokens[0].decimals, gp, bf);
-                    if (err != null) { ui.post(() -> toast(err)); return; }
+                    EthTx.requireAuthorized(context::current);
+                    BigInteger gp = EthRpc.hexToBig(context.connection.callStr("eth_gasPrice", new org.json.JSONArray()));
+                    BigInteger bf = context.connection.baseFeePerGasOrZero();   // MA-6: same effective price as the broadcast, so validation can't under-reserve
+                    final BigInteger gasPrice = EthSend.effectiveGasPriceWei(gp, bf);
+                    EthTx.requireFees(gasPrice, eth ? EthSend.GAS_ETH : EthSend.GAS_ERC20);
+                    BigInteger ethBalance = context.connection.getBalance(context.owner.getAddress());
+                    BigInteger tokenBalance = eth ? BigInteger.ZERO : EthWallet.erc20BalanceRaw(
+                            context.connection, context.token.address, context.owner.getAddress());
+                    final String err = EthSend.checkSend(eth, to, amt, ethBalance, tokenBalance, context.token.decimals, gp, bf);
+                    if (err != null) throw new IllegalArgumentException(err);
                     final String fee = EthWallet.format(
                             EthSend.gasReserveWei(gp, bf, eth ? EthSend.GAS_ETH : EthSend.GAS_ERC20), 18, 8);
-                    ui.post(() -> { d.dismiss(); sendReviewDialog(eth, to, amt, fee); });
-                } catch (Exception e) { ui.post(() -> toast("Could not read gas price — try again")); }
+                    final String amount = new BigDecimal(EthSend.parseUnits(amt, eth ? 18 : context.token.decimals),
+                            eth ? 18 : context.token.decimals).stripTrailingZeros().toPlainString();
+                    ui.post(() -> {
+                        if (!d.isShowing()) return;
+                        d.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+                        if (!context.current() || eth != ethSel[0] || !to.equals(toE.getText().toString().trim())
+                                || !amt.equals(amtE.getText().toString().trim())) { toast("Wallet session changed. Review again."); return; }
+                        reviewing.set(true); d.dismiss(); sendReviewDialog(context, eth, to, amount, fee, gasPrice);
+                    });
+                } catch (Exception e) { ui.post(() -> {
+                    if (d.isShowing()) {
+                        d.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+                        toast(context.current() ? e.getMessage() : "Wallet session changed. Review again.");
+                    }
+                }); }
             });
         });
     }
 
-    private void sendReviewDialog(boolean eth, String to, String amt, String feeEth) {
+    private void sendReviewDialog(ManualSendContext context, boolean eth, String to, String amt, String feeEth, BigInteger gasPrice) {
+        if (!context.current()) { toast("Wallet session changed. Review again."); return; }
+        final java.util.concurrent.atomic.AtomicBoolean submitted = new java.util.concurrent.atomic.AtomicBoolean();
         dialog()
                 .setTitle("Review — Send " + (eth ? "ETH" : "USDT"))
-                .setMessage("Send  " + amt + " " + (eth ? "ETH" : "USDT") + "\nTo  " + to
+                .setMessage("From  " + context.owner.getAddress() + "\n\nSend  " + amt + " " + (eth ? "ETH" : "USDT") + "\nTo  " + to
                         + "\n\nNetwork fee  ≈ " + feeEth + " ETH\nThis cannot be undone.")
-                .setPositiveButton("Send now", (dd, w) -> io.execute(() -> {
+                .setPositiveButton("Send now", (dd, w) -> {
+                    if (!context.current() || !submitted.compareAndSet(false, true)) { toast("Wallet session changed. Review again."); return; }
+                    runManual(context, () -> {
                     try {
-                        String tx = eth
-                                ? EthSend.sendEth(rpc, wallet.creds(), net.chainId, to, EthSend.parseUnits(amt, 18))
-                                : EthSend.sendErc20(rpc, wallet.creds(), net.chainId, net.tokens[0].address, to,
-                                        EthSend.parseUnits(amt, net.tokens[0].decimals));
+                        BigInteger amount = EthSend.parseUnits(amt, eth ? 18 : context.token.decimals);
+                        String tx = EthTx.send(context.connection, context.owner, context.network.chainId,
+                                eth ? to : context.token.address,
+                                eth ? "" : EthSend.buildTransferData(to, amount), eth ? amount : BigInteger.ZERO,
+                                eth ? EthSend.GAS_ETH : EthSend.GAS_ERC20, gasPrice, context::current);
                         SwapLog.d("manual send " + (eth ? "ETH" : "USDT") + " " + amt + " tx=" + tx);
                         // NI-1 (RULE 1): a tx hash in a transient toast is otherwise unrecoverable — copy the FULL
                         // hash to the clipboard so the user can look up their own send on a block explorer.
                         ui.post(() -> { copy(tx, "Sent — full tx hash copied (updates once mined)"); fetchEthBalances(true); });
                     } catch (Exception e) {
                         ui.post(() -> toast("Send failed: " + e.getMessage()));
-                    }
-                }))
+                    } finally { context.cancel(); }
+                }); })
+                .setOnDismissListener(ignored -> { if (!submitted.get()) context.cancel(); })
                 .setNegativeButton("Back", (dd, w) -> sendDialog())
                 .show();
     }

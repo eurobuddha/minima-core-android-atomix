@@ -15,8 +15,8 @@ android {
         // and never broke, but it left the number far below where the convention puts it, so the
         // first "correct" numbering would have been a downgrade — which is exactly how Terminal IDE
         // stranded itself. Realigned here while 122 is still an increase over 22.
-        versionCode 175
-        versionName "0.1.75"
+        versionCode 176
+        versionName "0.1.76"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -67,7 +67,8 @@ android {
         // time is a Mockito-mocked NodeApi, whose methods never run the real framework code.
         unitTests {
             returnDefaultValues = false
-            includeAndroidResources = false
+            includeAndroidResources = true
+            all { maxHeapSize = '2g' }
         }
     }
 }
@@ -113,6 +114,7 @@ dependencies {
     // and assert the exact node commands built by lock/claim/refund WITHOUT a device or a live node.
     // web3j (crypto/abi/utils above) is a plain JVM library, so it is available to the tests as-is.
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
     testImplementation 'org.json:json:20240303'
     testImplementation 'org.mockito:mockito-core:5.12.0'
     // Desktop libsodium so the REAL comms seal/open + identity derivation run in JVM unit tests (the app

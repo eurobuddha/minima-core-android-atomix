@@ -50,3 +50,31 @@ Signed APK package/version/certificate and ZIP integrity verified.
 SHA256 c85375a4a6ad8ad64c91ef602976ad3aa233f7fda06bcb62f45b2efc42ed800e
 Full parity remains unfinished; nonce coordination and uncertain broadcasts remain
 open. No installation, publication or real transaction.
+
+Manual-send review — 1.9.115 / code186; standalone AtomiX0.1.76/176
+MAJOR: manual-send confirmation reread mutable owner/RPC/network and recomputed
+fees after approval. Reuse ETH Wallet MainActivity.SendContext and explicit-price
+EthTx boundary, plus SwapEngine executor rejection handling. Capture the owner,
+connection, chain/token and fee through signing; show the full sender in review.
+Read balances for that owner; reject stale Max/preflight/cancelled work and form
+edits. Apply existing ETH Wallet fee caps before signing. Rejected dispatch does
+not crash. Review displays the actual rounded token amount. Language.join retains
+live four-language confirmation text; new validation errors use AtomixMessages.
+
+Reviewed complete changed methods, signing callers, adapter and both test suites.
+Tests caught native-dialog qualification preventing standalone cancellation, and
+an error-display race during context cleanup; both corrected before final checks.
+Actual-dialog tests verify stale owner/connection, late Max, edited/cancelled forms,
+rejected executors, exact signed owner/recipient/amount/token/fee and RPC failures.
+Signer tests cover denied/revoked authorization, fee bounds and no re-quoting.
+Integrated confirmation and fee diagnostics verified in all four selected languages.
+Validation: integrated435 tests, standalone292 in EACH debug/release suite, all
+passing (1019 executions). Standalone signed assembleRelease and release lint pass;
+lint0 errors/195 warnings. Pandamonium release lint passes. All22 pinned source
+snapshots and overlays reproduce;6891 translations and direct transport checks pass.
+Standalone APK package/version, ZIP integrity and family certificate verified.
+SHA256: ad8d75beccc9c11737b83e58e92f7eebb20922b833c1bdbeb6aea7944a460233
+Verdict: approve this bounded manual-send repair. This is NOT durable Ethereum
+recovery: shared nonce allocation, timed nonce reuse, unknown broadcasts and
+complete RPC validation remain open. Full2.0.0 review/parity remains incomplete.
+No real transactions, device installation or publication.
