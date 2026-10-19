@@ -15,8 +15,8 @@ android {
         // and never broke, but it left the number far below where the convention puts it, so the
         // first "correct" numbering would have been a downgrade — which is exactly how Terminal IDE
         // stranded itself. Realigned here while 122 is still an increase over 22.
-        versionCode 179
-        versionName "0.1.79"
+        versionCode 180
+        versionName "0.1.80"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -87,7 +87,7 @@ dependencies {
     implementation 'androidx.work:work-runtime:2.9.1'
 
     // Minima Core IPC client SDK (the only way this app reaches the node)
-    implementation files('libs/minimaapi.aar')
+    // Reviewed source SDK is vendored under com.eurobuddha.minimaapi (PandaDEX transport).
 
     // Client-side end-to-end crypto: X25519 sealed box + Ed25519 (libsodium via Lazysodium).
     // The minimaCore node has no Maxima, so all encryption/signing happens in-app; the node

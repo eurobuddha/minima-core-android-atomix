@@ -198,3 +198,9 @@ sharing the same Ethereum key. No migration of old pre-upgrade unjournaled raw
 transactions is possible from the former in-memory counter. MDS/desktop mirrors,
 other standalone parity and Fold2.0.10 verification remain open. Public2.0.0 is
 unchanged. Do not publish this candidate as a completed full-review release.
+
+Checkpoint0.1.80: fresh bid funding, pending token debits, order publication/scan
+context, SDK dispatch guards and strict send receipts are now ported and tested.
+See BID_FUNDING_PARITY_2026-10-19.txt for431debug/release tests, source SDK provenance,
+signed artifact and remaining engine/UX/device review work. This supersedes the
+"Next port" item above; it does not close the full parity/review goal.

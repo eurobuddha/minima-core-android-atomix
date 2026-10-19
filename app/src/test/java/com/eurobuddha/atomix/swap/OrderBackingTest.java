@@ -40,7 +40,7 @@ public class OrderBackingTest {
         try(MockedStatic<CommsTransport> transport=mockStatic(CommsTransport.class)){
             SwapOrderBook.publishFresh(node,sodium,identity,o,result);NodeApi.Cb balanceRead=read;read.onResult(reply);if(read!=balanceRead)read.onResult(coins);
             if(signed==null){transport.verifyNoInteractions();return null;}
-            transport.verify(()->CommsTransport.postBlob(eq(node),eq(TradingContext.active().orderBookAddr),eq(CommsTransport.MESSAGE_AMOUNT),eq(CommsTransport.NATIVE),eq(Hex.to(signed.getBytes(StandardCharsets.UTF_8))),any(),any()));
+            transport.verify(()->CommsTransport.postBlob(eq(node),eq(TradingContext.active().orderBookAddr),eq(CommsTransport.MESSAGE_AMOUNT),eq(CommsTransport.NATIVE),eq(Hex.to(signed.getBytes(StandardCharsets.UTF_8))),any(),any(),any()));
             return Order.fromJson(new JSONObject(signed));
         }
     }

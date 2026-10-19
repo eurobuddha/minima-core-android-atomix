@@ -228,6 +228,47 @@ public final class SwapEngine {
         synchronized (CP_LOCKING) { cpInFlight.remove(hash); cpLockSince.remove(hash); CP_LOCKING.remove(hash); }
     }
 
+    /** Fresh bid backing through the existing worker/main callback boundary, then fresh Minima backing. */
+    public void publishFresh(com.goterl.lazysodium.LazySodium sodium,
+                             com.eurobuddha.comms.CommsIdentity identity, Order order, long generation,
+                             com.eurobuddha.comms.CommsTransport.SendCb cb) {
+        final EthRpc connection=rpc;
+        final EthNet network=net;
+        final Credentials owner=wallet.creds();
+        final String minimaKey=myMinimaPk;
+        final com.eurobuddha.atomix.TradingContext market=order==null?null:order.market;
+        final java.util.concurrent.atomic.AtomicReference<com.eurobuddha.minimaapi.ethereum.EthereumTransactions.FundingSnapshot> funding=new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.function.BooleanSupplier current=()->order!=null&&market!=null&&market==com.eurobuddha.atomix.TradingContext.active()
+                &&generation==PublishGate.gen()&&!io.isShutdown()&&!halted()&&connection==rpc&&network==net
+                &&owner!=null&&owner==wallet.creds()&&owner.getAddress().equalsIgnoreCase(order.ethAddress)
+                &&java.util.Objects.equals(minimaKey,myMinimaPk)&&java.util.Objects.equals(minimaKey,order.minimaPublicKey)
+                &&(funding.get()==null||funding.get().unchanged());
+        if(!current.getAsBoolean()){cb.onFailed(SwapOrderBook.MARKET_ERROR);return;}
+        boolean bids=false;
+        for(String symbol:order.pairs.keySet())if(!order.effectiveBids(symbol).isEmpty())bids=true;
+        if(!bids) {
+            order.usdtAvail=0;
+            SwapOrderBook.publishFresh(node,sodium,identity,order,generation,current,cb);return;
+        }
+        try { io.execute(()->{
+            if(!current.getAsBoolean()){ui.post(()->cb.onFailed(SwapOrderBook.MARKET_ERROR));return;}
+            final BigDecimal available;
+            try {
+                EthNet.Token token=network==null?null:network.token("USDT");
+                if(token==null)throw new IllegalStateException();
+                com.eurobuddha.minimaapi.ethereum.EthereumTransactions.FundingSnapshot snapshot=
+                        com.eurobuddha.minimaapi.ethereum.EthereumTransactions.shared().fundingSnapshot(network.chainId,owner.getAddress());
+                funding.set(snapshot);
+                available=new BigDecimal(EthWallet.erc20AvailableRaw(connection,network,token.address,owner.getAddress(),snapshot),token.decimals);
+            } catch(Exception unavailable){ui.post(()->cb.onFailed(SwapOrderBook.BALANCE_ERROR));return;}
+            ui.post(()->{
+                if(!current.getAsBoolean()){cb.onFailed(SwapOrderBook.MARKET_ERROR);return;}
+                order.usdtAvail=available.doubleValue();order.clampBidsToBalance(available);
+                SwapOrderBook.publishFresh(node,sodium,identity,order,generation,current,cb);
+            });
+        }); }catch(java.util.concurrent.RejectedExecutionException stopped){cb.onFailed(SwapOrderBook.MARKET_ERROR);}
+    }
+
     /** At publish: trim the ask ladder to the tranches I can actually lock right now, run {@code afterPublish},
      *  then (if short + allowed) notify + split toward full depth. */
     public void ensureLadderCoins(Order o, boolean allowSplit, Runnable afterPublish) {

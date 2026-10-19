@@ -40,6 +40,10 @@ public final class Order {
     public double usdtAvail;         // maker's available USDT at publish time (liquidity, bid side)
     public final Map<String, Pair> pairs = new LinkedHashMap<>();   // "USDT" -> rate
 
+    // Local creation/scan market. Peer JSON cannot choose this attribution.
+    com.eurobuddha.atomix.TradingContext market = com.eurobuddha.atomix.TradingContext.active();
+    public com.eurobuddha.atomix.TradingContext market() { return market; }
+
     // set on receive (not part of the signed payload)
     public String signerPk;          // 0x + Ed25519 pk recovered from the coin (verified signer)
     public String coinid;            // source coin id (dedup / expiry)
@@ -181,6 +185,29 @@ public final class Order {
         }
     }
 
+    /** Best-price prefix, as for asks; a bid spends amount * price USDT. */
+    public void clampBidsToBalance(java.math.BigDecimal available) {
+        java.math.BigDecimal remaining=available==null?java.math.BigDecimal.ZERO:available.max(java.math.BigDecimal.ZERO);
+        for(Pair pair:pairs.values()) {
+            if(pair==null||!pair.enable)continue;
+            sanitize(pair);
+            if(!pair.bids.isEmpty()) {
+                int keep=0;
+                for(Level level:pair.bids) {
+                    java.math.BigDecimal cost=java.math.BigDecimal.valueOf(level.amount).multiply(java.math.BigDecimal.valueOf(level.price));
+                    if(level.amount<pair.min||cost.compareTo(remaining)>0)break;
+                    remaining=remaining.subtract(cost);keep++;
+                }
+                while(pair.bids.size()>keep)pair.bids.remove(pair.bids.size()-1);
+                if(pair.bids.isEmpty())pair.sell=0;
+            } else if(validPos(pair.sell)) {
+                java.math.BigDecimal minimum=java.math.BigDecimal.valueOf(Math.max(0,pair.min)).multiply(java.math.BigDecimal.valueOf(pair.sell));
+                if(remaining.signum()==0||remaining.compareTo(minimum)<0)pair.sell=0;
+                else remaining=java.math.BigDecimal.ZERO;
+            }
+        }
+    }
+
     // ---- (de)serialization — ONE pair codec shared by the signed wire format AND the local config ----
 
     /** Pair → JSON. Always writes en/buy/sell/min (0.8.x compat) + bids/asks when present. */
@@ -238,6 +265,7 @@ public final class Order {
 
     public static Order fromJson(JSONObject o) {
         Order r = new Order();
+        r.market = null; // only a verified board scan can attribute a received order
         r.minimaPublicKey = o.optString("mpk", "");
         r.ethAddress = o.optString("eth", "");
         // A maker self-signs its own order, so mpk/eth are untrusted input: the Ed25519 signature proves
@@ -259,6 +287,7 @@ public final class Order {
             }
         }
         r.clampAsksToBalance(java.math.BigDecimal.valueOf(r.minimaAvail));
+        r.clampBidsToBalance(java.math.BigDecimal.valueOf(r.usdtAvail));
         return r;
     }
 

@@ -193,8 +193,15 @@ public class NodeApi {
                 && (((Activity) mContext).isFinishing() || ((Activity) mContext).isDestroyed());
     }
 
-    public void cmd(String command, Cb cb) {
-        if (Looper.myLooper() != Looper.getMainLooper()) { mMain.post(() -> cmd(command, cb)); return; }
+    public static final String ERR_COMMAND_CHANGED = "Market changed; refresh and try again.";
+    static boolean authorized(java.util.function.BooleanSupplier guard) {
+        try { return guard != null && guard.getAsBoolean(); }
+        catch (RuntimeException failure) { return false; }
+    }
+    public void cmd(String command, Cb cb) { cmd(command, () -> true, cb); }
+    public void cmd(String command, java.util.function.BooleanSupplier authorized, Cb cb) {
+        if (Looper.myLooper() != Looper.getMainLooper()) { mMain.post(() -> cmd(command, authorized, cb)); return; }
+        if (!authorized(authorized)) { if (cb != null) cb.onError(ERR_COMMAND_CHANGED); return; }
         if (command == null || command.trim().isEmpty()) { if (cb != null) cb.onError("Empty node command"); return; }
         // MA-11: after release, deliver an async onError rather than returning silently — a caller that set a
         // `running`/in-flight flag before calling (CommsScanner, the SignGate lambda) would otherwise hang
@@ -237,12 +244,12 @@ public class NodeApi {
         mPending.add(timeout);
         mMain.postDelayed(timeout, timeoutFor(command));
 
-        try { mApi.Command(command, new MinimaAPIListener() {
+        try { mApi.Command(command, () -> !done[0] && !mReleased && authorized(authorized), new MinimaAPIListener() {
             @Override
             public void response(JSONObject zResponse) {
                 mMain.post(() -> {
                     // A late complete reply resolves only this write's durable marker; never a newer one.
-                    if (funds) WriteSafety.returned(writePrefs(), writeId, WriteSafety.completeReply(zResponse));
+                    if (funds) WriteSafety.returned(writePrefs(), writeId, WriteSafety.completeReply(command, zResponse));
                     if (done[0]) return;
                     done[0] = true;
                     mMain.removeCallbacks(timeout);
@@ -255,7 +262,7 @@ public class NodeApi {
                     // Keep transaction callbacks alive even after Activity teardown; UI consumers guard their views.
                     if (mReleased) return;
                     try {
-                    if (!WriteSafety.completeReply(zResponse)) {
+                    if (!WriteSafety.completeReply(command, zResponse)) {
                         if (cb != null) cb.onError(funds ? ERR_WRITE_UNCERTAIN : "Incomplete node reply");
                         return;
                     }

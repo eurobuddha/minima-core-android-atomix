@@ -1,0 +1,89 @@
+Standalone AtomiX funding and publication parity — 2026-10-19
+
+Outcome
+Standalone AtomiX now reuses Pandamonium's fresh bid-funding check. Refreshing a
+5,000-unit bid after its funds are spent removes the unbacked liquidity. Funding
+uses one checked Ethereum block/nonce, deducts saved local token spends, then takes
+the smaller result against pending balance. Already-mined nonces and fee replacements
+are not counted twice. An unknown saved operation cannot silently become zero debit.
+The same path runs for manual publishing, live edits and background refresh.
+Ask-only orders retain the existing independent Minima funding path.
+
+Captured market, generation, owner, RPC and funding state remain checked through
+preparation, signing, NodeApi and SDK dispatch. Switching markets, editing/withdrawing
+an offer or starting another local Ethereum send invalidates queued publication.
+The SDK checks the guard after main-thread queueing and discovery, immediately
+before sendBroadcast. A command whose local timeout has expired cannot dispatch
+later. Already-dispatched writes retain their receipt handling. Positive send/post
+replies require a nonzero32-byte transaction ID before the UI reports success or
+clears the interrupted-write record. This acknowledges submission, not settlement.
+
+Sources reused
+Pandamonium fork094320dedc73ea31be071fd0f6dc71c1c06e1a82:
+integrated/atomix/src/main/java/com/eurobuddha/atomix/swap/{Order,SwapOrderBook}.java
+integrated/atomix/src/main/java/com/eurobuddha/comms/CommsTransport.java
+scripts/pandamonium-sources/atomix/PendingTokenDebits.java
+Existing EthWallet.erc20AvailableRaw, SwapEngine.publishFresh, OtcBook.publish,
+WriteSafety receipt checks and MainActivity/SwapService callers from the host.
+Canonical BidBackingTest, PendingTokenDebitsTest, OrderBackingTest, publication
+parts of OrderMarketContextTest and PublishQueueTest supplied the regressions.
+Host namespaces are converted back to com.eurobuddha.comms; no host transport is
+used in the standalone app. Order, SwapOrderBook and CommsTransport match the host
+exactly after this namespace conversion. The0.1.78 durable Ethereum journal and
+0.1.79 order-edit identity repair are preserved.
+
+SDK source delivery
+Reused the six Java sources in apks/pandadex/app/src/main/java/com/eurobuddha/minimaapi
+from donor fbe0645719f61b034f7d737593e1892f280ccc73, plus its two SDK test classes.
+PandaDEX already compiles this SDK from source, so AtomiX now follows that pattern.
+Five files are unchanged. MinimaAPI adds the DirectNodeApi-style guard overload
+and a null registration-listener check on pairing failure. The SDK preserves
+existing pairing IDs, refuses multiple active nodes, bounds replies to4MiB,
+limits outstanding requests and keeps late-reply retention. Transport failures
+remain uncertain; they cannot masquerade as an explicit node rejection.
+The old tracked app/libs/minimaapi.aar is no longer a Gradle input and is unchanged.
+No generated binary, credential, new external dependency or external source path
+was added to the build. AndroidManifest retains all three package queries formerly
+merged from the AAR. A checkout builds with the existing Gradle dependency cache.
+
+Code review
+MAJOR resolved: cached bid funds could refresh unbacked orders after a fill or local
+pending transfer. MAJOR resolved: the old SDK queue/discovery could dispatch a
+publication after the caller's market/funding context changed. MAJOR resolved:
+status:true without a usable transaction ID could be reported as a successful send.
+Reviewed the changed application methods, source SDK, callers, receipt contracts,
+manifest/dependency changes and tests. Caught and preserved the two package queries
+that would otherwise have disappeared with the AAR. Verified actual APK DEX checks
+BooleanSupplier.getAsBoolean before Context.sendBroadcast.
+Verdict: approve this parity checkpoint. This is not the completed full-app review.
+
+Validation
+431debug and431release tests passed, zero failures/errors/skips. Tests cover zero/
+pending/local-reserved funds, exact decimal costs, changed blocks/nonces/owners,
+recursive caller queues, both order/OTC boards, late and malformed receipts,
+market changes during scan/signing, and timeout before SDK dispatch. Publication
+unit tests use a controlled SDK boundary; GuardedCommandTest separately exercises
+the real SDK with Robolectric's paused main queue and synthetic registration/reply
+Intents. NodeRoutingTest covers each bear and refusal when multiple nodes respond.
+No live RPC, real funds, node transactions or real seed/key-counter changes.
+Offline release build and lint passed:0errors/0fatal/195warnings (unchanged).
+APK ZIP integrity, package/version, actual DEX classes/guard and manifest queries
+verified. APK Signature Scheme v2, RSA4096, family certificate SHA256:
+eca1383c9d27683a281fbe6355356267877dc2dd14d963d7cc289ca0700e517f
+Candidate: dist/atomix-0.1.80-candidate.apk
+com.eurobuddha.atomix0.1.80/code180;22580014bytes
+SHA256:5e1165d1e72b228b9dc4c9717ebb08574933dd1d9bce90164a27af17ddc859c5
+
+Remaining work
+The broader engine/take/OTC context port, user-confirmation acknowledgement guards,
+receipt/reorg review, journal retention and complete pending/history UX remain.
+The standalone journal cannot coordinate other APKs/devices sharing the same key.
+Publication safety after an IPC broadcast is accepted by the node cannot be revoked
+by an app-local guard. As in the integrated protocol, an SDK-cancelled publication
+already admitted to WriteSafety retains conservative interrupted-write evidence.
+Registration's existing UI classification still treats absent enabled as refused;
+review it alongside the remaining connection/lifecycle parity work.
+The SDK source improvements have not been copied into every other standalone app.
+No claim of full standalone parity, live settlement or complete review is made.
+No installation or publication. Pandamonium2.0.11 is still the current local host
+candidate; public2.0.0 is unchanged. Fold verification remains required.

@@ -123,6 +123,41 @@ public final class EthWallet {
         }
     }
 
+    /** Account balance and nonce share one checked block; pending data can only lower funding. */
+    public static BigInteger erc20AvailableRaw(EthRpc rpc, EthNet network, String token, String owner,
+            com.eurobuddha.minimaapi.ethereum.EthereumTransactions.FundingSnapshot snapshot) throws IOException {
+        if(rpc==null||network==null||owner==null||!owner.matches("0x[0-9a-fA-F]{40}")
+                ||token==null||!token.matches("0x[0-9a-fA-F]{40}")||snapshot==null)throw new IOException("Invalid Ethereum balance context");
+        if(!BigInteger.valueOf(network.chainId).equals(EthRpc.transactionCount(rpc.call("eth_chainId",new org.json.JSONArray()))))
+            throw new IOException("Ethereum RPC is connected to a different chain");
+        Object rawBlock=rpc.call("eth_getBlockByNumber",new org.json.JSONArray().put("latest").put(false));
+        if(!(rawBlock instanceof JSONObject))throw new IOException("Missing Ethereum balance block");
+        JSONObject block=(JSONObject)rawBlock;
+        String height=block.optString("number"),hash=block.optString("hash");
+        EthRpc.transactionCount(height);
+        if(!hash.matches("0x[0-9a-fA-F]{64}")||new BigInteger(hash.substring(2),16).signum()==0)throw new IOException("Invalid Ethereum balance block");
+        BigInteger minedNonce=EthRpc.transactionCount(rpc.call("eth_getTransactionCount",new org.json.JSONArray().put(owner).put(height)));
+        BigInteger reserved=PendingTokenDebits.total(snapshot.intents,minedNonce,owner,token,network.htlc);
+        Function fn=new Function("balanceOf",Collections.singletonList(new Address(owner)),Collections.singletonList(new TypeReference<Uint256>() {}));
+        BigInteger available=null;
+        for(String tag:new String[]{height,"pending"}) {
+            Object result;
+            try {
+                JSONObject tx=new JSONObject().put("to",token).put("data",FunctionEncoder.encode(fn));
+                result=rpc.call("eth_call",new org.json.JSONArray().put(tx).put(tag));
+            }catch(org.json.JSONException invalid){throw new IOException("Invalid Ethereum balance request",invalid);}
+            if(!(result instanceof String)||!((String)result).matches("0[xX][0-9a-fA-F]{64}"))throw new IOException("Invalid Ethereum balance reply");
+            BigInteger balance=new BigInteger(((String)result).substring(2),16);
+            // Deduct local reservations from mined state only. Pending may already include the debit.
+            available=available==null?balance.subtract(reserved).max(BigInteger.ZERO):available.min(balance);
+        }
+        Object current=rpc.call("eth_getBlockByNumber",new org.json.JSONArray().put(height).put(false));
+        if(!(current instanceof JSONObject)||!hash.equalsIgnoreCase(((JSONObject)current).optString("hash"))
+                ||!height.equals(((JSONObject)current).optString("number"))||!snapshot.unchanged())
+            throw new IOException("Ethereum funding changed during review");
+        return available;
+    }
+
     /** Format a raw integer amount with the given decimals to a trimmed decimal string. */
     public static String format(BigInteger raw, int decimals, int maxFrac) {
         if (raw == null) return "0";

@@ -6,6 +6,8 @@
          launch the node app + deliver targeted broadcasts. -->
     <queries>
         <package android:name="com.eurobuddha.minimacore" />
+        <package android:name="com.eurobuddha.minimablock" />
+        <package android:name="com.eurobuddha.pandamonium" />
     </queries>
 
     <!-- Unlike the node-only merch apps, usdtSwap also talks to the Ethereum network directly

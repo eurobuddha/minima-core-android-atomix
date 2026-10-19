@@ -461,6 +461,7 @@ public class MainActivity extends AppCompatActivity {
             // commit-vs-reset race. Safe to reorder: the tombstone's sentinel was captured synchronously before
             // proceed was posted, and the clear-block/resetForSwitch operate on the single active prefs (currency-
             // agnostic keys) while restoreMarket takes an explicit target key — none depend on active being old.
+            PublishGate.bumpGen(); // invalidate queued publications in the leaving market
             TradingContext.setActive(target, prefs);           // flip currency (drives token/sentinels/pricing/theme)
             // Quiesce the priced state (fund-safe: the active prefs are always the ACTIVE currency's, no bleed).
             prefs.edit()
@@ -972,7 +973,12 @@ public class MainActivity extends AppCompatActivity {
         if (prefs.getBoolean(PriceOracle.P_ENABLE, false) && !PriceOracle.fresh()) {
             // Pegged: grab a live price first so a user-tapped Publish never quotes a stale one.
             orderStatus = "Fetching " + PriceOracle.source() + " price…"; render();
-            io.execute(() -> { PriceOracle.refreshSync(); ui.post(this::publishOrderNow); });
+            final TradingContext market = TradingContext.active();
+            final long generation = PublishGate.gen();
+            io.execute(() -> { PriceOracle.refreshSync(); ui.post(() -> {
+                if (market != TradingContext.active() || generation != PublishGate.gen()) { orderStatus = SwapOrderBook.MARKET_ERROR; render(); return; }
+                publishOrderNow();
+            }); });
             return;
         }
         publishOrderNow();
@@ -999,7 +1005,7 @@ public class MainActivity extends AppCompatActivity {
         // ensureLadderCoins clamps the ask ladder to the tranches I can actually lock right now (+ splits toward
         // full depth in the background); publishFresh then re-reads the live SENDABLE balance so the advertised
         // size is never a stale snapshot.
-        engine.ensureLadderCoins(o, !SWEEP_ACTIVE, () -> SwapOrderBook.publishFresh(node, ls, identity, o, new CommsTransport.SendCb() {
+        engine.ensureLadderCoins(o, !SWEEP_ACTIVE, () -> engine.publishFresh(ls, identity, o, gen, new CommsTransport.SendCb() {
             @Override public void onSent(String txpowid) {
                 if (gen != PublishGate.gen()) { SwapLog.d("fg manual publish superseded — result dropped"); return; }
                 prefs.edit().putLong("last_publish_ok", System.currentTimeMillis()).apply();
@@ -1050,7 +1056,7 @@ public class MainActivity extends AppCompatActivity {
                 SwapLog.d("fg publish superseded pre-send — dropped");
                 return;
             }
-            SwapOrderBook.publishFresh(node, ls, identity, o, new CommsTransport.SendCb() {
+            engine.publishFresh(ls, identity, o, gen, new CommsTransport.SendCb() {
             @Override public void onSent(String txpowid) {
                 if (gen != PublishGate.gen()) {   // a user edit/withdraw or peg-tombstone superseded this attempt
                     PublishGate.release(PublishGate.ORDER);
@@ -1062,7 +1068,7 @@ public class MainActivity extends AppCompatActivity {
                 engine.setMyOrder(o);
                 PublishGate.release(PublishGate.ORDER);
                 SwapLog.d("fg publish OK " + txpowid);
-                if (restored && peg == PriceOracle.PEG_APPLIED) {
+                if (restored && peg == PriceOracle.PEG_APPLIED && o.hasLiquidity()) {
                     orderStatus = "✓ " + PriceOracle.source() + " feed recovered — pegged order is live again";
                     postNotification(PriceOracle.source() + " feed recovered", "Your pegged order is live again.");
                     render();
@@ -1143,12 +1149,12 @@ public class MainActivity extends AppCompatActivity {
                 SwapLog.d((live ? "fg order edit OK " : "fg order withdraw OK ") + txpowid);
                 if (peg == PriceOracle.PEG_APPLIED || wide) PriceOracle.commitPeg(prefs, pegMid, wide);   // baseline moves only on a CONFIRMED publish
                 engine.setMyOrder(o);
-                orderStatus = live ? "✓ Order updated" : "✓ Order withdrawn — removed from the book";
+                orderStatus = o.hasLiquidity() ? "✓ Order updated" : "✓ Order withdrawn — removed from the book";
                 render(); ui.postDelayed(MainActivity.this::scanOrderBook, 2000);
             }
             @Override public void onFailed(String message) { orderStatus = (live ? "Update" : "Withdraw") + " failed: " + message; render(); }
         };
-        if (live) engine.ensureLadderCoins(o, !SWEEP_ACTIVE, () -> SwapOrderBook.publishFresh(node, ls, identity, o, cb));
+        if (live) engine.ensureLadderCoins(o, !SWEEP_ACTIVE, () -> engine.publishFresh(ls, identity, o, gen, cb));
         else      SwapOrderBook.publish(node, ls, identity, o, cb);   // tombstone: no coins/balance read needed
     }
 
@@ -4019,6 +4025,7 @@ public class MainActivity extends AppCompatActivity {
         pubBtn.setOnClickListener(v -> {
             double sell = parseD(sellE.getText().toString(), 0), buy = parseD(buyE.getText().toString(), 0);
             if (sell <= 0 && buy <= 0) { toast("Enter a sell and/or buy size"); return; }
+            PublishGate.bumpGen(); // new OTC terms invalidate queued publications
             prefs.edit().putString("otc_sell_size", sell > 0 ? trim(sell) : "").putString("otc_buy_size", buy > 0 ? trim(buy) : "")
                     .putBoolean("otc_enable", true).putBoolean("otc_auto", true).apply();
             publishOtcOffer(sell, buy);
@@ -4224,6 +4231,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void withdrawOtcOffer() {
+        PublishGate.bumpGen(); // supersede queued live offers
         prefs.edit().putBoolean("otc_enable", false).putBoolean("otc_auto", false).apply();
         if (identity == null || myMinimaPk == null) { render(); return; }
         OtcOffer o = new OtcOffer();
