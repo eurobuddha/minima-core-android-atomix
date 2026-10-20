@@ -213,3 +213,8 @@ and certificate verified. Lint uncovered an Android9–11 API incompatibility; t
 existing BigDecimal exact conversion fixes it in both codebases. See
 OTC_RESPONDER_PARITY_2026-10-19.txt for evidence and remaining full-review work.
 No installation or publication.
+
+Standalone parity checkpoint 0.1.82/code182 —2026-10-20
+See STANDALONE_PARITY_2026-10-20.txt for the scoped ports, test/review results and
+signed candidate. Bears/Pandamonium untouched; other companions and MDS paused.
+Device verification and rollout remain outstanding.

@@ -143,6 +143,8 @@ public class MainActivity extends AppCompatActivity {
     private int currentTab = TAB_SWAP;
     private final TextView[] tabPills = new TextView[5];
     private boolean swapSell = true;    // Swap tab direction: true = Sell mxUSDT, false = Buy mxUSDT
+    private String otcSellDraft, otcBuyDraft;
+    private boolean otcInputFocused;
     private String swapAmount = "";     // Swap tab "you send" amount — persists across tree rebuilds
     private boolean swapInputFocused = false;   // suppress background render() while typing the swap amount
     private boolean swapSyncing = false;        // guard so the send/receive fields don't loop while syncing
@@ -1283,9 +1285,23 @@ public class MainActivity extends AppCompatActivity {
 
         final TextView pv = new TextView(this); pv.setTextSize(12f); pv.setTypeface(Design.sans()); pv.setLineSpacing(dp(2), 1f); pv.setPadding(0, dp(10), 0, dp(2));
         box.addView(pv);
+        final boolean[] revealError = {false};
+        // As in Future Cash tabs, reveal only after the translated view has its final layout.
+        pv.addOnLayoutChangeListener((view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+            if (revealError[0]) view.post(() -> {
+                if (revealError[0] && view.isAttachedToWindow())
+                    view.requestRectangleOnScreen(new android.graphics.Rect(0, 0, view.getWidth(), view.getHeight()), true);
+            });
+        });
 
-        final Runnable upd = () -> updateLadderPreview(pv, askRows, bidRows);
+        final EditText[] parameters = {biasE, repE, midE, stepE, levelsE, askSizeE, bidSizeE, minE};
+        final Runnable upd = () -> {
+            revealError[0] = false;
+            if (!marketParametersValid(parameters, pegSw.isChecked())) { invalidMarketDraft(pv); return; }
+            updateLadderPreview(pv, askRows, bidRows);
+        };
         TextWatcher w = onChange(upd);
+        repE.addTextChangedListener(w); minE.addTextChangedListener(w);
         for (EditText[] row : askRows) { row[0].addTextChangedListener(w); row[1].addTextChangedListener(w); }
         for (EditText[] row : bidRows) { row[0].addTextChangedListener(w); row[1].addTextChangedListener(w); }
         upd.run();
@@ -1295,10 +1311,12 @@ public class MainActivity extends AppCompatActivity {
         final boolean[] pegAwaitFill = { false };
         final boolean[] filling = { false };   // programmatic setText below must not re-trigger the param auto-gen watcher
         final Runnable fillFromPeg = () -> {
+            if (!marketParametersValid(parameters, pegSw.isChecked())) { invalidMarketDraft(pv); return; }
             double m = PriceOracle.mid();
             if (!(m > 0) || !PriceOracle.fresh()) return;
             double bias = Math.max(-20, Math.min(20, parseD(biasE.getText().toString(), 0)));
             double quoted = m * (1 + bias / 100.0);
+            if (!MarketDraft.generation(quoted, parseD(stepE.getText().toString(), 0), parseD(askSizeE.getText().toString(), 0), parseD(bidSizeE.getText().toString(), 0), Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), 1))))) { invalidMarketDraft(pv); return; }
             filling[0] = true;
             try {
                 midE.setText(trimSig(quoted));
@@ -1345,6 +1363,7 @@ public class MainActivity extends AppCompatActivity {
         // Manual generation (unpegged): silent — it fires per keystroke, so invalid/partial params just
         // pause row updates rather than toasting on every character.
         final Runnable genManual = () -> {
+            if (!marketParametersValid(parameters, pegSw.isChecked())) { invalidMarketDraft(pv); return; }
             double mid = parseD(midE.getText().toString(), 0);
             double step = parseD(stepE.getText().toString(), 0);
             double askSize = parseD(askSizeE.getText().toString(), 0), bidSize = parseD(bidSizeE.getText().toString(), 0);
@@ -1368,6 +1387,9 @@ public class MainActivity extends AppCompatActivity {
         // reprice threshold doesn't shape the rows).
         final Runnable autoGen = () -> {
             if (filling[0]) return;
+            revealError[0] = false;
+            if (!marketParametersValid(parameters, pegSw.isChecked())) { invalidMarketDraft(pv); return; }
+            upd.run();
             if (pegSw.isChecked()) {
                 if (PriceOracle.fresh()) fillFromPeg.run();
                 else { pegAwaitFill[0] = true; PriceOracle.refreshAsync(); }   // pegTick fills once the price lands
@@ -1379,57 +1401,91 @@ public class MainActivity extends AppCompatActivity {
         levelsE.addTextChangedListener(gw);   // changing the level count re-fills the rows (blanks the extras)
 
         modalOpen = true;
-        dialog()
+        final AlertDialog editor = dialog()
                 .setTitle("My market / ladder")
                 .setView(wrapScroll(box))
-                .setPositiveButton("Save", (d, w2) -> {
-                    p.enable = sw.isChecked();
-                    p.asks.clear(); p.bids.clear();
-                    for (EditText[] row : askRows) p.asks.add(new Order.Level(parseD(row[0].getText().toString(), 0), parseD(row[1].getText().toString(), 0)));
-                    for (EditText[] row : bidRows) p.bids.add(new Order.Level(parseD(row[0].getText().toString(), 0), parseD(row[1].getText().toString(), 0)));
-                    p.min = parseD(minE.getText().toString(), p.min);
-                    // Editor is authoritative: a side the user leaves with no valid levels is OFF. Zero its scalar
-                    // first so sanitize (which only DERIVES a scalar when a side HAS levels) can't leave a stale
-                    // legacy price live — otherwise the engine's empty-ladder fallback would keep trading it.
-                    p.buy = 0; p.sell = 0;
-                    Order.sanitize(p);   // drop blanks/invalids, cap 6, sort, derive best-level scalars for non-empty sides
-                    // Persist the auto-MM peg config (SwapService republishes from the same prefs). Step/size are
-                    // the quick-generate fields — the peg reuses them as its ladder parameters.
-                    boolean pegOn = pegSw.isChecked();
-                    double pStep = parseD(stepE.getText().toString(), 0);
-                    double pAskSize = parseD(askSizeE.getText().toString(), 0), pBidSize = parseD(bidSizeE.getText().toString(), 0);
-                    if (pegOn && (pStep <= 0 || !(pAskSize > 0 || pBidSize > 0))) { pegOn = false; toast("Peg needs a step % and an ask or bid size — saved with peg OFF"); }
-                    double pBias = Math.max(-20, Math.min(20, parseD(biasE.getText().toString(), 0)));
-                    double pRep = Math.max(0.1, parseD(repE.getText().toString(), 1));
-                    int pLevels = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), 1)));
-                    double pSize = Math.max(pAskSize, pBidSize);   // legacy P_SIZE fallback (older builds read one shared size)
-                    prefs.edit().putBoolean(PriceOracle.P_ENABLE, pegOn)
-                            .putString(PriceOracle.P_STEP, pStep > 0 ? trimSig(pStep) : "")
-                            .putString(PriceOracle.P_SIZE, pSize > 0 ? trimSig(pSize) : "")
-                            .putString(PriceOracle.P_ASK_SIZE, pAskSize > 0 ? trimSig(pAskSize) : "")
-                            .putString(PriceOracle.P_BID_SIZE, pBidSize > 0 ? trimSig(pBidSize) : "")
-                            .putString(PriceOracle.P_LEVELS, String.valueOf(pLevels))
-                            .putString(PriceOracle.P_BIAS, pBias != 0 ? trimSig(pBias) : "")
-                            .putString(PriceOracle.P_REPRICE, trimSig(pRep))
-                            .putBoolean(PriceOracle.P_WITHDRAWN, pegOn && prefs.getBoolean(PriceOracle.P_WITHDRAWN, false))
-                            .putBoolean(PriceOracle.P_TOMBSTONED, pegOn && prefs.getBoolean(PriceOracle.P_TOMBSTONED, false))
-                            .apply();
-                    saveOrder(o);
-                    if (p.enable && p.asks.isEmpty() && p.bids.isEmpty())
-                        toast("Enabled, but no levels set — add a bid or ask to publish");
-                    else
-                        toast(Order.crossed(p) ? "⚠ Saved, but your best bid ≥ best ask (crossed market)" : "Ladder saved");
-                    // If an order is already live, reflect this edit in the book NOW — especially a DISABLE, which
-                    // publishes a tombstone so it's withdrawn in seconds, not after the ~30-min auto-republish.
-                    if (prefs.getBoolean("auto_publish", false)) pushOrderEdit(o);
-                })
+                .setPositiveButton("Save", null)
                 .setNegativeButton("Cancel", null)
                 .setOnDismissListener(d -> { dlgOpen[0] = false; pegTickRef = null; modalOpen = false; render(); })
                 .show();
+        editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            if (!marketParametersValid(parameters, pegSw.isChecked()) || !marketRowsValid(askRows, bidRows)) { revealError[0] = true; invalidMarketDraft(pv); pv.post(() -> pv.requestRectangleOnScreen(new android.graphics.Rect(0, 0, pv.getWidth(), pv.getHeight()), true)); return; }
+
+            p.enable = sw.isChecked();
+            p.asks.clear(); p.bids.clear();
+            for (EditText[] row : askRows) p.asks.add(new Order.Level(parseD(row[0].getText().toString(), 0), parseD(row[1].getText().toString(), 0)));
+            for (EditText[] row : bidRows) p.bids.add(new Order.Level(parseD(row[0].getText().toString(), 0), parseD(row[1].getText().toString(), 0)));
+            p.min = parseD(minE.getText().toString(), p.min);
+            // Editor is authoritative: a side the user leaves with no valid levels is OFF. Zero its scalar
+            // first so sanitize (which only DERIVES a scalar when a side HAS levels) can't leave a stale
+            // legacy price live — otherwise the engine's empty-ladder fallback would keep trading it.
+            p.buy = 0; p.sell = 0;
+            Order.sanitize(p);   // drop blanks/invalids, cap 6, sort, derive best-level scalars for non-empty sides
+            // Persist the auto-MM peg config (SwapService republishes from the same prefs). Step/size are
+            // the quick-generate fields — the peg reuses them as its ladder parameters.
+            boolean pegOn = pegSw.isChecked();
+            double pStep = parseD(stepE.getText().toString(), 0);
+            double pAskSize = parseD(askSizeE.getText().toString(), 0), pBidSize = parseD(bidSizeE.getText().toString(), 0);
+            if (pegOn && (pStep <= 0 || !(pAskSize > 0 || pBidSize > 0))) { pegOn = false; toast("Peg needs a step % and an ask or bid size — saved with peg OFF"); }
+            double pBias = Math.max(-20, Math.min(20, parseD(biasE.getText().toString(), 0)));
+            double pRep = Math.max(0.1, parseD(repE.getText().toString(), 1));
+            int pLevels = Math.max(1, Math.min(Order.MAX_LEVELS, (int) parseD(levelsE.getText().toString(), 1)));
+            double pSize = Math.max(pAskSize, pBidSize);   // legacy P_SIZE fallback (older builds read one shared size)
+            prefs.edit().putBoolean(PriceOracle.P_ENABLE, pegOn)
+                    .putString(PriceOracle.P_STEP, pStep > 0 ? trimSig(pStep) : "")
+                    .putString(PriceOracle.P_SIZE, pSize > 0 ? trimSig(pSize) : "")
+                    .putString(PriceOracle.P_ASK_SIZE, pAskSize > 0 ? trimSig(pAskSize) : "")
+                    .putString(PriceOracle.P_BID_SIZE, pBidSize > 0 ? trimSig(pBidSize) : "")
+                    .putString(PriceOracle.P_LEVELS, String.valueOf(pLevels))
+                    .putString(PriceOracle.P_BIAS, pBias != 0 ? trimSig(pBias) : "")
+                    .putString(PriceOracle.P_REPRICE, trimSig(pRep))
+                    .putBoolean(PriceOracle.P_WITHDRAWN, pegOn && prefs.getBoolean(PriceOracle.P_WITHDRAWN, false))
+                    .putBoolean(PriceOracle.P_TOMBSTONED, pegOn && prefs.getBoolean(PriceOracle.P_TOMBSTONED, false))
+                    .apply();
+            saveOrder(o);
+            if (p.enable && p.asks.isEmpty() && p.bids.isEmpty())
+                toast("Enabled, but no levels set — add a bid or ask to publish");
+            else
+                toast(Order.crossed(p) ? "⚠ Saved, but your best bid ≥ best ask (crossed market)" : "Ladder saved");
+            // If an order is already live, reflect this edit in the book NOW — especially a DISABLE, which
+            // publishes a tombstone so it's withdrawn in seconds, not after the ~30-min auto-republish.
+            if (prefs.getBoolean("auto_publish", false)) pushOrderEdit(o);
+            editor.dismiss();
+        });
+    }
+
+    private boolean marketParametersValid(EditText[] fields, boolean pegged) {
+        String[] raw = new String[fields.length];
+        for (int i = 0; i < fields.length; i++) raw[i] = fields[i].getText().toString();
+        if (!MarketDraft.parameters(raw)) return false;
+        if (!pegged) return true;
+        double bias = Math.max(-20, Math.min(20, MarketDraft.number(raw[0], true, 0)));
+        double quoted = PriceOracle.mid() * (1 + bias / 100.0);
+        int levels = Math.max(1, Math.min(Order.MAX_LEVELS, (int) MarketDraft.number(raw[4], false, 1)));
+        return MarketDraft.generation(quoted, MarketDraft.number(raw[3], false, 0),
+                MarketDraft.number(raw[5], false, 0), MarketDraft.number(raw[6], false, 0), levels);
+    }
+
+    private boolean marketRowsValid(EditText[][]... sides) {
+        for (EditText[][] side : sides) {
+            String[][] raw = new String[side.length][2];
+            for (int i = 0; i < side.length; i++) {
+                raw[i][0] = side[i][0].getText().toString();
+                raw[i][1] = side[i][1].getText().toString();
+            }
+            if (!MarketDraft.rows(raw)) return false;
+        }
+        return true;
+    }
+
+    private void invalidMarketDraft(TextView preview) {
+        preview.setText("Check the numbers: one is invalid or too large. Your draft has not been saved.");
+        preview.setTextColor(Design.RED());
     }
 
     /** Live ladder summary in the editor: level counts, best prices, side totals, crossed warning. */
     private void updateLadderPreview(TextView pv, EditText[][] askRows, EditText[][] bidRows) {
+        if (!marketRowsValid(askRows, bidRows)) { invalidMarketDraft(pv); return; }
         int nA = 0, nB = 0; double bestAsk = Double.MAX_VALUE, bestBid = 0, sumA = 0, sumB = 0;
         for (EditText[] row : askRows) {
             double px = parseD(row[0].getText().toString(), 0), am = parseD(row[1].getText().toString(), 0);
@@ -1536,7 +1592,7 @@ public class MainActivity extends AppCompatActivity {
      *   - Buy mxUSDT  → you give USDT, receive mxUSDT at the maker's BUY price (the higher / ask).
      */
     private void takeOrderDialog(Order maker, String symbol, boolean sellMinima, final double price, final double maxAmount) {
-        if (price <= 0) return;
+        if (!Double.isFinite(price) || price <= 0) return;
         Order.Pair p = maker.pairs.get(symbol);
         final double min = p != null ? p.min : 0;   // maker's global per-trade minimum
 
@@ -1577,31 +1633,43 @@ public class MainActivity extends AppCompatActivity {
         }
 
         modalOpen = true;
-        dialog()
+        final AlertDialog editor = dialog()
                 .setTitle((sellMinima ? "Sell " + ccy() : "Buy " + ccy()) + " · " + Util.shorten(maker.signerPk))
                 .setView(box)
-                .setPositiveButton("Start swap", (d, w) -> {
-                    String minima = amt.getText().toString().trim();
-                    String usdt = computeUsdt(minima, price);
-                    if (usdt == null) { toast("Enter a valid " + ccy() + " amount"); return; }
-                    // Client-side guards are UX-only — the maker's engine guard is authoritative — but catch the
-                    // obvious auto-declines before locking any coins on-chain.
-                    double m = parseD(minima, 0);
-                    if (m > maxAmount + 1e-9) { toast("This level takes up to " + abbrev(maxAmount) + " " + ccy() + " — more will be auto-declined"); return; }
-                    if (min > 0 && m < min) { toast("Below the maker's minimum (" + trim(min) + " " + ccy() + ")"); return; }
-                    startSwap(maker, symbol, sellMinima, minima, usdt);
-                })
+                .setPositiveButton("Start swap", null)
                 .setNegativeButton("Cancel", null)
                 .setOnDismissListener(d -> { modalOpen = false; render(); })
                 .show();
+        editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String raw = amt.getText().toString();
+            if (!positiveSwapAmount(raw)) { out.setText("Enter a valid " + ccy() + " amount"); return; }
+            String minima = MinimaHtlc.grain(raw);
+            String usdt = computeUsdt(minima, price);
+            if (usdt == null) { out.setText("Enter a valid " + ccy() + " amount"); return; }
+            // Client-side guards are UX-only — the maker's engine guard is authoritative — but catch the
+            // obvious auto-declines before locking any coins on-chain.
+            double m = parseD(minima, 0);
+            if (m > maxAmount + 1e-9) { toast("This level takes up to " + abbrev(maxAmount) + " " + ccy() + " — more will be auto-declined"); return; }
+            if (min > 0 && m < min) { toast("Below the maker's minimum (" + trim(min) + " " + ccy() + ")"); return; }
+            startSwap(maker, symbol, sellMinima, minima, usdt);
+            editor.dismiss();
+        });
+    }
+
+    /** Match the existing six-decimal trade grain before a quote or review is offered. */
+    private static boolean positiveSwapAmount(String raw) {
+        double value = MarketDraft.number(raw, false, Double.NaN);
+        return Double.isFinite(value) && value > 0 && new BigDecimal(MinimaHtlc.grain(raw)).signum() > 0;
     }
 
     /** USDT side for a mxUSDT amount at a given price (USDT per mxUSDT). */
     private String computeUsdt(String minimaAmount, double price) {
+        if (!positiveSwapAmount(minimaAmount) || !Double.isFinite(price) || price <= 0) return null;
         try {
-            BigDecimal m = new BigDecimal(minimaAmount.trim());
+            BigDecimal m = new BigDecimal(MinimaHtlc.grain(minimaAmount));
             if (m.signum() <= 0 || price <= 0) return null;
             BigDecimal usdt = m.multiply(BigDecimal.valueOf(price)).setScale(6, RoundingMode.DOWN);
+            if (usdt.signum() <= 0 || !Double.isFinite(usdt.doubleValue())) return null;
             return Util.tidyAmount(usdt.stripTrailingZeros().toPlainString());
         } catch (Exception e) { return null; }
     }
@@ -1826,6 +1894,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void setTab(int t) {
         if (t == currentTab) return;
+        otcInputFocused = false;
         swapInputFocused = false;   // leaving the Swap tab clears the typing guard
         currentTab = t;
         // Entering a book-rendering tab (Swap / Market) → refresh the book NOW. The periodic poll only scans while
@@ -1843,10 +1912,11 @@ public class MainActivity extends AppCompatActivity {
         if (isFinishing() || isDestroyed()) return;
         // Never rebuild the view tree while a dialog with text inputs is open — a background render
         // (watcher / balance callback) restarts the IME and resets the cursor mid-typing. We re-render
-        // once when the dialog dismisses. (All text entry lives in guarded dialogs, never inline in a tab.)
+        // once when the dialog dismisses. Inline swap/OTC drafts have their own focus guards below.
         if (modalOpen) return;
         // While the user is typing the swap amount, don't rebuild the tree under them (would reset the IME/cursor).
         if (swapInputFocused && currentTab == TAB_SWAP) return;
+        if (otcInputFocused && currentTab == TAB_OTC && !IdentityWatch.halted()) return;
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(dp(16), dp(14), dp(16), dp(24));
@@ -2330,10 +2400,12 @@ public class MainActivity extends AppCompatActivity {
 
     /** mxUSDT you'd receive for a USDT amount at a given price (USDT per mxUSDT). */
     private String computeMinima(String usdtAmount, double price) {
+        if (!positiveSwapAmount(usdtAmount) || !Double.isFinite(price) || price <= 0) return null;
         try {
-            BigDecimal u = new BigDecimal(usdtAmount.trim());
+            BigDecimal u = new BigDecimal(MinimaHtlc.grain(usdtAmount));
             if (u.signum() <= 0 || price <= 0) return null;
-            BigDecimal m = u.divide(BigDecimal.valueOf(price), 6, RoundingMode.DOWN);   // 6dp mxUSDT/USDT trade grain
+            BigDecimal m = u.divide(BigDecimal.valueOf(price), 6, RoundingMode.DOWN);
+            if (m.signum() <= 0 || !Double.isFinite(m.doubleValue())) return null;   // 6dp mxUSDT/USDT trade grain
             return Util.tidyAmount(m.stripTrailingZeros().toPlainString());
         } catch (Exception e) { return null; }
     }
@@ -2342,9 +2414,10 @@ public class MainActivity extends AppCompatActivity {
     private void reviewSwap(Order maker, boolean sellMinima, String sendStr, double price, double maxAmount) {
         swapInputFocused = false;   // leaving the amount field — let the panel re-render live from here on
         if (sendStr.isEmpty()) { toast("Enter an amount to " + (sellMinima ? "sell" : "spend")); return; }
+        if (!positiveSwapAmount(sendStr)) { toast("Enter a valid amount"); return; }
         final String minima, usdt;
         if (sellMinima) { minima = MinimaHtlc.grain(sendStr); usdt = computeUsdt(minima, price); }   // 6dp trade grain, both legs consistent
-        else { usdt = sendStr; minima = computeMinima(sendStr, price); }
+        else { usdt = MinimaHtlc.grain(sendStr); minima = computeMinima(usdt, price); }
         if (minima == null || usdt == null) { toast("Enter a valid amount"); return; }
         // UX-only cap check against the best level (the maker's guard is authoritative) — stop over-sizing before a lock.
         if (maxAmount > 0 && parseD(minima, 0) > maxAmount + 1e-9) {
@@ -2372,12 +2445,13 @@ public class MainActivity extends AppCompatActivity {
     private void onSwapCta(boolean sell, String minimaStr, Best best) {
         swapInputFocused = false;   // leaving the amount field — panel re-renders live from here (0.8.1 lesson)
         if (minimaStr.isEmpty()) { toast("Enter how much " + ccy() + " to " + (sell ? "sell" : "buy")); return; }
+        if (!positiveSwapAmount(minimaStr)) { toast("Enter a valid " + ccy() + " amount."); return; }
         scanOrderBook();   // kick a fresh book scan now (async) so it's current by the time the user confirms the
                            // review dialog — the startLeg liveness guard then re-checks against that fresh book.
         final Order bestMaker = sell ? best.bidMaker : best.askMaker;
         final double bestPrice = sell ? best.bestBid : best.bestAsk;
         final double bestCap = sell ? best.bidCap : best.askCap;   // mxUSDT
-        if (bestMaker == null || bestPrice <= 0) { toast("No quote available right now."); return; }
+        if (bestMaker == null || !Double.isFinite(bestPrice) || bestPrice <= 0) { toast("No quote available right now."); return; }
         final double EPS = 1e-9;
         final double want = parseD(minimaStr, 0);
         if (want <= 0) { toast("Enter a valid " + ccy() + " amount."); return; }
@@ -2682,10 +2756,10 @@ public class MainActivity extends AppCompatActivity {
      *  STRING (not a double product), so {@code lockedUsdt ≥ minima × price} holds to the last tick against the
      *  maker's own BigDecimal guard while I still receive my target mxUSDT. Non-finite/garbage input → null (no throw). */
     private static String ceilUsdt(String minima, double price) {
-        if (minima == null || !Double.isFinite(price) || price <= 0) return null;
+        if (!positiveSwapAmount(minima) || !Double.isFinite(price) || price <= 0) return null;
         try {
             BigDecimal u = new BigDecimal(minima.trim()).multiply(BigDecimal.valueOf(price)).setScale(6, RoundingMode.UP);
-            if (u.signum() <= 0) return null;
+            if (u.signum() <= 0 || !Double.isFinite(u.doubleValue())) return null;
             String s = Util.tidyAmount(u.stripTrailingZeros().toPlainString());
             return (s.isEmpty() || "0".equals(s)) ? null : s;
         } catch (Exception e) { return null; }
@@ -2714,6 +2788,7 @@ public class MainActivity extends AppCompatActivity {
         final String sym = "USDT";
         final double EPS = 1e-9, GRAIN = 1e-6;
         SweepPlan plan = new SweepPlan(sell);
+        if (!positiveSwapAmount(targetStr) || !Double.isFinite(slippage) || slippage < 0 || slippage > 0.5) { plan.stopReason = "book-exhausted"; return plan; }
         plan.slippagePct = slippage * 100;
         double target = parseD(targetStr, 0);   // mxUSDT to sell (sell) or mxUSDT to buy (buy)
         plan.target = target;
@@ -2732,7 +2807,7 @@ public class MainActivity extends AppCompatActivity {
             Order maker = (Order) row[0];
             Order.Level lvl = (Order.Level) row[1];
             double price = lvl.price;
-            if (price <= 0) continue;
+            if (!Double.isFinite(price) || price <= 0) continue;
 
             // BUY slippage cap — never pay more than best × (1+slippage) per mxUSDT.
             if (!sell && bestPrice > 0 && slippage > 0 && price > bestPrice * (1 + slippage) + EPS) {
@@ -2750,7 +2825,7 @@ public class MainActivity extends AppCompatActivity {
                 double rm = remMinima.containsKey(maker) ? remMinima.get(maker) : maker.minimaAvail;
                 capMinima = Math.min(lvl.amount, rm);
             }
-            if (capMinima <= EPS) continue;
+            if (!Double.isFinite(capMinima) || capMinima <= EPS) continue;
 
             double takeMinima = Math.min(capMinima, remaining);
             if (takeMinima <= EPS) continue;
@@ -2769,6 +2844,7 @@ public class MainActivity extends AppCompatActivity {
             if (leg.minimaD <= EPS || leg.usdtD <= EPS) continue;
             if (mn > 0 && leg.minimaD < mn - EPS) { skippedForMin = true; continue; }   // grain floor slipped below min — skip (strict: never emit a leg the maker auto-declines)
 
+            if (!Double.isFinite(plan.filledMinima + leg.minimaD) || !Double.isFinite(plan.totalUsdt + leg.usdtD)) { plan.partial = true; break; }
             if (bestPrice <= 0) bestPrice = price;   // anchor slippage on the FIRST leg actually taken (best fillable)
             plan.legs.add(leg);
             plan.filledMinima += leg.minimaD;
@@ -2793,7 +2869,8 @@ public class MainActivity extends AppCompatActivity {
 
     // ---- buy slippage tolerance (deliver the mxUSDT target across deeper legs, capped at best × (1+slippage)) ----
 
-    private double buySlippage() { return prefs.getFloat("buy_slippage_pct", 4.2f) / 100.0; }   // fraction, default 4.2%
+    private double buySlippage() { double pct = prefs.getFloat("buy_slippage_pct", 4.2f);
+        return Double.isFinite(pct) && pct >= 0.1f && pct <= 50 ? pct / 100.0 : 0.042; }   // fraction, default 4.2%
 
     private TextView slipPill(String label, boolean active, Runnable onTap) {
         TextView p = Design.pill(this, label, active ? Design.ACCENT_SOFT() : Design.SURFACE2(), active ? Design.ACCENT() : Design.DIM());
@@ -2804,6 +2881,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setBuySlippage(double pct) {
+        if (!Double.isFinite(pct)) return;
         prefs.edit().putFloat("buy_slippage_pct", (float) Math.max(0.1, Math.min(50, pct))).apply();
         render();
     }
@@ -2820,13 +2898,23 @@ public class MainActivity extends AppCompatActivity {
         e.setTextColor(Design.TEXT()); e.setTextSize(16f); e.setTypeface(Design.mono());
         box.addView(e);
         modalOpen = true;
-        dialog()
+        final AlertDialog editor = dialog()
                 .setTitle("Custom max slippage")
                 .setView(box)
-                .setPositiveButton("Set", (d, w) -> setBuySlippage(parseD(e.getText().toString(), 4.2)))
+                .setPositiveButton("Set", null)
                 .setNegativeButton("Cancel", null)
                 .setOnDismissListener(d -> { modalOpen = false; render(); })
                 .show();
+        editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            double pct = MarketDraft.number(e.getText().toString(), false, Double.NaN);
+            if (!Double.isFinite(pct)) {
+                h.setText("Check the numbers: one is invalid or too large. Your draft has not been saved.");
+                h.setTextColor(Design.RED());
+                return;
+            }
+            setBuySlippage(pct);
+            editor.dismiss();
+        });
     }
 
     private void consolidateDialog() {
@@ -2907,7 +2995,9 @@ public class MainActivity extends AppCompatActivity {
             // Say WHICH write and WHY. The old text told everyone to "First restart MinimaCore",
             // which is right only for a timeout; for the other causes the node already answered (or
             // was never asked) and restarting it achieves nothing - observed live twice, 2026-09-23.
-            String detail = node.interruptedWriteDetail();
+            final NodeApi recoveryNode = node;
+            final String pausedWrite = recoveryNode.interruptedWriteId();
+            String detail = recoveryNode.interruptedWriteDetail();
             resolve.setOnClickListener(v -> new AlertDialog.Builder(this)
                     .setTitle("Resolve interrupted write")
                     .setMessage((detail == null ? "A node write lost its reply and may have completed." : detail)
@@ -2915,7 +3005,7 @@ public class MainActivity extends AppCompatActivity {
                             + "pause does not undo or retry a transaction.")
                     .setNegativeButton("Keep paused", null)
                     .setPositiveButton("I have checked", (d, w) -> {
-                        toast(node.acknowledgeInterruptedWrite() ? "Pause cleared. Review balances before starting a new trade." : "A write is still active; keep paused.");
+                        toast(recoveryNode.acknowledgeInterruptedWrite(pausedWrite) ? "Pause cleared. Review balances before starting a new trade." : "Pause could not be cleared. Its state changed, a write is active, or saving failed. Review it again.");
                         render();
                     }).show());
             col.addView(resolve);
@@ -3971,6 +4061,19 @@ public class MainActivity extends AppCompatActivity {
 
     // ============================================================ OTC deals tab
 
+    private void rememberOtcDraft(EditText field, boolean sell) {
+        field.addTextChangedListener(new SimpleWatcher(() -> {
+            if (sell) otcSellDraft = field.getText().toString(); else otcBuyDraft = field.getText().toString();
+        }));
+        field.setOnFocusChangeListener((view, focused) -> {
+            otcInputFocused = focused;
+            if (!focused) ui.postDelayed(this::render, 250);
+        });
+    }
+    private void finishOtcEditing(View container) {
+        container.setFocusableInTouchMode(true); container.requestFocus(); otcInputFocused = false;
+    }
+
     private void renderOtcTab(LinearLayout col) {
         TextView intro = new TextView(this);
         intro.setText("Negotiate a custom size + price directly with a liquidity provider, then settle as a trustless HTLC swap.");
@@ -3999,6 +4102,11 @@ public class MainActivity extends AppCompatActivity {
         t.setPadding(0, dp(8), 0, dp(6)); col.addView(t);
     }
 
+    private static double otcNumber(String value, double fallback) {
+        double parsed = parseD(value, fallback);
+        return Double.isFinite(parsed) ? parsed : fallback;
+    }
+
     private void renderOtcAvailability(LinearLayout col) {
         otcSectionHead(col, "MY AVAILABILITY");
         LinearLayout box = otcCardBox(col);
@@ -4007,13 +4115,15 @@ public class MainActivity extends AppCompatActivity {
         box.addView(fieldLabel("I SELL " + ccy() + " up to"));
         final EditText sellE = new EditText(this); decimalInput(sellE);
         sellE.setHint("max " + ccy() + " (blank = off)"); sellE.setHintTextColor(Design.DIM2());
-        sellE.setText(prefs.getString("otc_sell_size", "")); sellE.setTextColor(Design.TEXT()); sellE.setTextSize(15f); sellE.setTypeface(Design.mono());
+        if (otcSellDraft == null) otcSellDraft = prefs.getString("otc_sell_size", "");
+        sellE.setText(otcSellDraft); rememberOtcDraft(sellE, true); sellE.setTextColor(Design.TEXT()); sellE.setTextSize(15f); sellE.setTypeface(Design.mono());
         box.addView(sellE);
 
         box.addView(fieldLabel("I BUY " + ccy() + " up to"));
         final EditText buyE = new EditText(this); decimalInput(buyE);
         buyE.setHint("max " + ccy() + " (blank = off)"); buyE.setHintTextColor(Design.DIM2());
-        buyE.setText(prefs.getString("otc_buy_size", "")); buyE.setTextColor(Design.TEXT()); buyE.setTextSize(15f); buyE.setTypeface(Design.mono());
+        if (otcBuyDraft == null) otcBuyDraft = prefs.getString("otc_buy_size", "");
+        buyE.setText(otcBuyDraft); rememberOtcDraft(buyE, false); buyE.setTextColor(Design.TEXT()); buyE.setTextSize(15f); buyE.setTypeface(Design.mono());
         box.addView(buyE);
 
         TextView st = new TextView(this);
@@ -4023,9 +4133,10 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout btns = new LinearLayout(this); btns.setOrientation(LinearLayout.HORIZONTAL);
         TextView pubBtn = Design.pill(this, enabled ? "Update" : "Go live", Design.ACCENT(), Design.ON_ACCENT());
         pubBtn.setOnClickListener(v -> {
-            double sell = parseD(sellE.getText().toString(), 0), buy = parseD(buyE.getText().toString(), 0);
-            if (sell <= 0 && buy <= 0) { toast("Enter a sell and/or buy size"); return; }
+            double sell = otcNumber(sellE.length() == 0 ? "0" : sellE.getText().toString(), Double.NaN), buy = otcNumber(buyE.length() == 0 ? "0" : buyE.getText().toString(), Double.NaN);
+            if (!Double.isFinite(sell) || !Double.isFinite(buy) || sell < 0 || buy < 0 || (sell <= 0 && buy <= 0)) { toast("Enter a sell and/or buy size"); return; }
             PublishGate.bumpGen(); // new OTC terms invalidate queued publications
+            finishOtcEditing(box);
             prefs.edit().putString("otc_sell_size", sell > 0 ? trim(sell) : "").putString("otc_buy_size", buy > 0 ? trim(buy) : "")
                     .putBoolean("otc_enable", true).putBoolean("otc_auto", true).apply();
             publishOtcOffer(sell, buy);
@@ -4033,7 +4144,7 @@ public class MainActivity extends AppCompatActivity {
         Design.pressable(pubBtn); btns.addView(pubBtn);
         if (enabled) {
             TextView wd = Design.pill(this, "Withdraw", Design.SURFACE2(), Design.TEXT());
-            wd.setOnClickListener(v -> withdrawOtcOffer()); Design.pressable(wd);
+            wd.setOnClickListener(v -> { finishOtcEditing(box); withdrawOtcOffer(); }); Design.pressable(wd);
             LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT); wlp.leftMargin = dp(8);
             btns.addView(wd, wlp);
         }
@@ -4148,17 +4259,18 @@ public class MainActivity extends AppCompatActivity {
      *  Returns null if OK (or the balance is unknown), else a user-facing shortfall message. The on-chain lock is the
      *  authoritative backstop — this is a fast UX guard so I never offer/accept terms I can't fund. */
     private String otcCheckFunds(String role, String side, String amount, String price) {
-        double amt = parseD(amount, 0), pr = parseD(price, 0);
+        if (!OtcController.validTerms(amount, price)) return "Enter amount + price";
+        double amt = otcNumber(amount, 0), pr = otcNumber(price, 0);
         boolean iLockMinima = (OtcDb.ROLE_INSTIGATOR.equals(role) && OtcOffer.LP_BUYS_MINIMA.equals(side))
                 || (OtcDb.ROLE_LP.equals(role) && OtcOffer.LP_SELLS_MINIMA.equals(side));
         if (iLockMinima) {                                               // I'd lock mxUSDT = amount
-            double have = parseD(minimaBal, -1);                         // "sendable" (tradeable) mxUSDT
+            double have = otcNumber(minimaBal, -1);                         // "sendable" (tradeable) mxUSDT
             if (have < 0) return null;                                   // unknown → don't block; execute is the gate
             if (amt > have + 1e-9) return "Not enough " + ccy() + " — need " + trim(amt) + ", have " + trim(have);
         } else {                                                        // I'd lock USDT = amount × price
             String u = tokenBals.get("USDT");
             if (u == null) return null;                                 // not loaded → don't block
-            double have = parseD(Util.tidyAmount(u), -1), need = amt * pr;
+            double have = otcNumber(Util.tidyAmount(u), -1), need = amt * pr;
             if (have < 0) return null;
             if (need > have + 1e-9) return "Not enough USDT — need " + trim(need) + ", have " + trim(have);
         }
@@ -4177,8 +4289,8 @@ public class MainActivity extends AppCompatActivity {
         dialog().setTitle(iBuy ? "Buy " + ccy() : "Sell " + ccy())
                 .setView(wrapScroll(box))
                 .setPositiveButton("Send offer", (dg, w) -> {
-                    double a = parseD(amtE.getText().toString(), 0), p = parseD(prE.getText().toString(), 0);
-                    if (a <= 0 || p <= 0) { toast("Enter amount + price"); return; }
+                    double a = otcNumber(amtE.getText().toString(), 0), p = otcNumber(prE.getText().toString(), 0);
+                    if (a <= 0 || p <= 0 || !Double.isFinite(a) || !Double.isFinite(p) || !OtcController.validTerms(trim(a), trimSig(p))) { toast("Enter amount + price"); return; }
                     if (a > cap + 1e-9) { toast("Above the LP's max size"); return; }
                     String fundErr = otcCheckFunds(OtcDb.ROLE_INSTIGATOR, dealSide, trim(a), trimSig(p));
                     if (fundErr != null) { toast(fundErr); return; }
@@ -4199,8 +4311,8 @@ public class MainActivity extends AppCompatActivity {
         modalOpen = true;
         dialog().setTitle("Counter-offer").setView(wrapScroll(box))
                 .setPositiveButton("Send counter", (dg, w) -> {
-                    double a = parseD(amtE.getText().toString(), 0), p = parseD(prE.getText().toString(), 0);
-                    if (a <= 0 || p <= 0) { toast("Enter amount + price"); return; }
+                    double a = otcNumber(amtE.getText().toString(), 0), p = otcNumber(prE.getText().toString(), 0);
+                    if (a <= 0 || p <= 0 || !Double.isFinite(a) || !Double.isFinite(p) || !OtcController.validTerms(trim(a), trimSig(p))) { toast("Enter amount + price"); return; }
                     String fundErr = otcCheckFunds(d.role, d.side, trim(a), trimSig(p));
                     if (fundErr != null) { toast(fundErr); return; }
                     if (otc != null) otc.counter(d, trim(a), trimSig(p), otcRes("Counter sent"));
@@ -4211,6 +4323,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void publishOtcOffer(double sellSize, double buySize) {
+        if (!Double.isFinite(sellSize) || !Double.isFinite(buySize) || sellSize < 0 || buySize < 0) { toast("Enter a sell and/or buy size"); return; }
         if (IdentityWatch.halted()) { toast("Halted: app keys don't match your node"); return; }
         if (identity == null || myMinimaPk == null || !wallet.ready()) { toast("Still connecting…"); return; }
         if (!PublishGate.tryAcquire(PublishGate.OTC)) {
@@ -4264,7 +4377,7 @@ public class MainActivity extends AppCompatActivity {
         if (identity == null || myMinimaPk == null || !wallet.ready()) return;
         if (!prefs.getBoolean("otc_auto", false)) return;
         if (System.currentTimeMillis() - prefs.getLong("otc_last_publish_ok", 0) < REPUBLISH_INTERVAL_MS) return;
-        publishOtcOffer(parseD(prefs.getString("otc_sell_size", "0"), 0), parseD(prefs.getString("otc_buy_size", "0"), 0));
+        publishOtcOffer(otcNumber(prefs.getString("otc_sell_size", "0"), 0), otcNumber(prefs.getString("otc_buy_size", "0"), 0));
     }
 
     private int dp(int v) { return Design.dp(this, v); }

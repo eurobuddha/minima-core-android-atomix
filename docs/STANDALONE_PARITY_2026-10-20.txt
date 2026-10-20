@@ -1,0 +1,77 @@
+Standalone AtomiX 0.1.82 / code182 — 2026-10-20
+
+Scope
+Ports existing Pandamonium safeguards into the standalone APK only. Other companions
+and MDS apps are paused. Bears/Pandamonium was read-only: no files, builds, branches,
+documentation or remotes there were changed. Existing native UI, IPC connection,
+package, app-private storage and foreground service initialization are retained.
+
+Reused source
+Read-only donor root:
+/Users/eurobuddha/Projects/minima/apks/base/build/multilingual-2026-10-16
+integrated/atomix/src/main/java/com/eurobuddha/atomix/eth/EthWallet.java
+integrated/atomix/src/main/java/com/eurobuddha/atomix/MarketDraft.java
+integrated/atomix/src/main/java/com/eurobuddha/comms/WriteSafety.java
+integrated/atomix/src/main/java/com/eurobuddha/comms/NodeApi.java
+integrated/atomix/src/main/java/com/eurobuddha/atomix/MainActivity.java
+scripts/adapt-pandamonium-atomix-market-inputs.py
+scripts/adapt-pandamonium-atomix-swap-inputs.py
+scripts/adapt-pandamonium-atomix-recovery.py
+scripts/adapt-pandamonium-atomix-amounts.py (UI portion; engine already ported)
+scripts/adapt-pandamonium-atomix-otc.py (draft/focus portion)
+Adaptations are the standalone com.eurobuddha.comms namespace and English native UI
+bindings. No localization system, embedded-node transport or new dependency copied.
+
+Behavior
+Node-derived ETH keys require a Boolean success envelope, exactly 32 hex bytes and
+a valid nonzero secp256k1 scalar. Failed responses never replace current credentials;
+error messages do not echo secret response data. Probes cannot replace the wallet.
+Market drafts reject malformed, underflowed and overflowing numbers before row
+replacement or persistence. Invalid Save leaves the editor open. Swap quotes require
+finite positive amounts at the existing six-decimal settlement grain; invalid
+slippage stays editable. Sweep planning rejects invalid totals/quotes/caps.
+Interrupted-write acknowledgement captures the reviewed node and marker. A different
+marker or active write cannot be cleared by stale consent. Failed persistence restores
+marker details and keeps a process latch against new writes until acknowledged.
+OTC input parsing rejects nonfinite sizes/terms before preference changes, funding
+review or publication. Unsaved availability values survive refresh; focus guards
+avoid rebuilding the form while typing. Currency switching already recreates the
+Activity, so drafts do not carry into a different currency. Existing OTC controllers,
+swap engine and transaction journal were not rewritten.
+
+Validation
+The five donor AtomixKeyBoundaryTest cases failed against old production code and
+pass after the port. Reused MarketDraftTest (8 cases) and WriteAcknowledgementTest
+(6 cases). StandaloneMarketInputTest exercises real native market/slippage buttons,
+row preservation, corrected saves and actual quote helpers (4 cases).
+StandaloneOtcInputTest reproduced all three old failures before the port: invalid
+availability saving, refresh discarding a draft, and malformed terms passing the
+cached funding precheck. All three now pass. Existing standalone Activity fixtures
+are reused; identity is disabled/mocked so tests cannot publish or move real funds.
+552 debug and 552 release tests pass, zero failures/errors/skips. Offline signed
+release and lint pass: zero errors, 203 warnings. Actual APK package/version,
+ZIP/DEX integrity and family signing certificate verified. Release keeps existing
+no-R8 configuration. No device install, live trade or publication performed.
+
+Code Review
+Summary: inspected changed helpers and Activity handlers, key derivation/probe callers,
+write-acknowledgement wrapper/dispatch lifecycle, numeric generation/quote consumers,
+OTC handlers/currency restart, regression tests and release configuration. The ports
+preserve standalone IPC and storage rather than copying embedded-host behavior.
+Findings: no unresolved finding in this bounded port.
+Verdict: Approve this parity candidate.
+Limits: app-private journaling does not coordinate other APKs/devices using the same
+Ethereum key. Wider initiator/allowance/gas, receipt/reorg, retention and complete
+recovery-UX audits from prior reports are not claimed complete by these ports.
+Core swap/controller classes already match the donor after namespace adaptation;
+broader audit tasks are not automatically missing standalone functionality. Host
+localization, notification tags, embedded lifecycle and presentation differences
+were intentionally left alone. Device verification/rollout remain outstanding.
+Existing graph cache and unrelated untracked files were preserved without staging.
+
+Signed candidate
+dist/atomix-0.1.82-candidate.apk
+Package com.eurobuddha.atomix; version 0.1.82/code182; 22596398 bytes.
+SHA256 1f3c958415a72933e21d573544bf3f7c90c9971f854ff5d7052ab079175e7848
+Family certificate SHA256:
+eca1383c9d27683a281fbe6355356267877dc2dd14d963d7cc289ca0700e517f
