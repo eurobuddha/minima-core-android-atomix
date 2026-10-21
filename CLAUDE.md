@@ -50,3 +50,20 @@ track the chain-tip block number. AtomiX **code needs no change** — it signs v
 The HTLC address itself embeds no keys and is identical under both modes:
 `MxG080CRJB1D4NHGRYGNF7Q52FK7023UM3FUUPVD1W1WCQZSA8MDQ25982N842G`
 (hex `0x0CDCD61692F186EB0BBCFA289F438043F586FF7B3F6864193358E29166E8454A`).
+
+## Ethereum RPC endpoint list — FOUR copies, keep them in lockstep (recorded 2026-10-21)
+
+The ETH leg uses a sticky primary (`https://ethereum-rpc.publicnode.com`, user-overridable via the
+`rpc_mainnet` pref) followed by a keyless fallback chain, tried in order on any transport/parse/rate-limit
+failure. The same nine endpoints, same order, live in FOUR places. Adding, removing or reordering one
+means editing all four in the same change:
+
+1. APK: `app/src/main/java/com/eurobuddha/atomix/eth/EthRpc.java` (`FALLBACKS`); default primary in `eth/EthNet.java`
+2. MDS: `mds/atomix-mds/lib/ethrpc.js` (`FALLBACKS`)
+3. MDS: `mds/atomix-mds/lib/ethhtlc.js` (`NET.rpcs`)
+4. Desktop: `desktop/minimacore-desktop/main/atomix.js` (`NET_HOSTS` outbound allowlist, hostnames only)
+
+The desktop vendors the MDS engine verbatim under `main/atomix/lib/`, so copies 2–3 flow to it on re-vendor —
+but copy 4 is an Electron-side allowlist that REFUSES any host not listed. Change the engine list without
+updating `NET_HOSTS` and the desktop silently drops the new endpoint while the APK and MDS use it.
+Order matters: general-purpose full nodes first, the historically rate-limited `1rpc.io` LAST.
