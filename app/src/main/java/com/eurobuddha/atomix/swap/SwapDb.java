@@ -109,6 +109,8 @@ public final class SwapDb {
     public static final class Event {
         public String event, token, amount, note;
         public long date;
+        /** The row's AUTOINCREMENT id: insertion order, independent of the wall clock (0 when unknown). */
+        public long id;
     }
 
     /** All logged events for a swap, newest first by insertion (AUTOINCREMENT id, not the wall clock, which can be
@@ -116,12 +118,12 @@ public final class SwapDb {
     public synchronized java.util.List<Event> getEvents(String hash) {
         java.util.List<Event> out = new ArrayList<>();
         try (Cursor c = helper.getReadableDatabase().rawQuery(
-                "SELECT event, token, amount, txnhash, eventdate FROM events WHERE hash=? ORDER BY id DESC",
+                "SELECT event, token, amount, txnhash, eventdate, id FROM events WHERE hash=? ORDER BY id DESC",
                 new String[]{norm(hash)})) {
             while (c.moveToNext()) {
                 Event e = new Event();
                 e.event = c.getString(0); e.token = c.getString(1); e.amount = c.getString(2);
-                e.note = c.getString(3); e.date = c.getLong(4);
+                e.note = c.getString(3); e.date = c.getLong(4); e.id = c.getLong(5);
                 out.add(e);
             }
         }
