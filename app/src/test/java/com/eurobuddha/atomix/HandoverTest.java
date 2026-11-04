@@ -211,7 +211,7 @@ public class HandoverTest {
 
     private static SwapDb.Swap minimaLeg(String status, String hash, long ageMs) {
         SwapDb.Swap s = swap("mxUSDT", status, hash);
-        s.myLegIsMinima = true; s.role = "RESPONDER"; s.direction = "ERC20_TO_MINIMA";
+        s.myLegIsMinima = true; s.role = "INITIATOR"; s.direction = "MINIMA_TO_ERC20";
         s.created = System.currentTimeMillis() - ageMs;
         return s;
     }
@@ -237,6 +237,7 @@ public class HandoverTest {
         when(db.getEvents(h)).thenReturn(Collections.singletonList(refundTried(TL + Handover.REFUND_MARGIN_BLOCKS)));
         when(db.getEvents(young)).thenReturn(Collections.singletonList(refundTried(TL + 500)));
         when(db.getEvents(early)).thenReturn(Collections.singletonList(refundTried(TL + Handover.REFUND_MARGIN_BLOCKS - 1)));
+        for (String x : new String[]{h, young, bare, early}) when(db.hasEvent(x, SwapDb.EV_LOCK_ABSENT)).thenReturn(true);
         long now = System.currentTimeMillis();
         List<String> r = Handover.inFlight(db, Collections.emptyList(), false, now);
         assertEquals(4, r.size());
@@ -271,16 +272,58 @@ public class HandoverTest {
         when(db.getEvents(h)).thenReturn(Collections.singletonList(refundTried(TL + 1000)));
         when(db.rememberedLockCoin(h)).thenReturn(new org.json.JSONObject().put("coinid", "0x" + "ab".repeat(32)));
         long now = System.currentTimeMillis();
-        assertFalse(Handover.stuck(s, db, now));
+        when(db.hasEvent(h, SwapDb.EV_LOCK_ABSENT)).thenReturn(true);
+        assertFalse("ABSENT is not evidence about a recorded coin", Handover.stuck(s, db, now));
         assertTrue(Handover.needRecovery(db, now).isEmpty());
         when(db.hasEvent(h, SwapDb.EV_LOCK_SPENT)).thenReturn(true);
         assertTrue(Handover.stuck(s, db, now));
     }
 
+    /** 0.1.92 MAJOR: no recorded lock coin is not evidence — only an EV_LOCK_ABSENT read is. */
+    @Test public void noRecordedCoinNeedsAnAbsentRead() {
+        String h = "0x" + "6b".repeat(32);
+        SwapDb.Swap s = minimaLeg(SwapDb.ST_STARTED, h, 7 * HOUR);
+        s.myTimelock = TL;
+        SwapDb db = db(s);
+        when(db.getEvents(h)).thenReturn(Collections.singletonList(refundTried(TL + 1000)));
+        long now = System.currentTimeMillis();
+        assertFalse("a refund pass with no record proves nothing", Handover.stuck(s, db, now));
+        when(db.hasEvent(h, SwapDb.EV_LOCK_SPENT)).thenReturn(true);
+        assertFalse("SPENT needs a recorded coin", Handover.stuck(s, db, now));
+        when(db.hasEvent(h, SwapDb.EV_LOCK_ABSENT)).thenReturn(true);
+        assertTrue(Handover.stuck(s, db, now));
+    }
+
+    /** 0.1.92: a responder waits a full TIMELOCK_BLOCKS past myTimelock, and never while an ETH collect is owed. */
+    @Test public void responderWaitsPastTheTakersEthLegAndForItsCollect() {
+        String h = "0x" + "6c".repeat(32);
+        SwapDb.Swap s = minimaLeg(SwapDb.ST_LOCKED, h, 7 * HOUR);
+        s.role = "RESPONDER"; s.direction = "ERC20_TO_MINIMA"; s.myTimelock = TL;
+        SwapDb db = db(s);
+        when(db.hasEvent(h, SwapDb.EV_LOCK_ABSENT)).thenReturn(true);
+        long now = System.currentTimeMillis();
+        when(db.getEvents(h)).thenReturn(Collections.singletonList(refundTried(TL + Handover.REFUND_MARGIN_BLOCKS)));
+        assertFalse("+72 is not enough for a responder", Handover.stuck(s, db, now));
+        when(db.getEvents(h)).thenReturn(Collections.singletonList(refundTried(TL + com.eurobuddha.atomix.swap.SwapEngine.TIMELOCK_BLOCKS)));
+        assertTrue(Handover.stuck(s, db, now));
+        when(db.getSecret(h)).thenReturn("0x" + "cd".repeat(32));
+        assertFalse("secret known, ETH not collected: the collect is owed", Handover.stuck(s, db, now));
+        when(db.haveCollect(h)).thenReturn(true);
+        assertTrue(Handover.stuck(s, db, now));
+    }
+
+    @Test public void tokenLabelReadsEveryDollarAliasAsMxUSD() {
+        assertEquals("MxUSD", Handover.tokenLabel("mxUSDT"));
+        assertEquals("MxUSD", Handover.tokenLabel("MxUSD"));
+        assertEquals("USDT", Handover.tokenLabel("USDT"));
+        assertEquals("MINIMA", Handover.tokenLabel("MINIMA"));
+        assertNull(Handover.tokenLabel(null));
+    }
+
     @Test public void recoveryRecordCarriesEveryIdentifierInFull() throws Exception {
         String h = "0x" + "99".repeat(32), coin = "0x" + "ab".repeat(32), secret = "0x" + "cd".repeat(32);
         SwapDb.Swap s = minimaLeg(SwapDb.ST_ERROR, h, 7 * HOUR);
-        s.myTimelock = 1_234_567; s.sellAmount = "10"; s.buyAmount = "9.9";
+        s.role = "RESPONDER"; s.myTimelock = 1_234_567; s.sellAmount = "10"; s.buyAmount = "9.9";
         SwapDb db = db(s);
         when(db.getSecret(h)).thenReturn(secret);
         String owner = "0x" + "0f".repeat(32), claimer = "0x" + "e1".repeat(32);

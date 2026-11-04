@@ -436,6 +436,19 @@ public final class MinimaHtlc {
         }, err);
     }
 
+    /** My own lock(s) for one hashlock with NO depth window: {@code relevant:true} walks the node's relevant set, which
+     *  carries a coin holding my key forward at any age, and the server-side {@code state:} filter (a substring match
+     *  on any state port; the hash is unique) keeps the reply to this swap's coin(s). The caller re-checks owner and
+     *  state[5]. A non-list reply is an error, never "none". */
+    public void findMyLockByHash(String hash, Consumer<org.json.JSONArray> ok, Consumer<String> err) {
+        if (!isHex(hash)) { err.accept("scan: non-hex hash"); return; }   // interpolated into the coins command
+        cmd("coins relevant:true simplestate:true address:" + HTLC_ADDRESS + " state:" + normKey(hash), r -> {
+            Object resp = r.opt("response");
+            if (!(resp instanceof org.json.JSONArray)) { err.accept("coins: no coin list"); return; }
+            ok.accept((org.json.JSONArray) resp);
+        }, err);
+    }
+
     /** Is there any UNCONFIRMED native mxUSDT in my wallet (a split/lock/payment still settling)? The chain's
      *  unconfirmed pool is global, so this is a cross-process check — it stops a second engine (after a
      *  foreground↔background handoff) from re-issuing a split whose coins from the first engine haven't landed yet. */

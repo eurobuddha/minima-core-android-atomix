@@ -146,37 +146,176 @@ public class HostGateTest {
         }).when(minima).lockCoinUnspent(eq(COIN), any(), any());
     }
 
-    @Test public void aRefundPassPastTheMarginIsRecordedAndASpentCoinToo() throws Exception {
+    /** The db mock keeps its events, newest first, like SwapDb.getEvents. */
+    private final java.util.List<SwapDb.Event> events = new java.util.ArrayList<>();
+    private int tip = 0;
+
+    private void liveEvents() {
+        doAnswer(i -> {
+            SwapDb.Event e = new SwapDb.Event();
+            e.event = i.getArgument(1); e.token = i.getArgument(2); e.amount = i.getArgument(3); e.note = i.getArgument(4);
+            events.add(0, e);
+            return null;
+        }).when(db).logEvent(eq(HASH), any(), any(), any(), any());
+        when(db.getEvents(HASH)).thenAnswer(i -> new java.util.ArrayList<>(events));
+        when(db.hasEvent(eq(HASH), any())).thenAnswer(i -> events.stream().anyMatch(e -> e.event.equals(i.getArgument(1))));
+        doAnswer(i -> {
+            MinimaHtlc.BlockCb cb = i.getArgument(0);
+            if (tip > 0) cb.ok(tip); else cb.err("no tip");
+            return null;
+        }).when(minima).currentBlock(any());
+    }
+
+    private void pass(int block) {
+        tip = block;
+        SwapEngine.clearRetryMarkersForTest();
+        engine.sweepExpiredMinima(block);
+    }
+
+    private long count(String ev) { return events.stream().filter(e -> e.event.equals(ev)).count(); }
+
+    @Test public void aSpentCoinIsRecordedOnlyOnTwoReadsSixBlocksApart() throws Exception {
         myMinimaLock(1000);
+        liveEvents();
         coinRead(false);
-        engine.sweepExpiredMinima(1000 + SwapEngine.REFUND_EVIDENCE_MARGIN_BLOCKS);
-        verify(db).logEvent(HASH, SwapDb.EV_REFUND_TRIED, "minima", "", "minima block " + (1000 + SwapEngine.REFUND_EVIDENCE_MARGIN_BLOCKS));
-        verify(db).logEvent(eq(HASH), eq(SwapDb.EV_LOCK_SPENT), eq("minima"), eq(""), contains(COIN));
+        int b = 1000 + SwapEngine.REFUND_EVIDENCE_MARGIN_BLOCKS;
+        pass(b);
+        verify(db).logEvent(HASH, SwapDb.EV_REFUND_TRIED, "minima", "", "minima block " + b);
+        assertEquals("one read is only pending", 0, count(SwapDb.EV_LOCK_SPENT));
+        assertEquals(1, count(SwapDb.EV_LOCK_GONE_SEEN));
+        pass(b + SwapEngine.LOCK_GONE_CONFIRM_BLOCKS - 1);
+        assertEquals("five blocks on is not enough", 0, count(SwapDb.EV_LOCK_SPENT));
+        pass(b + SwapEngine.LOCK_GONE_CONFIRM_BLOCKS);
+        assertEquals(1, count(SwapDb.EV_LOCK_SPENT));
+        assertEquals("REFUND_TRIED is written once", 1, count(SwapDb.EV_REFUND_TRIED));
+    }
+
+    @Test public void anUnspentReadBetweenVoidsThePendingReading() throws Exception {
+        myMinimaLock(1000);
+        liveEvents();
+        coinRead(false);
+        pass(1100);
+        coinRead(true);
+        pass(1103);
+        assertEquals(1, count(SwapDb.EV_LOCK_PRESENT));
+        coinRead(false);
+        pass(1110);
+        assertEquals("the pending reading restarted after the unspent one", 0, count(SwapDb.EV_LOCK_SPENT));
+        pass(1116);
+        assertEquals(1, count(SwapDb.EV_LOCK_SPENT));
+    }
+
+    @Test public void anEmptyReadWithoutALiveTipCountsForNothing() throws Exception {
+        myMinimaLock(1000);
+        liveEvents();
+        coinRead(false);
+        tip = 0;
+        SwapEngine.clearRetryMarkersForTest();
+        engine.sweepExpiredMinima(1100);
+        SwapEngine.clearRetryMarkersForTest();
+        engine.sweepExpiredMinima(1200);
+        assertEquals(0, count(SwapDb.EV_LOCK_GONE_SEEN));
+        assertEquals(0, count(SwapDb.EV_LOCK_SPENT));
     }
 
     @Test public void anUnspentOrUnreadableCoinRecordsNoSpend() throws Exception {
         myMinimaLock(1000);
+        liveEvents();
         coinRead(true);
-        engine.sweepExpiredMinima(2000);
-        SwapEngine.clearRetryMarkersForTest();
+        pass(2000);
         coinRead(null);
-        engine.sweepExpiredMinima(2001);
-        verify(db, never()).logEvent(eq(HASH), eq(SwapDb.EV_LOCK_SPENT), any(), any(), any());
-        verify(db, atLeastOnce()).logEvent(eq(HASH), eq(SwapDb.EV_REFUND_TRIED), any(), any(), any());
+        pass(2010);
+        pass(2020);
+        assertEquals(0, count(SwapDb.EV_LOCK_SPENT));
+        assertEquals(0, count(SwapDb.EV_LOCK_GONE_SEEN));
+        assertEquals(1, count(SwapDb.EV_REFUND_TRIED));
     }
 
     @Test public void tooEarlyAPassRecordsNothing() throws Exception {
         myMinimaLock(1000);
+        liveEvents();
         coinRead(false);
-        engine.sweepExpiredMinima(1000 + SwapEngine.REFUND_EVIDENCE_MARGIN_BLOCKS - 1);
+        pass(1000 + SwapEngine.REFUND_EVIDENCE_MARGIN_BLOCKS - 1);
         verify(db, never()).logEvent(eq(HASH), eq(SwapDb.EV_REFUND_TRIED), any(), any(), any());
         verify(minima, never()).lockCoinUnspent(any(), any(), any());
     }
 
-    @Test public void aCoinOfAnotherKeyIsNeverReadAsSpent() throws Exception {
+    @Test public void aCoinOfAKeyTheNodeDoesNotHoldIsNeverReadAsSpent() throws Exception {
         lockOf(1000, "0x" + "cc".repeat(32));
+        liveEvents();
         coinRead(false);
-        engine.sweepExpiredMinima(2000);
+        pass(2000);
         verify(minima, never()).lockCoinUnspent(any(), any(), any());
+    }
+
+    @Test public void noLockReadWhileHaltedOrWithNoNodeKeys() throws Exception {
+        myMinimaLock(1000);
+        liveEvents();
+        coinRead(false);
+        com.eurobuddha.atomix.IdentityWatch.noteMinimaOrphaned(MY_PK, null);
+        pass(2000);
+        com.eurobuddha.atomix.IdentityWatch.resetForTest();
+        engine.setMyPubkeys(Collections.emptySet());
+        pass(2010);
+        verify(minima, never()).lockCoinUnspent(any(), any(), any());
+        verify(minima, never()).findMyLockByHash(any(), any(), any());
+    }
+
+    @Test public void aResponderRecordsItsRefundPassOnlyAFullTimelockOn() throws Exception {
+        myMinimaLock(1000).role = "RESPONDER";
+        liveEvents();
+        coinRead(true);
+        pass(1000 + SwapEngine.REFUND_EVIDENCE_MARGIN_BLOCKS);
+        assertEquals(0, count(SwapDb.EV_REFUND_TRIED));
+        pass(1000 + SwapEngine.TIMELOCK_BLOCKS);
+        verify(db).logEvent(HASH, SwapDb.EV_REFUND_TRIED, "minima", "", "minima block " + (1000 + SwapEngine.TIMELOCK_BLOCKS));
+    }
+
+    // ---- no recorded coin: one depth-free read, never "no record = gone" ----
+
+    private SwapDb.Swap unrecordedLock(long timelock) {
+        SwapDb.Swap s = new SwapDb.Swap();
+        s.hash = HASH; s.status = SwapDb.ST_STARTED; s.myLegIsMinima = true; s.myTimelock = timelock; s.role = "INITIATOR";
+        when(db.allSwaps()).thenReturn(Collections.singletonList(s));
+        doAnswer(i -> { ((Consumer<JSONArray>) i.getArgument(3)).accept(new JSONArray()); return null; })
+                .when(minima).scanHtlcByHashDeep(eq(HASH), anyInt(), anyInt(), any(), any());
+        return s;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void relevantRead(JSONArray coins) {
+        doAnswer(i -> {
+            if (coins == null) ((Consumer<String>) i.getArgument(2)).accept("node busy");
+            else ((Consumer<JSONArray>) i.getArgument(1)).accept(coins);
+            return null;
+        }).when(minima).findMyLockByHash(eq(HASH), any(), any());
+    }
+
+    @Test public void noRecordedCoinIsAbsentOnlyOnTwoEmptyDepthFreeReads() {
+        unrecordedLock(1000);
+        liveEvents();
+        relevantRead(null);
+        pass(1100);
+        assertEquals("a failed read is not absence", 0, count(SwapDb.EV_LOCK_GONE_SEEN));
+        relevantRead(new JSONArray());
+        pass(1110);
+        assertEquals(0, count(SwapDb.EV_LOCK_ABSENT));
+        pass(1116);
+        assertEquals(1, count(SwapDb.EV_LOCK_ABSENT));
+        assertTrue(events.get(0).note, events.get(0).note.contains(MinimaHtlc.HTLC_ADDRESS));
+        verify(minima, never()).lockCoinUnspent(any(), any(), any());
+    }
+
+    @Test public void aDepthFreeReadThatFindsMyLockRecordsAndRefundsIt() throws Exception {
+        unrecordedLock(1000);
+        liveEvents();
+        JSONObject coin = new JSONObject().put("coinid", COIN).put("tokenid", "0x00").put("amount", "1").put("tokenamount", "1")
+                .put("state", new JSONObject().put("0", MY_PK).put("3", "1000").put("4", "0x" + "dd".repeat(32)).put("5", HASH));
+        relevantRead(new JSONArray().put(coin));
+        pass(1100);
+        verify(db).rememberLockCoin(eq(HASH), eq(COIN), any(), eq("0x00"), eq(MY_PK), any());
+        verify(minima).refund(any(), any());
+        assertEquals(0, count(SwapDb.EV_LOCK_GONE_SEEN));
+        assertEquals(0, count(SwapDb.EV_LOCK_ABSENT));
     }
 }
