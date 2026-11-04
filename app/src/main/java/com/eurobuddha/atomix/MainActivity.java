@@ -1634,19 +1634,20 @@ public class MainActivity extends AppCompatActivity {
             out.setText(usdt == null ? "" : (sellMinima ? "You receive ≈ " : "You pay ≈ ") + usdt + " " + symbol);
         }));
 
-        // RULE 1: the title's shortened key is a glance label — put the FULL counterparty key in the body,
-        // copyable, so the user can verify who they're about to lock funds with.
+        // RULE 1: the FULL counterparty key, in the body (never shortened in the title), tap or long-press
+        // copies it, so the user can verify who they're about to lock funds with.
         if (maker.signerPk != null && !maker.signerPk.isEmpty()) {
             TextView cpv = new TextView(this);
             cpv.setText("Counterparty\n" + maker.signerPk);
             cpv.setTextColor(Design.DIM()); cpv.setTextSize(11f); cpv.setTypeface(Design.mono()); cpv.setPadding(0, dp(8), 0, 0);
             cpv.setOnLongClickListener(v -> { copy(maker.signerPk, "Counterparty key copied"); return true; });
+            cpv.setOnClickListener(v -> copy(maker.signerPk, "Counterparty key copied"));
             box.addView(cpv);
         }
 
         modalOpen = true;
         final AlertDialog editor = dialog()
-                .setTitle((sellMinima ? "Sell " + ccy() : "Buy " + ccy()) + " · " + Util.shorten(maker.signerPk))
+                .setTitle(sellMinima ? "Sell " + ccy() : "Buy " + ccy())
                 .setView(box)
                 .setPositiveButton("Start swap", null)
                 .setNegativeButton("Cancel", null)
@@ -2544,9 +2545,9 @@ public class MainActivity extends AppCompatActivity {
         for (int i = 0; i < plan.legs.size(); i++) {
             SweepLeg leg = plan.legs.get(i);
             TextView r = new TextView(this);
-            r.setText("Part " + (i + 1) + " · " + leg.minima + " " + ccy() + " @ " + fmtPrice(leg.price) + " → " + leg.usdt + " USDT · " + shortAddr(leg.maker.signerPk));
+            r.setText("Part " + (i + 1) + " · " + leg.minima + " " + ccy() + " @ " + fmtPrice(leg.price) + " → " + leg.usdt + " USDT · " + leg.maker.signerPk);
             r.setTextColor(Design.TEXT()); r.setTextSize(12f); r.setTypeface(Design.mono()); r.setPadding(0, dp(2), 0, dp(2));
-            final String legPk = leg.maker.signerPk;   // RULE 1: long-press copies the full leg maker key
+            final String legPk = leg.maker.signerPk;   // RULE 1: shown in full; tap copies it
             if (legPk != null && !legPk.isEmpty()) r.setOnClickListener(v -> copy(legPk, "Counterparty key copied"));
             box.addView(r);
         }
@@ -3064,7 +3065,7 @@ public class MainActivity extends AppCompatActivity {
             }
         } catch (NumberFormatException | ArithmeticException ignored) { /* balance is not available yet */ }
 
-        String addrLine = ethAddr == null ? (ethErr == null ? "deriving from node seed…" : "—") : shortAddr(ethAddr);
+        String addrLine = ethAddr == null ? (ethErr == null ? "deriving from node seed…" : "—") : ethAddr;
         LinearLayout ethCard = walletCard("Ethereum · " + net.label, ethBal, addrLine, Design.TEXT());
         if (ethAddr != null) ethCard.setOnClickListener(v -> copy(ethAddr, "Ethereum address copied"));
         col.addView(ethCard);
@@ -3305,10 +3306,10 @@ public class MainActivity extends AppCompatActivity {
         TextView meta = new TextView(this);
         String when = android.text.format.DateUtils.getRelativeTimeSpanString(
                 s.created, System.currentTimeMillis(), android.text.format.DateUtils.MINUTE_IN_MILLIS).toString();
-        String cp = (s.counterparty == null || s.counterparty.isEmpty()) ? "" : "  ·  " + shortAddr(s.counterparty);
+        String cp = (s.counterparty == null || s.counterparty.isEmpty()) ? "" : "  ·  " + s.counterparty;
         meta.setText(when + "  ·  " + s.role.toLowerCase() + cp);
         meta.setTextColor(Design.DIM2()); meta.setTextSize(11.5f); meta.setTypeface(Design.sans()); meta.setPadding(0, dp(5), 0, 0);
-        // NI-1 (RULE 1): the counterparty is shown truncated — long-press copies the FULL value.
+        // RULE 1: the counterparty is shown in full; tap copies it.
         if (s.counterparty != null && !s.counterparty.isEmpty())
             meta.setOnClickListener(v -> copy(s.counterparty, "Counterparty copied"));
         c.addView(meta);
@@ -3708,10 +3709,10 @@ public class MainActivity extends AppCompatActivity {
                 : quoteHalf(fmtPrice(lvl.price), abbrev(cap), Design.RED(), best, false, best));
         boolean mine = isMine(maker);
         TextView tag = new TextView(this);
-        tag.setText(mine ? "you" : shortAddr(maker.signerPk));
-        tag.setTextColor(mine ? Design.ACCENT() : Design.DIM2()); tag.setTextSize(9.5f); tag.setTypeface(Design.sans());
+        tag.setText(mine ? "you" : maker.signerPk);
+        tag.setTextColor(mine ? Design.ACCENT() : Design.DIM2()); tag.setTextSize(9.5f); tag.setTypeface(mine ? Design.sans() : Design.mono());
         tag.setGravity(isBid ? Gravity.START : Gravity.END);
-        // NI-1 (RULE 1): the displayed key is truncated — long-press copies the FULL value to the clipboard.
+        // RULE 1: the maker key is shown in full (wraps); tap copies it.
         if (!mine && maker.signerPk != null && !maker.signerPk.isEmpty())
             tag.setOnClickListener(v -> copy(maker.signerPk, "Counterparty key copied"));
         half.addView(tag);
@@ -4102,11 +4103,6 @@ public class MainActivity extends AppCompatActivity {
         toast("Private key copied");
     }
 
-    private String shortAddr(String a) {
-        if (a == null || a.length() < 12) return a;
-        return a.substring(0, 8) + "…" + a.substring(a.length() - 6);
-    }
-
     private void copy(String text, String toast) {
         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         if (cm != null) { cm.setPrimaryClip(ClipData.newPlainText("AtomiX", text)); toast(toast); }   // label shows in the Android 13+ clipboard preview
@@ -4225,9 +4221,9 @@ public class MainActivity extends AppCompatActivity {
             if (o.buys()) { if (sides.length() > 0) sides.append("   ·   "); sides.append("buys up to ").append(trimSig(o.buySize)).append(" " + ccy()); }
             TextView t = new TextView(this);
             t.setText(sides.toString()); t.setTextColor(Design.TEXT()); t.setTextSize(14.5f); t.setTypeface(Design.sansBold()); box.addView(t);
-            TextView who = new TextView(this); who.setText("LP " + shortAddr(o.signerPk));
-            who.setTextColor(Design.DIM()); who.setTextSize(12f); who.setTypeface(Design.sans()); who.setPadding(0, dp(4), 0, dp(8)); box.addView(who);
-            // NI-1 (RULE 1): the LP key is shown truncated — long-press copies the FULL value.
+            TextView who = new TextView(this); who.setText("LP " + o.signerPk);
+            who.setTextColor(Design.DIM()); who.setTextSize(12f); who.setTypeface(Design.mono()); who.setPadding(0, dp(4), 0, dp(8)); box.addView(who);
+            // RULE 1: the LP key is shown in full; tap copies it.
             if (o.signerPk != null && !o.signerPk.isEmpty())
                 who.setOnClickListener(v -> copy(o.signerPk, "LP key copied"));
             LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
