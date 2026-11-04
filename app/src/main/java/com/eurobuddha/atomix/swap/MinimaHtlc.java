@@ -424,6 +424,18 @@ public final class MinimaHtlc {
         guardedCoinRead(token, "coins relevant:true tokenid:" + token + " simplestate:true", ok, err, oversized);
     }
 
+    /** Is my own recorded lock coin still unspent? {@code relevant:true}: the coin carries my key in state port 0, so
+     *  the node carries it forward at ANY age (TxPoWTreeNode.copyParentRelevantCoins); a bare {@code coins coinid:}
+     *  walks only the TxPoW tree and reads an old unspent lock as absent. One coin at most, so no row-count risk. */
+    public void lockCoinUnspent(String coinid, Consumer<Boolean> ok, Consumer<String> err) {
+        if (coinid == null || !coinid.matches("0x[0-9a-fA-F]{2,128}")) { err.accept("bad coin id"); return; }
+        cmd("coins relevant:true coinid:" + coinid, r -> {
+            Object resp = r.opt("response");
+            if (!(resp instanceof org.json.JSONArray)) { err.accept("coins: no coin list"); return; }
+            ok.accept(((org.json.JSONArray) resp).length() > 0);
+        }, err);
+    }
+
     /** Is there any UNCONFIRMED native mxUSDT in my wallet (a split/lock/payment still settling)? The chain's
      *  unconfirmed pool is global, so this is a cross-process check — it stops a second engine (after a
      *  foreground↔background handoff) from re-issuing a split whose coins from the first engine haven't landed yet. */

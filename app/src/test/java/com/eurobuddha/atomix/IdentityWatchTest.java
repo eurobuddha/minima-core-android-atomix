@@ -15,6 +15,7 @@ import com.eurobuddha.comms.NodeApi;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -39,6 +40,9 @@ public class IdentityWatchTest {
     private JSONArray nodeKeys;
     private String probeAddr;          // what the node's seed derives now
     private String probeErr;           // set instead to simulate a node that won't answer
+
+    /** The verdict is process-static; halted() now also refuses initiator starts, so never leak it. */
+    @After public void clearVerdict() { IdentityWatch.resetForTest(); }
 
     @Before public void setUp() {
         IdentityWatch.resetForTest();

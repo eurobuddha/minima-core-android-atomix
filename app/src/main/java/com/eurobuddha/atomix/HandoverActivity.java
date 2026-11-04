@@ -124,11 +124,13 @@ public class HandoverActivity extends Activity {
 
         if (!stuck.isEmpty() || !recNote.isEmpty()) {
             text("Swaps AtomiX cannot clear on its own", 16f, Design.TEXT(), true);
-            text("AtomiX's records cannot prove whether these Minima locks were never sent, were already claimed by"
-                    + " the counterparty, or are still on chain. Save each one's recovery record — the hash, secret,"
-                    + " contract id, lock coin id, timelock, market, role and amounts, all in full — then pick the saved"
-                    + " file again so AtomiX can check it. A verified record stops the swap blocking the handover.",
+            text("AtomiX has tried to refund these Minima locks well past their timelock, and each lock is gone or"
+                    + " was never seen (never sent, or already claimed by the counterparty). Save each one's recovery"
+                    + " record — the hash, secret, contract id, lock coin id, both keys, timelock, market, role and"
+                    + " amounts, all in full — then pick the saved file again so AtomiX can check it. A verified record"
+                    + " stops the swap blocking the handover.",
                     13f, Design.DIM(), false);
+            text(Handover.SECRET_WARNING, 13f, Design.TEXT(), true);
             if (!recNote.isEmpty()) {
                 TextView n = text(recNote, 12f, Design.DIM(), false);
                 n.setTypeface(Design.mono());
@@ -183,7 +185,12 @@ public class HandoverActivity extends Activity {
         super.onActivityResult(req, res, data);
         if ((req != REQ_SAVE && req != REQ_VERIFY) || recBytes == null || recHash == null) return;
         android.net.Uri uri = res == RESULT_OK && data != null ? data.getData() : null;
-        if (uri == null) { recNote = "Not saved — the swap still blocks the handover."; shown = null; render(); return; }
+        if (uri == null) {
+            if (req == REQ_SAVE) { recBytes = null; recHash = null; }   // nothing was written — there is nothing to verify
+            recNote = req == REQ_SAVE ? "Not saved — the swap still blocks the handover."
+                    : "Not verified — pick the saved file to verify it. The swap still blocks the handover.";
+            shown = null; render(); return;
+        }
         String sha = Handover.sha256(recBytes);
         if (req == REQ_SAVE) {
             try (java.io.OutputStream os = getContentResolver().openOutputStream(uri, "w")) {
@@ -191,7 +198,7 @@ public class HandoverActivity extends Activity {
                 os.write(recBytes);
                 recNote = "Saved " + recBytes.length + " bytes, SHA-256 " + sha + ". Now pick that file again to verify it.";
             } catch (Exception e) {
-                recBytes = null;
+                recBytes = null; recHash = null;
                 recNote = "Could not write the file (" + e.getMessage() + ") — the swap still blocks the handover.";
             }
         } else {

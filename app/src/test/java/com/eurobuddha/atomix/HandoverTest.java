@@ -79,7 +79,7 @@ public class HandoverTest {
         when(db.haveCollectExpired("z")).thenReturn(true);
         List<String> r = Handover.inFlight(db, Collections.emptyList(), false);
         assertEquals(2, r.size());
-        assertTrue(r.get(0).contains("USDT⇄MxUSD") && r.get(0).endsWith(h1));   // full hash, MxUSD naming
+        assertTrue(r.get(0).contains("USDT⇄MxUSD") && r.get(0).contains(h1 + " "));   // full hash, MxUSD naming
         assertTrue(r.get(1).contains("USDT⇄MINIMA") && r.get(1).contains(h2));
     }
 
@@ -104,7 +104,9 @@ public class HandoverTest {
     /** Finding 4 (not auto-cleared — no chain read can prove a lost lock absent): the screen says exactly why. */
     @Test public void unacknowledgedStartedRowSaysWhyItBlocks() {
         String h = "0x" + "44".repeat(32);
-        SwapDb db = db(swap("MINIMA", SwapDb.ST_STARTED, h));
+        SwapDb.Swap s = swap("MINIMA", SwapDb.ST_STARTED, h);
+        s.myLegIsMinima = true;
+        SwapDb db = db(s);
         String r = Handover.inFlight(db, Collections.emptyList(), false).get(0);
         assertTrue(r, r.contains(h) && r.contains("never confirmed as sent"));
         when(db.hasEvent(h, SwapDb.EV_STARTED)).thenReturn(true);
@@ -214,28 +216,65 @@ public class HandoverTest {
         return s;
     }
 
-    /** 1(b): no record the engine keeps can prove a Minima lock was claimed or never sent, so the row blocks — until
-     *  the user has saved and re-read its recovery record. Only old rows qualify, and only STARTED / ERROR ones. */
-    @Test public void stuckMinimaRowStopsBlockingOnlyOnceItsRecoveryRecordIsSaved() {
-        String h = "0x" + "66".repeat(32), young = "0x" + "77".repeat(32), live = "0x" + "88".repeat(32);
+    private static final long TL = 1_000_000;
+
+    private static SwapDb.Event refundTried(long block) {
+        SwapDb.Event e = new SwapDb.Event();
+        e.event = SwapDb.EV_REFUND_TRIED; e.note = "minima block " + block;
+        return e;
+    }
+
+    /** 0.1.91 MAJOR: the recovery-record escape needs chain evidence, not device-clock age: a refund pass recorded
+     *  with the chain past myTimelock + margin, and — when the lock coin was recorded — that coin read as spent. */
+    @Test public void stuckNeedsARecordedRefundPassPastTheTimelockNotJustAge() {
+        String h = "0x" + "66".repeat(32), young = "0x" + "77".repeat(32), bare = "0x" + "88".repeat(32), early = "0x" + "89".repeat(32);
         SwapDb.Swap err = minimaLeg(SwapDb.ST_ERROR, h, 7 * HOUR);
-        SwapDb db = db(err, minimaLeg(SwapDb.ST_ERROR, young, HOUR), minimaLeg(SwapDb.ST_LOCKED, live, 7 * HOUR));
+        SwapDb.Swap yng = minimaLeg(SwapDb.ST_ERROR, young, HOUR);
+        SwapDb.Swap noEvidence = minimaLeg(SwapDb.ST_LOCKED, bare, 7 * 24 * HOUR);   // a week old, never refund-tried
+        SwapDb.Swap tooEarly = minimaLeg(SwapDb.ST_STARTED, early, 7 * HOUR);
+        for (SwapDb.Swap x : new SwapDb.Swap[]{err, yng, noEvidence, tooEarly}) x.myTimelock = TL;
+        SwapDb db = db(err, yng, noEvidence, tooEarly);
+        when(db.getEvents(h)).thenReturn(Collections.singletonList(refundTried(TL + Handover.REFUND_MARGIN_BLOCKS)));
+        when(db.getEvents(young)).thenReturn(Collections.singletonList(refundTried(TL + 500)));
+        when(db.getEvents(early)).thenReturn(Collections.singletonList(refundTried(TL + Handover.REFUND_MARGIN_BLOCKS - 1)));
         long now = System.currentTimeMillis();
         List<String> r = Handover.inFlight(db, Collections.emptyList(), false, now);
-        assertEquals(3, r.size());
+        assertEquals(4, r.size());
         assertTrue(r.get(0), r.get(0).contains(h) && r.get(0).contains("recovery record"));
         assertEquals(1, Handover.needRecovery(db, now).size());
         assertEquals(h, Handover.needRecovery(db, now).get(0).hash);
+        assertFalse("device-clock age alone never qualifies", Handover.stuck(noEvidence, db, now));
+        assertFalse("the refund pass saw the chain too early", Handover.stuck(tooEarly, db, now));
+        assertFalse("too young, evidence or not", Handover.stuck(yng, db, now));
 
-        for (String x : new String[]{h, young, live}) when(db.hasEvent(x, SwapDb.EV_RECOVERY_SAVED)).thenReturn(true);
+        for (String x : new String[]{h, young, bare, early}) when(db.hasEvent(x, SwapDb.EV_RECOVERY_SAVED)).thenReturn(true);
         r = Handover.inFlight(db, Collections.emptyList(), false, now);
-        assertEquals("young and live rows still block, saved record or not", 2, r.size());
+        assertEquals("rows without the evidence still block, saved record or not", 3, r.size());
         assertFalse(r.toString().contains(h));
         assertTrue(Handover.needRecovery(db, now).isEmpty());
 
-        SwapDb.Swap started = minimaLeg(SwapDb.ST_STARTED, h, 7 * HOUR);   // Minima-first lock that never confirmed
-        started.role = "INITIATOR"; started.direction = "MINIMA_TO_ERC20";
-        assertTrue(Handover.stuck(started, now));
+        for (String st : new String[]{SwapDb.ST_STARTED, SwapDb.ST_LOCKED, SwapDb.ST_CLAIMING}) {
+            err.status = st;
+            assertTrue(st, Handover.stuck(err, db, now));
+        }
+        err.myLegIsMinima = false;
+        assertFalse("an Ethereum leg has its own evidence (EV_NEVER_LOCKED)", Handover.stuck(err, db, now));
+    }
+
+    /** An unspent recorded lock is still refundable: it keeps blocking (and the engine keeps refunding it) until a
+     *  read of the coin finds it spent. */
+    @Test public void aRecordedLockCoinMustReadSpent() throws Exception {
+        String h = "0x" + "6a".repeat(32);
+        SwapDb.Swap s = minimaLeg(SwapDb.ST_ERROR, h, 7 * HOUR);
+        s.myTimelock = TL;
+        SwapDb db = db(s);
+        when(db.getEvents(h)).thenReturn(Collections.singletonList(refundTried(TL + 1000)));
+        when(db.rememberedLockCoin(h)).thenReturn(new org.json.JSONObject().put("coinid", "0x" + "ab".repeat(32)));
+        long now = System.currentTimeMillis();
+        assertFalse(Handover.stuck(s, db, now));
+        assertTrue(Handover.needRecovery(db, now).isEmpty());
+        when(db.hasEvent(h, SwapDb.EV_LOCK_SPENT)).thenReturn(true);
+        assertTrue(Handover.stuck(s, db, now));
     }
 
     @Test public void recoveryRecordCarriesEveryIdentifierInFull() throws Exception {
@@ -244,7 +283,11 @@ public class HandoverTest {
         s.myTimelock = 1_234_567; s.sellAmount = "10"; s.buyAmount = "9.9";
         SwapDb db = db(s);
         when(db.getSecret(h)).thenReturn(secret);
-        when(db.rememberedLockCoin(h)).thenReturn(new org.json.JSONObject().put("coinid", coin).put("amount", "10").put("tokenid", "0x00"));
+        String owner = "0x" + "0f".repeat(32), claimer = "0x" + "e1".repeat(32);
+        when(db.rememberedLockCoin(h)).thenReturn(new org.json.JSONObject().put("coinid", coin).put("amount", "10").put("tokenid", "0x00")
+                .put("state", new org.json.JSONArray()
+                        .put(new org.json.JSONObject().put("port", 0).put("data", owner))
+                        .put(new org.json.JSONObject().put("port", 4).put("data", claimer))));
         String rec = Handover.recoveryRecord(s, db);
         org.json.JSONObject j = new org.json.JSONObject(rec);
         assertEquals(h, j.getString("hash"));
@@ -256,6 +299,11 @@ public class HandoverTest {
         assertEquals("RESPONDER", j.getString("role"));
         assertEquals("10", j.getString("sellAmount"));
         assertEquals("9.9", j.getString("buyAmount"));
+        assertEquals("legacy-labelled rows read MxUSD", "MxUSD", j.getString("sellToken"));
+        assertFalse(rec, rec.contains("mxUSDT"));
+        assertEquals(owner, j.getString("lockOwnerKey"));
+        assertEquals(claimer, j.getString("counterpartyKey"));
+        assertEquals(Handover.SECRET_WARNING, j.getString("warning"));
         assertFalse(rec, rec.contains("…"));
 
         byte[] b = rec.getBytes(java.nio.charset.StandardCharsets.UTF_8);

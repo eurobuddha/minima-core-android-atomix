@@ -17,6 +17,7 @@ import com.eurobuddha.atomix.eth.EthNet;
 import com.eurobuddha.atomix.eth.EthRpc;
 import com.eurobuddha.atomix.eth.EthWallet;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -35,6 +36,9 @@ public class IdentityGuardTest {
 
     private SwapEngine engine;
     private SwapEngine.Notifier notifier;
+
+    /** The verdict is process-static; halted() now also refuses initiator starts, so never leak it. */
+    @After public void clearVerdict() { com.eurobuddha.atomix.IdentityWatch.resetForTest(); }
 
     @Before public void setUp() throws Exception {
         SwapEngine.clearRetryMarkersForTest();
