@@ -72,10 +72,17 @@ public class HandoverActivity extends Activity {
         finish();
     }
 
+    private List<String> swapBlockers() {
+        return Handover.inFlight(db, otcDb.allDeals(), com.eurobuddha.atomix.swap.SwapEngine.initiatorStarting());
+    }
+
     private void render() {
-        List<String> swaps = Handover.inFlight(db.allSwaps(), otcDb.allDeals());
+        // "Take back" (main screen) while we wait un-quiesces AtomiX and clears the pending-post flags — the armed
+        // withdrawal is void, so the user must press it again rather than this screen answering OK unposted.
+        if (armed && !Handover.active()) armed = false;
+        List<String> swaps = swapBlockers();
         List<String> market = Handover.marketLive(prefs);
-        if (armed && swaps.isEmpty() && market.isEmpty()) { complete(); return; }
+        if (armed && swaps.isEmpty() && market.isEmpty() && complete()) return;
         // Keep the CANCELED reason current so a back press tells Dexicon exactly what is still blocking.
         String reason = !swaps.isEmpty() ? swaps.get(0) : !market.isEmpty() ? market.get(0) : "not confirmed by the user";
         setResult(RESULT_CANCELED, new Intent().putExtra("reason", reason));
@@ -123,16 +130,22 @@ public class HandoverActivity extends Activity {
         render();
     }
 
-    private void complete() {
-        ui.removeCallbacks(tick);
+    /** Answer OK — only if, under Handover.LOCK, AtomiX is still quiesced and every check still passes, so no
+     *  initiator secret can be written between this re-check and the OK (see SwapEngine.prepareUnlessHandedOver). */
+    private boolean complete() {
         long ts = System.currentTimeMillis();
-        Handover.setDone(prefs, ts);
+        synchronized (Handover.LOCK) {
+            if (!Handover.active() || !swapBlockers().isEmpty() || !Handover.marketLive(prefs).isEmpty()) return false;
+            Handover.setDone(prefs, ts);
+        }
+        ui.removeCallbacks(tick);
         setResult(RESULT_OK, new Intent()
                 .putExtra("handover", true)
                 .putExtra("app", "com.eurobuddha.atomix")
                 .putExtra("version", BuildConfig.VERSION_CODE)
                 .putExtra("ts", ts));
         finish();
+        return true;
     }
 
     private void check(boolean ok, String label, List<String> reasons) {

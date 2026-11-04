@@ -8,7 +8,6 @@ import com.eurobuddha.atomix.swap.Order;
 import com.eurobuddha.atomix.swap.PriceOracle;
 import com.eurobuddha.atomix.swap.PublishGate;
 import com.eurobuddha.atomix.swap.SwapDb;
-import com.eurobuddha.atomix.swap.SwapVisibility;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -33,6 +32,10 @@ public final class Handover {
     public static final String P_OTC_PENDING = "handover_otc_pending";   // OTC withdrawal not yet on the wire
 
     private static volatile boolean active;
+
+    /** Serialises "is AtomiX handed over?" + "write a new initiator secret" (SwapEngine) against "re-check and mark
+     *  done" (HandoverActivity), so a secret can never be written after the OK that lets Dexicon uninstall us. */
+    public static final Object LOCK = new Object();
 
     private Handover() {}
 
@@ -81,13 +84,14 @@ public final class Handover {
         return c == TradingContext.MINIMA ? "USDT⇄MINIMA" : c == TradingContext.MXUSDT ? "USDT⇄MxUSD" : "unattributed market";
     }
 
-    /** Check 1: every swap or OTC deal that is not finished, in EITHER currency. Same terminal rules the app already
-     *  uses (SwapVisibility.isTerminal for swaps, OtcController.isTerminal for deals); deliberately no time window
-     *  and no "dismissed" exemption — a hidden or long-expired leg can still hold a refund. Identifiers in full. */
-    public static List<String> inFlight(List<SwapDb.Swap> swaps, List<OtcDb.Deal> deals) {
+    /** Check 1: every swap or OTC deal that is not finished, in EITHER currency, plus an initiator start the engine
+     *  has not yet written ({@code starting}, from SwapEngine.initiatorStarting). Deliberately no time window and no
+     *  "dismissed" exemption — a hidden or long-expired leg can still hold a refund. Identifiers in full. */
+    public static List<String> inFlight(SwapDb db, List<OtcDb.Deal> deals, boolean starting) {
         List<String> out = new ArrayList<>();
-        for (SwapDb.Swap s : swaps) {
-            if (SwapVisibility.isTerminal(s)) continue;
+        if (starting) out.add("A swap is starting — wait for it to be recorded");
+        for (SwapDb.Swap s : db.allSwaps()) {
+            if (finished(s, db)) continue;
             out.add("Swap in flight (" + market(TradingContext.forSwap(s.sellToken, s.buyToken)) + ", " + s.status
                     + "): " + s.hash);
         }
@@ -97,6 +101,18 @@ public final class Handover {
                     + " — reject it or let it expire");
         }
         return out;
+    }
+
+    /** Nothing of mine left to claim or refund. NOT SwapVisibility.isTerminal (a display rule): ERROR describes the
+     *  trade outcome, not my funds — finalizeEthLost writes it when the counterparty refunded the ETH leg I was to
+     *  receive, and leaves my own first leg to refund at its own timelock via the recorded lock coin
+     *  (sweepExpiredMinima keeps ERROR rows for exactly that). So an ERROR row is finished only once a refund of my
+     *  leg is CONFIRMED on chain (EV_EXPIRED, written by confirmPendingMinima / confirmEthRefunded from chain
+     *  evidence only). An ETH-first-leg ERROR row needs the same proof: the engine never writes one, and its ETH
+     *  loops skip ERROR rows, so nothing else could ever evidence that leg — it fails closed. */
+    static boolean finished(SwapDb.Swap s, SwapDb db) {
+        if (SwapDb.ST_COMPLETE.equals(s.status) || SwapDb.ST_REFUNDED.equals(s.status)) return true;
+        return SwapDb.ST_ERROR.equals(s.status) && s.hash != null && db.haveCollectExpired(s.hash);
     }
 
     /** Check 2: the maker market and OTC offer are withdrawn, and the withdrawals reached the wire. */
