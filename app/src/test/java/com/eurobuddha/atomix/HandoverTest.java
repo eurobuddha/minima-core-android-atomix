@@ -91,13 +91,23 @@ public class HandoverTest {
         SwapDb db = db(s);
         List<String> r = Handover.inFlight(db, Collections.emptyList(), false);
         assertEquals(1, r.size());
-        assertTrue(r.get(0).endsWith(h));
+        assertTrue(r.get(0).contains(h) && r.get(0).contains("not been confirmed refunded"));
         when(db.haveCollectExpired(h)).thenReturn(true);   // EV_EXPIRED: the refund confirmed on chain
         assertTrue(Handover.inFlight(db, Collections.emptyList(), false).isEmpty());
         s.myLegIsMinima = false;                            // an ETH first leg needs the same chain evidence
         assertTrue(Handover.inFlight(db, Collections.emptyList(), false).isEmpty());
         when(db.haveCollectExpired(h)).thenReturn(false);
         assertEquals(1, Handover.inFlight(db, Collections.emptyList(), false).size());
+    }
+
+    /** Finding 4 (not auto-cleared — no chain read can prove a lost lock absent): the screen says exactly why. */
+    @Test public void unacknowledgedStartedRowSaysWhyItBlocks() {
+        String h = "0x" + "44".repeat(32);
+        SwapDb db = db(swap("MINIMA", SwapDb.ST_STARTED, h));
+        String r = Handover.inFlight(db, Collections.emptyList(), false).get(0);
+        assertTrue(r, r.contains(h) && r.contains("never confirmed as sent"));
+        when(db.hasEvent(h, SwapDb.EV_STARTED)).thenReturn(true);
+        assertTrue(Handover.inFlight(db, Collections.emptyList(), false).get(0).endsWith(h));
     }
 
     @Test public void anInitiatorStartInProgressBlocks() {

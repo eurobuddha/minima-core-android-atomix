@@ -3,6 +3,7 @@ package com.eurobuddha.atomix;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -43,7 +44,13 @@ public class HandoverActivity extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         // Only Dexicon may ask. getCallingPackage() is set only for startActivityForResult, which the protocol uses.
-        if (!Handover.DEXICON.equals(getCallingPackage())) { refuse("caller is not " + Handover.DEXICON); return; }
+        String caller = getCallingPackage();
+        if (!Handover.DEXICON.equals(caller)) { refuse("caller is not " + Handover.DEXICON); return; }
+        // ...and only the real Dexicon: both apps are signed with the Minima family release key (debug builds: the
+        // same machine's debug key), so a look-alike package with another key is refused.
+        if (getPackageManager().checkSignatures(caller, getPackageName()) != PackageManager.SIGNATURE_MATCH) {
+            refuse(caller + " is not signed with AtomiX's key"); return;
+        }
         prefs = getSharedPreferences("atomix", MODE_PRIVATE);
         TradingContext.load(prefs);
         Design.load(this);
@@ -62,6 +69,11 @@ public class HandoverActivity extends Activity {
             return insets;
         });
         setResult(RESULT_CANCELED, new Intent().putExtra("reason", "cancelled"));   // back = refusal
+        // Dexicon does not store the OK: it asks again before every uninstall. Already handed over and every check
+        // (all synchronous: DB, prefs, the engine's static busy flag) still passing → answer OK at once, no tap.
+        // Otherwise the screen shows as usual, armed, so it finishes on its own once the checks pass.
+        armed = Handover.done(prefs);
+        if (armed) complete();
     }
 
     @Override protected void onResume() { super.onResume(); if (col != null) ui.post(tick); }

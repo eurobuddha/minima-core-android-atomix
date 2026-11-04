@@ -93,7 +93,7 @@ public final class Handover {
         for (SwapDb.Swap s : db.allSwaps()) {
             if (finished(s, db)) continue;
             out.add("Swap in flight (" + market(TradingContext.forSwap(s.sellToken, s.buyToken)) + ", " + s.status
-                    + "): " + s.hash);
+                    + "): " + s.hash + why(s, db));
         }
         for (OtcDb.Deal d : deals) {
             if (OtcController.isTerminal(d.status)) continue;
@@ -101,6 +101,17 @@ public final class Handover {
                     + " — reject it or let it expire");
         }
         return out;
+    }
+
+    /** Why a row that may look dead still blocks. A STARTED row whose lock was never acknowledged may be a lock
+     *  that never landed — or one that mined while its answer was lost. Neither chain read can rule the second out
+     *  (the Minima lookup is depth-bounded; an empty ETH read can be RPC lag), so the row keeps its secret. */
+    static String why(SwapDb.Swap s, SwapDb db) {
+        if (SwapDb.ST_ERROR.equals(s.status)) return " — the trade failed, but my own lock has not been confirmed refunded yet";
+        if (!SwapDb.ST_STARTED.equals(s.status) || db.hasEvent(s.hash, SwapDb.EV_STARTED)) return "";
+        return " — its lock was never confirmed as sent. AtomiX cannot prove from the chain that it did not land, so"
+                + " this record and its secret stay, and it blocks the handover. If the lock truly never landed, it will"
+                + " not clear on its own";
     }
 
     /** Nothing of mine left to claim or refund. NOT SwapVisibility.isTerminal (a display rule): ERROR describes the

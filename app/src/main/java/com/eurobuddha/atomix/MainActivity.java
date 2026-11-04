@@ -931,9 +931,9 @@ public class MainActivity extends AppCompatActivity {
     /** Record a buyer's hashlock (engine discovers their USDT lock via getContract) + persist for resume. */
     private boolean addIncoming(String hash) { return addIncoming(hash, null); }
     private boolean addIncoming(String hash, String from) {
-        java.util.Set<String> set = incomingHashlocks();
-        boolean isNew = set.add(hash);
-        if (isNew) prefs.edit().putString("incoming_hashlocks", android.text.TextUtils.join(",", set)).apply();
+        boolean isNew = !incomingHashlocks().contains(hash);
+        if (isNew) prefs.edit().putString(SwapTake.P_PENDING,
+                SwapTake.edit(prefs.getString(SwapTake.P_PENDING, ""), TradingContext.active(), hash, null)).apply();
         if (engine != null) engine.addIncomingHashlock(hash, from);
         if (isNew) {   // make the handshake visible — the buyer wants to know it landed
             // Act NOW — don't wait for the next ~90s poll. Stand down only mid-SELL-sweep (same as watchTick),
@@ -945,24 +945,22 @@ public class MainActivity extends AppCompatActivity {
         return isNew;
     }
 
+    /** Pending buy requests of the ACTIVE market only — never re-arm another market's request against this ladder. */
     private java.util.Set<String> incomingHashlocks() {
-        java.util.Set<String> set = new java.util.HashSet<>();
-        for (String h : prefs.getString("incoming_hashlocks", "").split(",")) if (!h.isEmpty()) set.add(h);
-        return set;
+        return SwapTake.pending(prefs.getString(SwapTake.P_PENDING, ""), TradingContext.active());
     }
 
     /** Re-arm the engine with persisted handshakes after a restart, pruning ones that have fully resolved. */
     private void loadIncoming() {
         if (engine == null || db == null) return;
-        java.util.Set<String> set = incomingHashlocks();
-        boolean changed = false;
-        for (java.util.Iterator<String> it = set.iterator(); it.hasNext(); ) {
-            String h = it.next();
+        java.util.List<String> done = new java.util.ArrayList<>();
+        for (String h : incomingHashlocks()) {
             SwapDb.Swap s = db.getSwap(h);
-            if (s != null && isTerminal(s)) { it.remove(); changed = true; }   // handshake done — stop persisting it
+            if (s != null && isTerminal(s)) done.add(h);   // handshake done — stop persisting it
             else engine.addIncomingHashlock(h);
         }
-        if (changed) prefs.edit().putString("incoming_hashlocks", android.text.TextUtils.join(",", set)).apply();
+        if (!done.isEmpty()) prefs.edit().putString(SwapTake.P_PENDING,
+                SwapTake.edit(prefs.getString(SwapTake.P_PENDING, ""), TradingContext.active(), null, done)).apply();
     }
 
     /** Build the base order (pairs + my identities + USDT avail); returns null if no pair is enabled. */

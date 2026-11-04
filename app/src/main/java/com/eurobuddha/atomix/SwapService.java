@@ -370,9 +370,9 @@ public class SwapService extends Service {
             if (hash.isEmpty() || !identity.publicId().equals(to)) return false;
             if (opened.fromPublicId == null || !opened.fromPublicId.equals(from)) return false;
             if (j.has("notice")) return engine.onMakerNotice(hash, from, j.optString("notice"), j.optString("reason"));
-            java.util.Set<String> set = incomingHashlocks();
-            boolean isNew = set.add(hash);
-            if (isNew) prefs.edit().putString("incoming_hashlocks", android.text.TextUtils.join(",", set)).apply();
+            boolean isNew = !incomingHashlocks().contains(hash);
+            if (isNew) prefs.edit().putString(SwapTake.P_PENDING,
+                    SwapTake.edit(prefs.getString(SwapTake.P_PENDING, ""), TradingContext.active(), hash, null)).apply();
             engine.addIncomingHashlock(hash, from);
             if (isNew && !MainActivity.SWEEP_ACTIVE) engine.checkBuyNow(hash);   // act now — don't wait for the next 90s poll
             if (isNew) alert("Buy request received", "A buyer wants your " + TradingContext.active().coinLabel + " — finding their USDT lock, then locking.");
@@ -380,10 +380,9 @@ public class SwapService extends Service {
         } catch (Exception e) { return false; }
     }
 
+    /** Pending buy requests of the ACTIVE market only — never re-arm another market's request against this ladder. */
     private java.util.Set<String> incomingHashlocks() {
-        java.util.Set<String> set = new java.util.HashSet<>();
-        for (String hh : prefs.getString("incoming_hashlocks", "").split(",")) if (!hh.isEmpty()) set.add(hh);
-        return set;
+        return SwapTake.pending(prefs.getString(SwapTake.P_PENDING, ""), TradingContext.active());
     }
 
     /** Keep a published order live + its size current while the app is closed (~30 min, fresh sendable) —
