@@ -99,7 +99,7 @@ public final class OtcController {
                 && java.util.Objects.equals(d.amount, m.amount) && java.util.Objects.equals(d.price, m.price);
     }
 
-    private static boolean isTerminal(String st) {
+    public static boolean isTerminal(String st) {
         return OtcDb.ST_REJECTED.equals(st) || OtcDb.ST_EXPIRED.equals(st) || OtcDb.ST_COMPLETE.equals(st);
     }
 

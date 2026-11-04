@@ -276,6 +276,7 @@ public class MainActivity extends AppCompatActivity {
         ls = Sodium.get();
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         TradingContext.load(prefs);   // the selected currency — BEFORE Design.load so the theme opens in the right identity
+        Handover.load(prefs);
         Design.load(this);   // persisted theme + bundled Inter/JetBrains Mono, before any view is built
         PriceOracle.init(prefs);   // restore the persisted last-good stamp — the withdraw clock survives restarts
         net = EthNet.MAINNET;
@@ -992,6 +993,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void publishOrderNow() {
+        if (Handover.active()) { toast("Handed over to Dexicon — Take back first"); return; }
         final Order o = baseOrder();
         if (o == null) { toast("Enable at least one pair in your order first"); return; }
         // Pegged ladders are regenerated around the oracle mid at EVERY publish. Only when there's NO usable
@@ -1036,6 +1038,7 @@ public class MainActivity extends AppCompatActivity {
      *  the next 90s tick instead of silently suppressing the keep-alive for 30 min. */
     private void maybeAutoRepublish() {
         if (IdentityWatch.halted()) { SwapLog.skip("fgpub", "HALTED: app keys do not match the node"); return; }
+        if (Handover.active()) return;   // handed over to Dexicon — no market from this app
         if (identity == null || myMinimaPk == null || !wallet.ready()) { SwapLog.skip("fgpub", "waiting: identity/wallet not ready"); return; }
         if (!prefs.getBoolean("auto_publish", false)) return;
         long okStamp = prefs.getLong("last_publish_ok", 0);
@@ -1136,6 +1139,7 @@ public class MainActivity extends AppCompatActivity {
         o.ethAddress = wallet.address();
         o.usdtAvail = parseD(Util.tidyAmount(tokenBals.get("USDT")), 0);
         final boolean live = o.hasLiquidity();
+        if (live && Handover.active()) { orderStatus = "Saved. Handed over to Dexicon — not published."; render(); return; }
         final int peg = live ? PriceOracle.applyPeg(o, prefs) : PriceOracle.PEG_OFF;
         if (peg == PriceOracle.PEG_STALE) {
             orderStatus = "Saved. " + PriceOracle.source() + " price unavailable — publishes when a price arrives.";
@@ -1933,6 +1937,7 @@ public class MainActivity extends AppCompatActivity {
             scroller.addView(col);
             return;
         }
+        if (Handover.active()) addHandoverBanner(col);
         switch (currentTab) {
             case TAB_WALLET:   renderWalletTab(col); break;
             case TAB_ACTIVITY: renderActivityTab(col); break;
@@ -1945,6 +1950,29 @@ public class MainActivity extends AppCompatActivity {
         scroller.addView(col);
         if (animateTab) { col.setAlpha(0f); col.animate().alpha(1f).setDuration(120).start(); animateTab = false; }
         if (currentTab == TAB_WALLET) firePendingPulses();
+    }
+
+    /** Handed over (or handing over) to Dexicon: no new swaps or market here; settlement keeps running. */
+    private void addHandoverBanner(LinearLayout col) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(Design.card(this, 18));
+        card.setPadding(dp(16), dp(14), dp(16), dp(14));
+        TextView t = new TextView(this);
+        t.setText(Handover.done(prefs)
+                ? "Handed over to Dexicon. Uninstall AtomiX from Dexicon's screen."
+                : "Handing over to Dexicon — your market is withdrawn and new swaps are stopped. Swaps in flight keep settling.");
+        t.setTextColor(Design.TEXT()); t.setTextSize(14f); t.setTypeface(Design.sansBold());
+        card.addView(t);
+        TextView back = Design.pill(this, "Take back", Design.SURFACE2(), Design.TEXT());
+        Design.pressable(back);
+        back.setOnClickListener(v -> { Handover.takeBack(prefs); toast("AtomiX can trade again — re-publish your market if you want it live"); render(); });
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        blp.topMargin = dp(10);
+        card.addView(back, blp);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        clp.topMargin = dp(14);
+        col.addView(card, clp);
     }
 
     /** The halt screen. Reached when this app's Minima key or ETH wallet provably does not belong to the node
@@ -4165,6 +4193,7 @@ public class MainActivity extends AppCompatActivity {
         pubBtn.setOnClickListener(v -> {
             double sell = otcNumber(sellE.length() == 0 ? "0" : sellE.getText().toString(), Double.NaN), buy = otcNumber(buyE.length() == 0 ? "0" : buyE.getText().toString(), Double.NaN);
             if (!Double.isFinite(sell) || !Double.isFinite(buy) || sell < 0 || buy < 0 || (sell <= 0 && buy <= 0)) { toast("Enter a sell and/or buy size"); return; }
+            if (Handover.active()) { toast("Handed over to Dexicon — Take back first"); return; }
             PublishGate.bumpGen(); // new OTC terms invalidate queued publications
             finishOtcEditing(box);
             prefs.edit().putString("otc_sell_size", sell > 0 ? trim(sell) : "").putString("otc_buy_size", buy > 0 ? trim(buy) : "")
@@ -4354,6 +4383,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void publishOtcOffer(double sellSize, double buySize) {
         if (!Double.isFinite(sellSize) || !Double.isFinite(buySize) || sellSize < 0 || buySize < 0) { toast("Enter a sell and/or buy size"); return; }
+        if (Handover.active()) { toast("Handed over to Dexicon — Take back first"); return; }
         if (IdentityWatch.halted()) { toast("Halted: app keys don't match your node"); return; }
         if (identity == null || myMinimaPk == null || !wallet.ready()) { toast("Still connecting…"); return; }
         if (!PublishGate.tryAcquire(PublishGate.OTC)) {
@@ -4404,6 +4434,7 @@ public class MainActivity extends AppCompatActivity {
      *  publishOtcOffer) so a failed attempt retries on the next 90s tick instead of waiting 30 min. */
     private void maybeRepublishOtc() {
         if (IdentityWatch.halted()) return;
+        if (Handover.active()) return;
         if (identity == null || myMinimaPk == null || !wallet.ready()) return;
         if (!prefs.getBoolean("otc_auto", false)) return;
         if (System.currentTimeMillis() - prefs.getLong("otc_last_publish_ok", 0) < REPUBLISH_INTERVAL_MS) return;

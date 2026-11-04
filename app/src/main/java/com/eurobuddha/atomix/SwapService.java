@@ -69,6 +69,8 @@ public class SwapService extends Service {
     private static final long OFFLINE_REALERT_MS = 60 * 60_000;      // then re-alert hourly until fixed
     /** Heartbeat intent: one Doze-proof tick pass (the 90s Handler loop stalls when the CPU suspends). */
     public static final String ACTION_HEARTBEAT = "com.eurobuddha.atomix.HEARTBEAT";
+    /** Post the handover withdrawals Handover.withdraw flagged pending (this host owns the node identity). */
+    public static final String ACTION_HANDOVER = "com.eurobuddha.atomix.HANDOVER_WITHDRAW";
     private int alertId = 5100;
 
     private final Handler h = new Handler(Looper.getMainLooper());
@@ -112,6 +114,7 @@ public class SwapService extends Service {
 
         prefs = getSharedPreferences("atomix", MODE_PRIVATE);
         TradingContext.load(prefs);   // the selected trading currency — drives token/sentinels/pricing this session
+        Handover.load(prefs);
         PriceOracle.init(prefs);   // restore the persisted last-good stamp — the withdraw clock survives restarts
         ls = Sodium.get();
         EthNet net = EthNet.MAINNET;
@@ -143,9 +146,11 @@ public class SwapService extends Service {
         h.post(tick);
         h.postDelayed(discoveryTick, DISCOVERY_INTERVAL_MS);
         HeartbeatReceiver.schedule(this);
+        handoverWithdraw();   // a withdrawal still pending from before a process death resumes here
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_HANDOVER.equals(intent.getAction())) handoverWithdraw();
         if (intent != null && ACTION_HEARTBEAT.equals(intent.getAction()) && node != null) {
             SwapLog.d("heartbeat");
             acquireTimedWakelock();
@@ -388,6 +393,7 @@ public class SwapService extends Service {
      *  moment pairing returns after an outage the stale stamp forces an immediate reinstatement. */
     private void maybeAutoRepublish() {
         if (IdentityWatch.halted()) { SwapLog.skip("bgpub", "HALTED: app keys do not match the node"); return; }
+        if (Handover.active()) return;   // handed over to Dexicon — no market from this app
         if (identity == null || myMinimaPk == null || !wallet.ready()) { SwapLog.skip("bgpub", "waiting: identity/wallet not ready"); return; }
         if (!prefs.getBoolean("auto_publish", false)) return;
         long okStamp = prefs.getLong("last_publish_ok", 0);
@@ -454,6 +460,7 @@ public class SwapService extends Service {
     /** OTC availability parity: the offer ages out of the board (~1h) exactly like the order, but until now
      *  ONLY the foreground Activity republished it — an LP's OTC presence died ~1h after backgrounding. */
     private void maybeRepublishOtc() {
+        if (Handover.active()) return;
         if (identity == null || myMinimaPk == null || !wallet.ready()) return;
         if (!prefs.getBoolean("otc_auto", false)) return;
         long okStamp = prefs.getLong("otc_last_publish_ok", 0);
@@ -511,6 +518,49 @@ public class SwapService extends Service {
         });
         if (first) alert(PriceOracle.source() + " price feed lost",
                 "Your pegged order was withdrawn for safety. It re-publishes automatically when the feed recovers.");
+    }
+
+    private final Runnable handoverRetry = this::handoverWithdraw;
+
+    /** Post the handover's order tombstone, then its OTC withdrawal (the same no-liquidity publishes
+     *  maybePegWithdraw / withdrawOtcOffer make). Each pending flag clears only once its post is on the wire;
+     *  until then this retries — 5s while the node/identity come up, 30s after a failed post. */
+    private void handoverWithdraw() {
+        if (prefs == null || node == null) return;   // onCreate bailed (FGS refused)
+        h.removeCallbacks(handoverRetry);
+        final boolean tomb = prefs.getBoolean(Handover.P_TOMB_PENDING, false);
+        if (!tomb && !prefs.getBoolean(Handover.P_OTC_PENDING, false)) return;
+        if (!paired || identity == null || myMinimaPk == null || !wallet.ready() || MainActivity.SWEEP_ACTIVE) {
+            h.postDelayed(handoverRetry, 5_000); return;
+        }
+        final String which = tomb ? Handover.P_TOMB_PENDING : Handover.P_OTC_PENDING;
+        final int gate = tomb ? PublishGate.ORDER : PublishGate.OTC;
+        if (!PublishGate.tryAcquire(gate)) { h.postDelayed(handoverRetry, 5_000); return; }
+        CommsTransport.SendCb cb = new CommsTransport.SendCb() {
+            @Override public void onSent(String txpowid) {
+                PublishGate.release(gate);
+                prefs.edit().putBoolean(which, false).commit();
+                SwapLog.d("handover " + which + " posted " + txpowid);
+                h.post(handoverRetry);   // the next one, if any
+            }
+            @Override public void onFailed(String message) {
+                PublishGate.release(gate);
+                SwapLog.w("handover " + which + " FAIL: " + message);
+                h.postDelayed(handoverRetry, 30_000);
+            }
+        };
+        if (tomb) {
+            Order o = loadOrder();
+            for (Order.Pair p : o.pairs.values()) p.enable = false;
+            o.minimaPublicKey = myMinimaPk;
+            o.ethAddress = wallet.address();
+            SwapOrderBook.publish(node, ls, identity, o, cb);
+        } else {
+            OtcOffer o = new OtcOffer();
+            o.sellSize = 0; o.buySize = 0; o.enable = false;
+            o.minimaPublicKey = myMinimaPk; o.ethAddress = wallet.address(); o.commsPublicId = identity.publicId();
+            OtcBook.publish(node, ls, identity, o, cb);
+        }
     }
 
     // ----- book-presence belt (heartbeat cadence, ~15 min) -----
@@ -638,6 +688,7 @@ public class SwapService extends Service {
     /** What the persistent notification should say right now — the user's at-a-glance market health. */
     private String fgStateText() {
         if (IdentityWatch.halted()) return IdentityWatch.fgLine();   // the halt outranks every other state
+        if (Handover.active()) return "Handed over to Dexicon — settling in-flight swaps only";
         if (!paired) return unpairedSince > 0 && System.currentTimeMillis() - unpairedSince > OFFLINE_ALERT_AFTER_MS
                 ? "Market offline — waiting for Minima Core" : "Waiting for Minima Core…";
         final String ccy = TradingContext.active().coinLabel;

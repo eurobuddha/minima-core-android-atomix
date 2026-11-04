@@ -73,6 +73,18 @@
             </intent-filter>
         </activity>
 
+        <!-- Dexicon handover: exported for startActivityForResult from com.eurobuddha.dexicon ONLY — the activity
+             checks getCallingPackage() and refuses anyone else. See HandoverActivity / Handover. -->
+        <activity
+            android:name=".HandoverActivity"
+            android:exported="true"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode">
+            <intent-filter>
+                <action android:name="com.eurobuddha.dexicon.action.HANDOVER" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".SwapService"
             android:exported="false"
