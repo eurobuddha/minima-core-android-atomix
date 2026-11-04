@@ -36,6 +36,9 @@ public class HandoverActivity extends Activity {
     private LinearLayout col;
     private boolean armed = false;   // the user pressed "Withdraw market and hand over"
     private String shown = null;     // what is on screen — rebuild only on change, so a text selection survives
+    private static final int REQ_SAVE = 41, REQ_VERIFY = 42;
+    // The recovery record being saved: written via the system file picker, then verified by the user re-picking it.
+    private String recHash; private byte[] recBytes; private String recNote = "";
 
     private final Runnable tick = new Runnable() {
         @Override public void run() { render(); ui.postDelayed(this, 2_000); }
@@ -98,7 +101,10 @@ public class HandoverActivity extends Activity {
         // Keep the CANCELED reason current so a back press tells Dexicon exactly what is still blocking.
         String reason = !swaps.isEmpty() ? swaps.get(0) : !market.isEmpty() ? market.get(0) : "not confirmed by the user";
         setResult(RESULT_CANCELED, new Intent().putExtra("reason", reason));
-        String sig = armed + "|" + swaps + "|" + market;
+        List<SwapDb.Swap> stuck = Handover.needRecovery(db, System.currentTimeMillis());
+        StringBuilder stuckSig = new StringBuilder();
+        for (SwapDb.Swap s : stuck) stuckSig.append(s.hash).append(',');
+        String sig = armed + "|" + swaps + "|" + market + "|" + stuckSig + "|" + recHash + "|" + recNote;
         if (sig.equals(shown)) return;
         shown = sig;
 
@@ -116,6 +122,31 @@ public class HandoverActivity extends Activity {
         check(swaps.isEmpty(), "No swap or OTC deal in flight (USDT⇄MxUSD and USDT⇄MINIMA)", swaps);
         check(market.isEmpty(), "Market and OTC offer withdrawn", market);
 
+        if (!stuck.isEmpty() || !recNote.isEmpty()) {
+            text("Swaps AtomiX cannot clear on its own", 16f, Design.TEXT(), true);
+            text("AtomiX's records cannot prove whether these Minima locks were never sent, were already claimed by"
+                    + " the counterparty, or are still on chain. Save each one's recovery record — the hash, secret,"
+                    + " contract id, lock coin id, timelock, market, role and amounts, all in full — then pick the saved"
+                    + " file again so AtomiX can check it. A verified record stops the swap blocking the handover.",
+                    13f, Design.DIM(), false);
+            if (!recNote.isEmpty()) {
+                TextView n = text(recNote, 12f, Design.DIM(), false);
+                n.setTypeface(Design.mono());
+                n.setTextIsSelectable(true);
+            }
+            for (SwapDb.Swap s : stuck) {
+                TextView h = text(s.hash, 12f, Design.DIM(), false);
+                h.setTypeface(Design.mono());
+                h.setTextIsSelectable(true);
+                boolean verifying = s.hash.equals(recHash) && recBytes != null;
+                TextView b = Design.pill(this, verifying ? "Pick the saved file to verify it" : "Save this swap's recovery record",
+                        Design.SURFACE2(), Design.TEXT());
+                Design.pressable(b);
+                b.setOnClickListener(v -> { if (verifying) pickToVerify(); else saveRecord(s); });
+                add(b);
+            }
+        }
+
         if (armed) {
             text("Withdrawn. Waiting for the checks above — this screen finishes on its own when they pass.", 13f, Design.DIM(), false);
         } else {
@@ -128,6 +159,64 @@ public class HandoverActivity extends Activity {
         Design.pressable(cancel);
         cancel.setOnClickListener(v -> finish());   // result already holds the current blocking reason
         add(cancel);
+    }
+
+    private void saveRecord(SwapDb.Swap s) {
+        try {
+            recBytes = Handover.recoveryRecord(s, db).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            recHash = s.hash;
+        } catch (Exception e) { recNote = "Could not build the recovery record: " + e.getMessage(); render(); return; }
+        try {
+            startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("application/json").putExtra(Intent.EXTRA_TITLE, "atomix-recovery-" + s.hash + ".json"), REQ_SAVE);
+        } catch (Exception e) { recBytes = null; recNote = "No file picker available: " + e.getMessage(); render(); }
+    }
+
+    private void pickToVerify() {
+        try {
+            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("*/*"), REQ_VERIFY);
+        } catch (Exception e) { recNote = "No file picker available: " + e.getMessage(); render(); }
+    }
+
+    @Override protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if ((req != REQ_SAVE && req != REQ_VERIFY) || recBytes == null || recHash == null) return;
+        android.net.Uri uri = res == RESULT_OK && data != null ? data.getData() : null;
+        if (uri == null) { recNote = "Not saved — the swap still blocks the handover."; shown = null; render(); return; }
+        String sha = Handover.sha256(recBytes);
+        if (req == REQ_SAVE) {
+            try (java.io.OutputStream os = getContentResolver().openOutputStream(uri, "w")) {
+                if (os == null) throw new java.io.IOException("no output stream");
+                os.write(recBytes);
+                recNote = "Saved " + recBytes.length + " bytes, SHA-256 " + sha + ". Now pick that file again to verify it.";
+            } catch (Exception e) {
+                recBytes = null;
+                recNote = "Could not write the file (" + e.getMessage() + ") — the swap still blocks the handover.";
+            }
+        } else {
+            String problem;
+            try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+                if (in == null) throw new java.io.IOException("no input stream");
+                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[8192]; int n;
+                while ((n = in.read(buf)) != -1) { bos.write(buf, 0, n); if (bos.size() > 1 << 20) break; }   // a record is ~2 KB
+                problem = Handover.verifyRecoveryFile(bos.toByteArray(), recBytes.length, sha, recHash);
+            } catch (Exception e) { problem = "the file could not be read back (" + e.getMessage() + ")"; }
+            if (problem == null) {
+                db.logEvent(recHash, SwapDb.EV_RECOVERY_SAVED, "", "", recBytes.length + " bytes, SHA-256 " + sha);
+                recNote = "Verified: the recovery record for " + recHash + " (" + recBytes.length + " bytes, SHA-256 " + sha
+                        + ") is saved. You now hold what is needed to recover this swap by hand: an unspent Minima lock"
+                        + " refunds with your node's key after its timelock, the claim branch has no deadline, and the"
+                        + " preimage of a withdrawn Ethereum contract is readable from that contract. It no longer blocks.";
+                recBytes = null; recHash = null;
+            } else {
+                recNote = "Not verified: " + problem + ". Save it again — the swap still blocks the handover.";
+                recBytes = null;
+            }
+        }
+        shown = null;
+        render();
     }
 
     private void withdraw() {

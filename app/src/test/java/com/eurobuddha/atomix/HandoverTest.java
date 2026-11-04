@@ -41,6 +41,7 @@ public class HandoverTest {
             Object o = m.get(i.<String>getArgument(0)); return o instanceof Boolean ? o : i.getArgument(1); });
         when(p.edit()).thenReturn(ed);
         when(ed.putBoolean(anyString(), anyBoolean())).thenAnswer(i -> { m.put(i.getArgument(0), i.getArgument(1)); return ed; });
+        when(ed.putString(anyString(), nullable(String.class))).thenAnswer(i -> { m.put(i.getArgument(0), i.getArgument(1)); return ed; });
         when(ed.putLong(anyString(), anyLong())).thenAnswer(i -> { m.put(i.getArgument(0), i.getArgument(1)); return ed; });
         when(ed.remove(anyString())).thenAnswer(i -> { m.remove(i.<String>getArgument(0)); return ed; });
         when(ed.commit()).thenReturn(true);
@@ -200,5 +201,103 @@ public class HandoverTest {
         assertFalse(Handover.active());
         Handover.load(p);
         assertFalse(Handover.active());
+    }
+
+    // ---- 0.1.90 ----
+
+    private static final long HOUR = 60 * 60 * 1000L;
+
+    private static SwapDb.Swap minimaLeg(String status, String hash, long ageMs) {
+        SwapDb.Swap s = swap("mxUSDT", status, hash);
+        s.myLegIsMinima = true; s.role = "RESPONDER"; s.direction = "ERC20_TO_MINIMA";
+        s.created = System.currentTimeMillis() - ageMs;
+        return s;
+    }
+
+    /** 1(b): no record the engine keeps can prove a Minima lock was claimed or never sent, so the row blocks — until
+     *  the user has saved and re-read its recovery record. Only old rows qualify, and only STARTED / ERROR ones. */
+    @Test public void stuckMinimaRowStopsBlockingOnlyOnceItsRecoveryRecordIsSaved() {
+        String h = "0x" + "66".repeat(32), young = "0x" + "77".repeat(32), live = "0x" + "88".repeat(32);
+        SwapDb.Swap err = minimaLeg(SwapDb.ST_ERROR, h, 7 * HOUR);
+        SwapDb db = db(err, minimaLeg(SwapDb.ST_ERROR, young, HOUR), minimaLeg(SwapDb.ST_LOCKED, live, 7 * HOUR));
+        long now = System.currentTimeMillis();
+        List<String> r = Handover.inFlight(db, Collections.emptyList(), false, now);
+        assertEquals(3, r.size());
+        assertTrue(r.get(0), r.get(0).contains(h) && r.get(0).contains("recovery record"));
+        assertEquals(1, Handover.needRecovery(db, now).size());
+        assertEquals(h, Handover.needRecovery(db, now).get(0).hash);
+
+        for (String x : new String[]{h, young, live}) when(db.hasEvent(x, SwapDb.EV_RECOVERY_SAVED)).thenReturn(true);
+        r = Handover.inFlight(db, Collections.emptyList(), false, now);
+        assertEquals("young and live rows still block, saved record or not", 2, r.size());
+        assertFalse(r.toString().contains(h));
+        assertTrue(Handover.needRecovery(db, now).isEmpty());
+
+        SwapDb.Swap started = minimaLeg(SwapDb.ST_STARTED, h, 7 * HOUR);   // Minima-first lock that never confirmed
+        started.role = "INITIATOR"; started.direction = "MINIMA_TO_ERC20";
+        assertTrue(Handover.stuck(started, now));
+    }
+
+    @Test public void recoveryRecordCarriesEveryIdentifierInFull() throws Exception {
+        String h = "0x" + "99".repeat(32), coin = "0x" + "ab".repeat(32), secret = "0x" + "cd".repeat(32);
+        SwapDb.Swap s = minimaLeg(SwapDb.ST_ERROR, h, 7 * HOUR);
+        s.myTimelock = 1_234_567; s.sellAmount = "10"; s.buyAmount = "9.9";
+        SwapDb db = db(s);
+        when(db.getSecret(h)).thenReturn(secret);
+        when(db.rememberedLockCoin(h)).thenReturn(new org.json.JSONObject().put("coinid", coin).put("amount", "10").put("tokenid", "0x00"));
+        String rec = Handover.recoveryRecord(s, db);
+        org.json.JSONObject j = new org.json.JSONObject(rec);
+        assertEquals(h, j.getString("hash"));
+        assertEquals(secret, j.getString("secret"));
+        assertEquals(com.eurobuddha.atomix.eth.EthHtlc.contractId(h), j.getString("contractId"));
+        assertEquals(coin, j.getString("lockCoinId"));
+        assertEquals(1_234_567, j.getLong("myTimelock"));
+        assertEquals("USDT⇄MxUSD", j.getString("market"));
+        assertEquals("RESPONDER", j.getString("role"));
+        assertEquals("10", j.getString("sellAmount"));
+        assertEquals("9.9", j.getString("buyAmount"));
+        assertFalse(rec, rec.contains("…"));
+
+        byte[] b = rec.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        String sha = Handover.sha256(b);
+        assertNull(Handover.verifyRecoveryFile(b, b.length, sha, h));
+        assertNotNull("truncated", Handover.verifyRecoveryFile(java.util.Arrays.copyOf(b, b.length - 1), b.length, sha, h));
+        byte[] flipped = b.clone(); flipped[5] ^= 1;
+        assertNotNull("altered", Handover.verifyRecoveryFile(flipped, b.length, sha, h));
+        assertNotNull("another swap's record", Handover.verifyRecoveryFile(b, b.length, sha, "0x" + "11".repeat(32)));
+    }
+
+    /** 1(a): an ETH-first row finalized on two endpoints' evidence is finished; the evidence counts for no other row. */
+    @Test public void neverLockedEvidenceFinishesOnlyAnEthFirstRow() {
+        String h = "0x" + "aa".repeat(32);
+        SwapDb.Swap s = swap("USDT", SwapDb.ST_STARTED, h);
+        s.role = "INITIATOR"; s.direction = "ERC20_TO_MINIMA";
+        SwapDb db = db(s);
+        String why = Handover.inFlight(db, Collections.emptyList(), false).get(0);
+        assertTrue(why, why.contains("two independent Ethereum endpoints"));
+        s.status = SwapDb.ST_ERROR;
+        when(db.hasEvent(h, SwapDb.EV_NEVER_LOCKED)).thenReturn(true);
+        assertTrue(Handover.inFlight(db, Collections.emptyList(), false).isEmpty());
+        s.myLegIsMinima = true;
+        assertEquals(1, Handover.inFlight(db, Collections.emptyList(), false).size());
+    }
+
+    /** 2: while handed over a currency switch must not revive the other market's parked flags, and Take back leaves
+     *  the market exactly as the handover's withdraw left it (no auto-republish). */
+    @Test public void handedOverMarketStaysWithdrawnThroughSwitchAndTakeBack() {
+        Map<String, Object> m = new HashMap<>();
+        m.put("auto_publish", true);
+        m.put("market_minima", "{\"auto_publish\":true,\"otc_enable\":true,\"otc_auto\":true}");
+        SharedPreferences p = prefs(m);
+        Handover.withdraw(p);
+        MainActivity.restoreMarket(p, "minima");
+        assertEquals(false, m.get("auto_publish"));
+        assertEquals(false, m.get("otc_enable"));
+        assertEquals(true, m.get(PriceOracle.P_WITHDRAWN));
+        Handover.takeBack(p);
+        assertEquals(false, m.get("auto_publish"));
+        assertEquals(true, m.get(PriceOracle.P_WITHDRAWN));
+        MainActivity.restoreMarket(p, "minima");   // a deliberate switch after Take back restores as before
+        assertEquals(true, m.get("auto_publish"));
     }
 }

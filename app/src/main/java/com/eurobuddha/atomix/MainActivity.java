@@ -429,6 +429,9 @@ public class MainActivity extends AppCompatActivity {
 
     /** Confirm before switching the traded currency — it changes which market you make and re-themes the app. */
     private void switchCurrencyDialog() {
+        // Handed over: the switch would restore the other market's parked auto_publish/OTC flags and clear
+        // P_WITHDRAWN, re-arming a market the handover withdrew (so Dexicon's re-ask fails and Take back republishes).
+        if (Handover.active()) { toast("Handed over to Dexicon — Take back first"); return; }
         final TradingContext target = TradingContext.active().other();
         dialog()
             .setTitle("Switch to " + target.coinLabel + "?")
@@ -452,6 +455,7 @@ public class MainActivity extends AppCompatActivity {
      *  (a switch can only ever leave the market off, never mispriced). Clearing these prefs also stops the
      *  still-dying old service instance from republishing — it reads auto_publish + the order live each cycle. */
     private void doSwitchCurrency(final TradingContext target) {
+        if (Handover.active()) { toast("Handed over to Dexicon — Take back first"); return; }
         final TradingContext current = TradingContext.active();
         // Remember THIS currency's market so a flick back restores it (config only — never the runtime/price state).
         snapshotMarket(prefs, current.key);
@@ -540,6 +544,7 @@ public class MainActivity extends AppCompatActivity {
     /** Restore a currency's parked market CONFIG into the active keys (no-op if none saved). Runtime/price state
      *  is deliberately NOT restored — the peg re-fetches the target currency's own price. */
     static void restoreMarket(android.content.SharedPreferences prefs, String targetKey) {
+        if (Handover.active()) return;   // never re-arm a market the Dexicon handover withdrew (see switchCurrencyDialog)
         String raw = prefs.getString("market_" + targetKey, null);
         if (raw == null) return;   // nothing saved for this currency — leave the market off (already reset)
         android.content.SharedPreferences.Editor e = prefs.edit();

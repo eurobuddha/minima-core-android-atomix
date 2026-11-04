@@ -11,6 +11,8 @@
         <!-- The official Minima Core, and the legacy org.minimarex build -->
         <package android:name="org.minima.core" />
         <package android:name="org.minimarex.minimacore" />
+        <!-- HandoverActivity compares Dexicon's signer with ours (PackageManager.checkSignatures). -->
+        <package android:name="com.eurobuddha.dexicon" />
     </queries>
 
     <!-- Unlike the node-only merch apps, usdtSwap also talks to the Ethereum network directly

@@ -44,6 +44,9 @@ public final class SwapDb {
     public static final String EV_DECLINED     = "BUY_DECLINED";   // maker: why I did not lock (note = reason)
     public static final String EV_TIMEOUT      = "MAKER_TIMEOUT";  // taker: the maker's respond-by deadline passed
     public static final String EV_REFUND_SENT  = "REFUND_SENT";    // taker: my ETH refund broadcast (note = tx hash)
+    // Handover liveness (0.1.90):
+    public static final String EV_NEVER_LOCKED = "ETH_NEVER_LOCKED";   // ETH-first initiator: two endpoints showed no contract past the timelock (note = evidence)
+    public static final String EV_RECOVERY_SAVED = "RECOVERY_SAVED";   // the user saved + re-read this swap's recovery record (note = size + SHA-256)
 
     // ---- UX swap status ----
     public static final String ST_STARTED   = "STARTED";    // leg 1 locked, waiting for counterparty
