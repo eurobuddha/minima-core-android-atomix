@@ -4528,6 +4528,7 @@ public class MainActivity extends AppCompatActivity {
     private static String pickTx(java.util.List<SwapDb.Event> ev, boolean minimaLeg) {
         java.util.List<String> seen = new ArrayList<>();
         for (SwapDb.Event e : ev) {
+            if (SwapDb.EV_ETH_LEG_REFUNDED.equals(e.event)) continue;   // a contract READ (0.1.93/0.1.94 logged token "ETH"), never a tx
             boolean match = minimaLeg ? "minima".equals(e.token) : (e.token != null && e.token.startsWith("ETH"));
             if (match && isTxId(e.note) && !seen.contains(e.note)) seen.add(e.note);
         }
