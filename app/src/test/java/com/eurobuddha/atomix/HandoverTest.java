@@ -254,10 +254,14 @@ public class HandoverTest {
         assertFalse(r.toString().contains(h));
         assertTrue(Handover.needRecovery(db, now).isEmpty());
 
-        for (String st : new String[]{SwapDb.ST_STARTED, SwapDb.ST_LOCKED, SwapDb.ST_CLAIMING}) {
+        for (String st : new String[]{SwapDb.ST_STARTED, SwapDb.ST_LOCKED}) {
             err.status = st;
             assertTrue(st, Handover.stuck(err, db, now));
         }
+        err.status = SwapDb.ST_CLAIMING;
+        assertFalse("0.1.93: CLAIMING with no recorded collect owes a collect, any role", Handover.stuck(err, db, now));
+        when(db.haveCollect(h)).thenReturn(true);
+        assertTrue(Handover.stuck(err, db, now));
         err.myLegIsMinima = false;
         assertFalse("an Ethereum leg has its own evidence (EV_NEVER_LOCKED)", Handover.stuck(err, db, now));
     }
@@ -305,7 +309,10 @@ public class HandoverTest {
         when(db.getEvents(h)).thenReturn(Collections.singletonList(refundTried(TL + Handover.REFUND_MARGIN_BLOCKS)));
         assertFalse("+72 is not enough for a responder", Handover.stuck(s, db, now));
         when(db.getEvents(h)).thenReturn(Collections.singletonList(refundTried(TL + com.eurobuddha.atomix.swap.SwapEngine.TIMELOCK_BLOCKS)));
-        assertTrue(Handover.stuck(s, db, now));
+        assertFalse("0.1.93: no secret known is not 'nothing owed' — the taker's ETH contract is unproven", Handover.stuck(s, db, now));
+        when(db.hasEvent(h, SwapDb.EV_ETH_LEG_REFUNDED)).thenReturn(true);
+        assertTrue("an ETH read recorded the taker's contract refunded", Handover.stuck(s, db, now));
+        when(db.hasEvent(h, SwapDb.EV_ETH_LEG_REFUNDED)).thenReturn(false);
         when(db.getSecret(h)).thenReturn("0x" + "cd".repeat(32));
         assertFalse("secret known, ETH not collected: the collect is owed", Handover.stuck(s, db, now));
         when(db.haveCollect(h)).thenReturn(true);
@@ -348,6 +355,10 @@ public class HandoverTest {
         assertEquals(claimer, j.getString("counterpartyKey"));
         assertEquals(Handover.SECRET_WARNING, j.getString("warning"));
         assertFalse(rec, rec.contains("…"));
+        String how = j.getString("howToRecover");
+        assertTrue(how, how.contains(com.eurobuddha.atomix.swap.MinimaHtlc.NOTIFY) && how.contains("state[100]"));
+        s.role = "INITIATOR";
+        assertFalse(new org.json.JSONObject(Handover.recoveryRecord(s, db)).getString("howToRecover").contains("state[100]"));
 
         byte[] b = rec.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         String sha = Handover.sha256(b);

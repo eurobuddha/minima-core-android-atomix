@@ -164,7 +164,11 @@ public class HostGateTest {
             if (tip > 0) cb.ok(tip); else cb.err("no tip");
             return null;
         }).when(minima).currentBlock(any());
+        doAnswer(i -> { ((MinimaHtlc.KeysCb) i.getArgument(0)).ok(nodeKeys); return null; }).when(minima).loadMyKeys(any());
+        relevantRead(new JSONArray());   // no lock of mine for this hash, unless a test says otherwise
     }
+
+    private java.util.Set<String> nodeKeys = Collections.singleton(MY_PK);
 
     private void pass(int block) {
         tip = block;
@@ -317,5 +321,88 @@ public class HostGateTest {
         verify(minima).refund(any(), any());
         assertEquals(0, count(SwapDb.EV_LOCK_GONE_SEEN));
         assertEquals(0, count(SwapDb.EV_LOCK_ABSENT));
+    }
+
+    // ---- 0.1.93 ----
+
+    private JSONObject myCoin(String coinid, String amount) throws Exception {
+        return new JSONObject().put("coinid", coinid).put("tokenid", TradingContext.MXUSDT.tokenId).put("amount", amount).put("tokenamount", amount)
+                .put("state", new JSONObject().put("0", MY_PK).put("3", "1000").put("4", "0x" + "dd".repeat(32)).put("5", HASH));
+    }
+
+    /** MAJOR: the deep (non-relevant) scan sees my unspent lock — that is presence, even when relevant:true reads
+     *  the recorded coin as gone (cointrack off, or a decoy record). */
+    @Test public void aLockTheDeepScanSeesIsNeverReadAsGone() throws Exception {
+        myMinimaLock(1000);
+        liveEvents();
+        coinRead(false);
+        JSONObject live = myCoin("0x" + "78".repeat(32), "1");
+        doAnswer(i -> { ((Consumer<JSONArray>) i.getArgument(3)).accept(new JSONArray().put(live)); return null; })
+                .when(minima).scanHtlcByHashDeep(eq(HASH), anyInt(), anyInt(), any(), any());
+        pass(1100);
+        pass(1110);
+        pass(1120);
+        assertEquals(0, count(SwapDb.EV_LOCK_GONE_SEEN));
+        assertEquals(0, count(SwapDb.EV_LOCK_SPENT));
+        assertEquals(1, count(SwapDb.EV_REFUND_TRIED));
+    }
+
+    /** MAJOR: a recorded coin read spent is not SPENT while a depth-free read still finds a lock of mine for the hash. */
+    @Test public void aSpentDecoyRecordWithMyRealLockPresentIsNotSpent() throws Exception {
+        myMinimaLock(1000);
+        liveEvents();
+        coinRead(false);
+        relevantRead(new JSONArray().put(myCoin("0x" + "79".repeat(32), "1")));
+        pass(1100);
+        pass(1110);
+        assertEquals(0, count(SwapDb.EV_LOCK_GONE_SEEN));
+        assertEquals(0, count(SwapDb.EV_LOCK_SPENT));
+        verify(minima, atLeastOnce()).refund(any(), any());
+    }
+
+    /** MAJOR: a coin with my key + hash but not the amount/token the row locked is a decoy — never recorded. */
+    @Test public void aDecoyIsNeverRecordedTheExpectedLockIs() throws Exception {
+        SwapDb.Swap s = new SwapDb.Swap();
+        s.hash = HASH; s.myLegIsMinima = true; s.sellToken = TradingContext.MXUSDT.coinLabel; s.sellAmount = "26.9902501";
+        when(db.getSwap(HASH)).thenReturn(s);
+        assertFalse("wrong amount", SwapEngine.expectedLock(s, myCoin(COIN, "0.0001")));
+        assertFalse("wrong token", SwapEngine.expectedLock(s, myCoin(COIN, "26.9902501").put("tokenid", "0x00")));
+        assertTrue("exact", SwapEngine.expectedLock(s, myCoin(COIN, "26.9902501")));
+        assertTrue("at the 6dp lock grain", SwapEngine.expectedLock(s, myCoin(COIN, "26.990250")));
+        engine.checkExpiredMinima(myCoin("0x" + "71".repeat(32), "0.0001"), 10);
+        verify(db, never()).rememberLockCoin(any(), any(), any(), any(), any(), any());
+        engine.checkExpiredMinima(myCoin(COIN, "26.99025"), 10);
+        verify(db).rememberLockCoin(eq(HASH), eq(COIN), eq("26.99025"), any(), eq(MY_PK), any());
+    }
+
+    /** MINOR: voiding is by block number, not event order — a clock set backwards (events returned oldest first)
+     *  cannot resurrect a GONE_SEEN that a later PRESENT voided. */
+    @Test public void aClockSetBackwardsCannotResurrectAVoidedReading() throws Exception {
+        myMinimaLock(1000);
+        liveEvents();
+        when(db.getEvents(HASH)).thenAnswer(i -> { java.util.List<SwapDb.Event> l = new java.util.ArrayList<>(events);
+            Collections.reverse(l); return l; });
+        coinRead(false);
+        pass(1100);
+        coinRead(true);
+        pass(1103);
+        assertEquals(1, count(SwapDb.EV_LOCK_PRESENT));
+        coinRead(false);
+        pass(1110);
+        assertEquals("1100 was voided; 1110 is only pending", 0, count(SwapDb.EV_LOCK_SPENT));
+        pass(1116);
+        assertEquals(1, count(SwapDb.EV_LOCK_SPENT));
+    }
+
+    /** NIT: the confirming write re-reads the node's keys; a key no longer held writes nothing. */
+    @Test public void theConfirmingReadReloadsTheNodeKeys() throws Exception {
+        myMinimaLock(1000);
+        liveEvents();
+        coinRead(false);
+        pass(1100);
+        nodeKeys = Collections.singleton("0x" + "ee".repeat(32));
+        pass(1110);
+        assertEquals(0, count(SwapDb.EV_LOCK_SPENT));
+        verify(minima, atLeastOnce()).loadMyKeys(any());
     }
 }
