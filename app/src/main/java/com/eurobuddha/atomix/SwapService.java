@@ -342,6 +342,7 @@ public class SwapService extends Service {
         if (crypto == null || identity == null || engine == null) return;
         if (takeScanner == null) {
             takeScanner = new CommsScanner(node, crypto, new PrefsMeta(prefs), SwapTake.address(), this::routeTakeRequest, (ok, n) -> {});
+            SwapTake.load13(prefs);
             for (String hh : incomingHashlocks()) engine.addIncomingHashlock(hh);   // re-arm persisted handshakes
         }
         takeScanner.scan(0);   // bounded depth-grow scan; block number only affects bookmarking
@@ -370,6 +371,7 @@ public class SwapService extends Service {
             if (hash.isEmpty() || !identity.publicId().equals(to)) return false;
             if (opened.fromPublicId == null || !opened.fromPublicId.equals(from)) return false;
             if (j.has("notice")) return engine.onMakerNotice(hash, from, j.optString("notice"), j.optString("reason"));
+            SwapTake.note13(prefs, j, hash);
             boolean isNew = !incomingHashlocks().contains(hash);
             if (isNew) prefs.edit().putString(SwapTake.P_PENDING,
                     SwapTake.edit(prefs.getString(SwapTake.P_PENDING, ""), TradingContext.active(), hash, null)).apply();

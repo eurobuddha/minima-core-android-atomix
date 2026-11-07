@@ -727,7 +727,7 @@ public class MainActivity extends AppCompatActivity {
                     try { sum = sum.add(new java.math.BigDecimal(amt)); } catch (Exception ignore) {}
                     String mx = c.optString("miniaddress", "");
                     String tag = "";
-                    if (MinimaHtlc.HTLC_ADDRESS.equalsIgnoreCase(mx)) tag = " (swap HTLC)";
+                    if (MinimaHtlc.isHtlcAddress(mx)) tag = " (swap HTLC)";
                     else if (SwapOrderBook.address().equalsIgnoreCase(addr)) tag = " (order book)";
                     sb.append(Util.tidyAmount(amt)).append("   ")
                       .append(addr).append(tag).append("\n");   // RULE 1: full address (the dump is a scrollable text view)
@@ -929,6 +929,7 @@ public class MainActivity extends AppCompatActivity {
             if (hash.isEmpty() || !identity.publicId().equals(to)) return false;       // not for me
             if (opened.fromPublicId == null || !opened.fromPublicId.equals(from)) return false;  // sender mismatch
             if (j.has("notice")) return engine != null && engine.onMakerNotice(hash, from, j.optString("notice"), j.optString("reason"));
+            SwapTake.note13(prefs, j, hash);
             return addIncoming(hash, from);
         } catch (Exception e) { return false; }
     }
@@ -958,6 +959,7 @@ public class MainActivity extends AppCompatActivity {
     /** Re-arm the engine with persisted handshakes after a restart, pruning ones that have fully resolved. */
     private void loadIncoming() {
         if (engine == null || db == null) return;
+        SwapTake.load13(prefs);
         java.util.List<String> done = new java.util.ArrayList<>();
         for (String h : incomingHashlocks()) {
             SwapDb.Swap s = db.getSwap(h);

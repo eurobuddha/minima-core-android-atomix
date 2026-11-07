@@ -232,8 +232,9 @@ public final class Handover {
                 .put("buyAmount", s.buyAmount).put("buyToken", tokenLabel(s.buyToken))
                 .put("counterparty", s.counterparty)
                 .put("htlcAddress", com.eurobuddha.atomix.swap.MinimaHtlc.HTLC_ADDRESS)
+                .put("htlcAddressV13", com.eurobuddha.atomix.swap.MinimaHtlc.HTLC_ADDRESS_V13)
                 .put("created", s.created)
-                .put("howToRecover", "Find the HTLC coin at htlcAddress whose state[5] is hash (lockCoinId if known)."
+                .put("howToRecover", "Find the HTLC coin at htlcAddress (or htlcAddressV13) whose state[5] is hash (lockCoinId if known)."
                         + " Unspent and past myTimelock: refund it with your node's owner key (lockOwnerKey). Spent: it was claimed"
                         + " (or refunded) and nothing is left. If you are owed the Ethereum leg, the contract with"
                         + " contractId can be withdrawn with secret; once withdrawn, the preimage is readable from it."

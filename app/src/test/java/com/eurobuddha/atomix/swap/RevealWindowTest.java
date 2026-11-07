@@ -102,6 +102,36 @@ public class RevealWindowTest {
         return c;
     }
 
+    private void respondToUsdtLock(com.eurobuddha.atomix.eth.EthHtlc eth) throws Exception {
+        when(db.getSecret(HASH)).thenReturn(null);
+        when(db.getSwap(HASH)).thenReturn(null);
+        java.lang.reflect.Method m = SwapEngine.class.getDeclaredMethod("checkCanCollectEth",
+                com.eurobuddha.atomix.eth.EthHtlc.class, com.eurobuddha.atomix.eth.EthHtlc.Contract.class, int.class);
+        m.setAccessible(true);
+        try { m.invoke(engine, eth, contract("0x1111111111111111111111111111111111111111", System.currentTimeMillis() / 1000 + 7200), 100); }
+        catch (java.lang.reflect.InvocationTargetException androidLogStub) { if (!(androidLogStub.getCause() instanceof RuntimeException)) throw androidLogStub; }
+    }
+
+    @Test public void aUsdtPaidTakeFromAnOldTakerIsDeclined() throws Exception {
+        // HTLC v1.3: no v1.3 capability in the handshake = no counter-leg, and not even an endpoint read
+        SwapEngine.HTLC13_TAKERS.clear();
+        com.eurobuddha.atomix.eth.EthHtlc eth = mock(com.eurobuddha.atomix.eth.EthHtlc.class);
+        respondToUsdtLock(eth);
+        verify(db).logEvent(eq(MinimaHtlc.normKey(HASH)), eq(SwapDb.EV_DECLINED), eq(""), eq(""), org.mockito.ArgumentMatchers.contains("HTLC v1.3"));
+        verify(eth, never()).getContractOn(anyString(), anyString());
+    }
+
+    @Test public void aUsdtPaidTakeFromAV13TakerGoesOnToTheEndpointCheck() throws Exception {
+        SwapEngine.HTLC13_TAKERS.clear();
+        SwapEngine.takerUnderstands13(HASH);
+        try {
+            com.eurobuddha.atomix.eth.EthHtlc eth = mock(com.eurobuddha.atomix.eth.EthHtlc.class);
+            respondToUsdtLock(eth);
+            verify(db, never()).logEvent(eq(MinimaHtlc.normKey(HASH)), eq(SwapDb.EV_DECLINED), anyString(), anyString(), org.mockito.ArgumentMatchers.contains("HTLC v1.3"));
+            verify(eth, org.mockito.Mockito.atLeastOnce()).getContractOn(anyString(), anyString());
+        } finally { SwapEngine.HTLC13_TAKERS.clear(); }
+    }
+
     @Test public void oneRpcCannotDecideAReveal() throws Exception {
         // review 7 Nov: the same contract must read identically on a second, independent endpoint
         com.eurobuddha.atomix.eth.EthHtlc eth = mock(com.eurobuddha.atomix.eth.EthHtlc.class);
