@@ -108,6 +108,10 @@ public class RevealWindowTest {
         com.eurobuddha.atomix.eth.EthHtlc.Contract seen = contract("0x" + "22".repeat(20), 5000);
         when(eth.getContractOn(anyString(), eq(seen.contractId))).thenReturn(contract("0x" + "22".repeat(20), 5000));
         assertTrue(engine.secondEndpointAgrees(eth, seen.contractId, seen));
+        // R4-3: one stale endpoint (first in the list) is outvoted by the next two
+        java.util.List<String> eps = com.eurobuddha.atomix.eth.EthRpc.fallbacks();
+        when(eth.getContractOn(eq(eps.get(0)), eq(seen.contractId))).thenReturn(null);
+        assertTrue(engine.secondEndpointAgrees(eth, seen.contractId, seen));
         when(eth.getContractOn(anyString(), eq(seen.contractId))).thenReturn(contract("0x" + "33".repeat(20), 5000));
         try { assertFalse(engine.secondEndpointAgrees(eth, seen.contractId, seen)); } catch (RuntimeException androidLogStub) { }
         when(eth.getContractOn(anyString(), eq(seen.contractId))).thenReturn(null);
