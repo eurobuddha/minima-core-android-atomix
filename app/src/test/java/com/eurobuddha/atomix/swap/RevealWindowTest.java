@@ -72,6 +72,21 @@ public class RevealWindowTest {
         verify(db).setSwapStatus(HASH, SwapDb.ST_CLAIMING);
     }
 
+    @Test public void aRetryAfterMySecretWentOutIsNeverBlocked() throws Exception {
+        // R2-1: my first claim carried the secret but did not mine — the secret is public now; a retry must go out
+        when(db.hasEvent(HASH, SwapDb.EV_SECRET_OUT)).thenReturn(true);
+        try { engine.checkCanSwapCoin(coin(HASH, 101), 100); } catch (RuntimeException androidLogStub) { }
+        verify(db).setSwapStatus(HASH, SwapDb.ST_CLAIMING);
+        long now = System.currentTimeMillis() / 1000;
+        when(rpc.latestBlockTimestamp()).thenReturn(now);
+        assertTrue(engine.revealWindowOk(HASH, now + 15));
+    }
+
+    @Test public void theFirstClaimRecordsThatTheSecretWentOut() throws Exception {
+        try { engine.checkCanSwapCoin(coin(HASH, 100 + SwapEngine.CP_BLOCKS), 100); } catch (RuntimeException androidLogStub) { }
+        verify(db).logEvent(HASH, SwapDb.EV_SECRET_OUT, "", "", "");
+    }
+
     @Test public void responderCollectIsNeverBlocked() throws Exception {
         sw.role = "RESPONDER";
         try { engine.checkCanSwapCoin(coin(HASH, 101), 100); } catch (RuntimeException androidLogStub) { }
