@@ -2322,6 +2322,7 @@ public final class SwapEngine {
     boolean acceptTakerSellMinima(JSONObject coin, String reqTokenAddr) {
         Order.Pair p = pairFor(reqTokenAddr);
         if (p == null || !p.enable) return false;
+        if (PriceOracle.jumpPending()) return false;   // review 7 Nov: my peg may be priced off an outdated MEXC mid
         BigDecimal recvMinima = dec(MinimaHtlc.coinAmount(coin));   // mxUSDT the taker locked, I receive
         BigDecimal giveUsdt = dec(MinimaHtlc.stateAt(coin, 1));       // USDT they requested, I'd pay
         if (recvMinima.signum() <= 0) return false;
@@ -2346,6 +2347,7 @@ public final class SwapEngine {
     boolean acceptTakerBuyMinima(EthHtlc.Contract c) {
         Order.Pair p = pairFor(c.tokenContract);
         if (p == null || !p.enable) return false;
+        if (PriceOracle.jumpPending()) return false;   // review 7 Nov: my peg may be priced off an outdated MEXC mid
         BigDecimal giveMinima = dec(EthWallet.format(c.requestAmount, 18, 18));            // mxUSDT I'd give
         BigDecimal recvUsdt = dec(EthWallet.format(c.amount, decimalsOf(c.tokenContract), 18)); // USDT I'd receive
         if (giveMinima.signum() <= 0) return false;
