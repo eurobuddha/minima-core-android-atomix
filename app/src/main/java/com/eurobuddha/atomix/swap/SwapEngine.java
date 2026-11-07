@@ -65,7 +65,7 @@ public final class SwapEngine {
      *  claims my Minima counter-leg, and my USDT withdraw can never match it (the taker then refunds). Until a v1.3 script
      *  asserts LEN(secret) EQ 32, a maker does not lock a Minima counter-leg against a USDT lock. Swaps already in flight
      *  (a row exists) are untouched. Owner decision pending: flip to false only with HTLC v1.3. */
-    public static final boolean ETH_FIRST_PAUSED       = true;
+    public static volatile boolean ETH_FIRST_PAUSED    = true;   // volatile, not final: tests of the normal publish path turn it off
     private static final int  NOTIFY_SCAN_DEPTH         = 256;                               // bounded notify scan
     private static final int  HTLC_SCAN_DEPTH           = 256;                               // bounded HTLC coin scan
     /** REFUND discovery only. The node's `coins depth:` is a walk-back over BLOCKS from the tip

@@ -65,6 +65,9 @@ public final class SwapOrderBook {
                         try {
                             java.math.BigDecimal free=available.min(freeCoinBalance(coins,token));
                             if("0x00".equals(token))free=free.subtract(new java.math.BigDecimal(CommsTransport.MESSAGE_AMOUNT)).max(java.math.BigDecimal.ZERO);
+                            // review 7 Nov (R3-3): while ETH-first (USDT-paid) takes are paused, advertise no asks — a taker would
+                            // lock USDT, be declined and pay gas to refund
+                            if(SwapEngine.ETH_FIRST_PAUSED) free=java.math.BigDecimal.ZERO;
                             base.minimaAvail=free.doubleValue();base.clampAsksToBalance(free);
                         } catch(RuntimeException invalid) { cb.onFailed(BALANCE_ERROR);return; }
                         publish(node, ls, id, base, generation, authorized, cb);

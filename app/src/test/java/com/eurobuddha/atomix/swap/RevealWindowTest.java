@@ -115,6 +115,10 @@ public class RevealWindowTest {
         assertFalse("timelock differs", SwapEngine.sameContract(seen, contract("0x" + "22".repeat(20), 5001)));
     }
 
+    @Test public void ethFirstShipsPaused() {
+        assertTrue("HTLC v1.2 cannot require a 32-byte secret: makers ship with USDT-paid buys paused", SwapEngine.ETH_FIRST_PAUSED);
+    }
+
     @Test public void responderCollectIsNeverBlocked() throws Exception {
         sw.role = "RESPONDER";
         try { engine.checkCanSwapCoin(coin(HASH, 101), 100); } catch (RuntimeException androidLogStub) { }
