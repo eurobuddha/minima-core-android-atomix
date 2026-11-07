@@ -34,13 +34,15 @@ public class RevealWindowTest {
     private SwapDb db;
     private EthRpc rpc;
     private SwapDb.Swap sw;
+    private MinimaHtlc minima;
 
     @Before public void setUp() throws Exception {
         SwapEngine.clearRetryMarkersForTest();
         EthWallet wallet = mock(EthWallet.class);
         when(wallet.address()).thenReturn("0x1111111111111111111111111111111111111111");
         db = mock(SwapDb.class);
-        engine = new SwapEngine(mock(NodeApi.class), mock(MinimaHtlc.class), db, wallet, mock(Handler.class), mock(SwapEngine.Notifier.class));
+        minima = mock(MinimaHtlc.class);
+        engine = new SwapEngine(mock(NodeApi.class), minima, db, wallet, mock(Handler.class), mock(SwapEngine.Notifier.class));
         rpc = mock(EthRpc.class);
         engine.setNetwork(rpc, EthNet.MAINNET);
         engine.setMyMinimaPk(MY_MPK);
@@ -82,8 +84,13 @@ public class RevealWindowTest {
         assertTrue(engine.revealWindowOk(HASH, now + 15));
     }
 
-    @Test public void theFirstClaimRecordsThatTheSecretWentOut() throws Exception {
+    @Test public void theMarkerIsWrittenOnlyOnceTheClaimWasPosted() throws Exception {
+        // R3-1: nothing may lift the margin before a post really happened
         try { engine.checkCanSwapCoin(coin(HASH, 100 + SwapEngine.CP_BLOCKS), 100); } catch (RuntimeException androidLogStub) { }
+        verify(db, never()).logEvent(eq(HASH), eq(SwapDb.EV_SECRET_OUT), anyString(), anyString(), anyString());
+        org.mockito.ArgumentCaptor<MinimaHtlc.PostCb> cb = org.mockito.ArgumentCaptor.forClass(MinimaHtlc.PostCb.class);
+        verify(minima).claim(org.mockito.ArgumentMatchers.any(), eq(HASH), anyString(), cb.capture());
+        try { cb.getValue().ok("0x" + "ab".repeat(32)); } catch (RuntimeException androidLogStub) { }
         verify(db).logEvent(HASH, SwapDb.EV_SECRET_OUT, "", "", "");
     }
 
