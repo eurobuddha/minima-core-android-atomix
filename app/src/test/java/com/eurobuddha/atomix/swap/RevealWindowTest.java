@@ -94,6 +94,27 @@ public class RevealWindowTest {
         verify(db).logEvent(HASH, SwapDb.EV_SECRET_OUT, "", "", "");
     }
 
+    private static com.eurobuddha.atomix.eth.EthHtlc.Contract contract(String receiver, long timelock) {
+        com.eurobuddha.atomix.eth.EthHtlc.Contract c = new com.eurobuddha.atomix.eth.EthHtlc.Contract();
+        c.contractId = "0x" + "cd".repeat(32); c.owner = "0x" + "11".repeat(20); c.receiver = receiver;
+        c.tokenContract = "0xdac17f958d2ee523a2206206994597c13d831ec7"; c.hashlock = HASH;
+        c.amount = java.math.BigInteger.valueOf(1_000_000); c.requestAmount = java.math.BigInteger.TEN; c.timelock = timelock;
+        return c;
+    }
+
+    @Test public void oneRpcCannotDecideAReveal() throws Exception {
+        // review 7 Nov: the same contract must read identically on a second, independent endpoint
+        com.eurobuddha.atomix.eth.EthHtlc eth = mock(com.eurobuddha.atomix.eth.EthHtlc.class);
+        com.eurobuddha.atomix.eth.EthHtlc.Contract seen = contract("0x" + "22".repeat(20), 5000);
+        when(eth.getContractOn(anyString(), eq(seen.contractId))).thenReturn(contract("0x" + "22".repeat(20), 5000));
+        assertTrue(engine.secondEndpointAgrees(eth, seen.contractId, seen));
+        when(eth.getContractOn(anyString(), eq(seen.contractId))).thenReturn(contract("0x" + "33".repeat(20), 5000));
+        try { assertFalse(engine.secondEndpointAgrees(eth, seen.contractId, seen)); } catch (RuntimeException androidLogStub) { }
+        when(eth.getContractOn(anyString(), eq(seen.contractId))).thenReturn(null);
+        try { assertFalse(engine.secondEndpointAgrees(eth, seen.contractId, seen)); } catch (RuntimeException androidLogStub) { }
+        assertFalse("timelock differs", SwapEngine.sameContract(seen, contract("0x" + "22".repeat(20), 5001)));
+    }
+
     @Test public void responderCollectIsNeverBlocked() throws Exception {
         sw.role = "RESPONDER";
         try { engine.checkCanSwapCoin(coin(HASH, 101), 100); } catch (RuntimeException androidLogStub) { }
