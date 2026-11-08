@@ -26,6 +26,6 @@ public final class SwapLog {
     /** For gates evaluated every ~90s: logs {@code key: m} only when {@code m} differs from the last one. */
     public static synchronized void skip(String key, String m) {
         String prev = LAST.put(key, m);
-        if (!m.equals(prev)) Log.d(TAG, key + ": " + m);
+        if (!m.equals(prev)) d(key + ": " + m);
     }
 }

@@ -90,6 +90,16 @@ public final class EthHtlc {
         return EthTx.sendOperation(rpc, creds, net.chainId, net.htlc, FunctionEncoder.encode(f), null, GAS_LOCK, authorized,"lock:"+hashlock.toLowerCase(java.util.Locale.ROOT));
     }
 
+    /** Fee-bump my still-unmined lock for {@code hashlock} (same bytes, today's price). Null if nothing to bump. */
+    public String repriceLock(String hashlock) throws Exception {
+        return EthTx.repriceOperation(rpc, creds, net.chainId, "lock:" + hashlock.toLowerCase(java.util.Locale.ROOT), GAS_LOCK);
+    }
+
+    /** Cancel my still-unmined lock for {@code hashlock} (0-value self-transfer at its nonce). Null if it settled. */
+    public String cancelLock(String hashlock) throws Exception {
+        return EthTx.cancelOperation(rpc, creds, net.chainId, "lock:" + hashlock.toLowerCase(java.util.Locale.ROOT));
+    }
+
     public String withdraw(String contractId, String preimage) throws Exception {
         Function f = new Function("withdraw",
                 Arrays.asList(new Bytes32(b32(contractId)), new Bytes32(b32(preimage))),
