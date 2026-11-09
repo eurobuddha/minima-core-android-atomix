@@ -85,4 +85,22 @@ public class LockRepriceCancelTest {
         engine.repriceMyEthLock(eth, done);
         verifyNoInteractions(eth);
     }
+
+    /** The USB-only live-test switch: re-pricing is held off (so the cancel is what runs); the cancel itself is unchanged. */
+    @Test public void stuckLockSwitchHoldsRepricingButNotTheCancel() throws Exception {
+        java.io.File sw = java.io.File.createTempFile("stuck-lock-test", "");
+        try {
+            com.eurobuddha.atomix.eth.EthTx.stuckLockSwitch = sw;
+            when(rpc.latestBlockTimestamp()).thenReturn(now);
+            engine.repriceMyEthLock(eth, makerLock(now + SwapEngine.REVEAL_MIN_SECS + 600));
+            verify(eth, never()).repriceLock(anyString());
+            SwapEngine.clearRetryMarkersForTest();
+            engine.repriceMyEthLock(eth, makerLock(now - 1));
+            verify(eth).cancelLock(HASH);
+            sw.delete();                                          // switch off: re-pricing is back
+            SwapEngine.clearRetryMarkersForTest();
+            engine.repriceMyEthLock(eth, makerLock(now + SwapEngine.REVEAL_MIN_SECS + 600));
+            verify(eth).repriceLock(HASH);
+        } finally { com.eurobuddha.atomix.eth.EthTx.stuckLockSwitch = null; sw.delete(); }
+    }
 }

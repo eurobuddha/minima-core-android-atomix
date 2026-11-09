@@ -1906,7 +1906,7 @@ public final class SwapEngine {
         if (s.myLegIsMinima || s.hash == null || s.myTimelock <= 0) return;
         SwapLog.skip("lockWatch " + s.hash, s.status + " timelock " + s.myTimelock);
         cancelExpiredEthLock(eth, s);
-        if (halted() || !lockWorthRepricing(s.role, s.myTimelock, ethNowSoft())) return;
+        if (halted() || com.eurobuddha.atomix.eth.EthTx.stuckLockTest() || !lockWorthRepricing(s.role, s.myTimelock, ethNowSoft())) return;
         if (!tryEthAttempt("repriceE:" + s.hash)) return;
         if (!ethGasAffordable(s.hash, EthHtlc.GAS_LOCK)) return;
         try {
