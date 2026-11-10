@@ -88,4 +88,35 @@ public class MinimaAPIMessages {
     public static String key(String zPrefix, String zName){
         return zPrefix + "." + zName;
     }
+
+    /** Security review 30 Oct: the SHA-256 signing-certificate digests a node package must carry before this app sends it
+     *  its pairing ids (REGISTER) or any command. A package name alone proves nothing — any app can be installed under a
+     *  name the user does not have, receive the ids and drive the node as this app. */
+    public static final String FAMILY_CERT   = "eca1383c9d27683a281fbe6355356267877dc2dd14d963d7cc289ca0700e517f";   // PandaBear, BlackBear, Pandamonium, our org.minimarex build
+    public static final String OFFICIAL_CERT = "b5d07fce1b381237aa3075941cceab7359c377ca0fe50a7d14dff47b321368b4";   // the official org.minima.core (minima-1.7.2.apk)
+    /** The SAME official org.minima.core as installed from the Google Play Store: Play App Signing re-signs it with this key
+     *  (read off Minima Core 1.7.4 / versionCode 36 pulled from a phone, 9 Nov 2026). Without it the Play Store node was
+     *  never sent a REGISTER and Dexicon never appeared in its Apps list. */
+    public static final String OFFICIAL_PLAY_CERT = "962210f5ce034eb5a2669a057aa2f8dc6f168c09b468cc2a0ee17c7b4407fccc";
+    public static final String REX_CERT      = "d4b3901a73f55d00728fce1d5a9167f3f873b2e52d8361fe5ab2c86a89dbc7d1";   // the earlier org.minimarex.minimacore (minima-1.2.4.apk)
+
+    public static String[] certsOf(String zNodePackage){
+        if (OFFICIAL_PACKAGE.equals(zNodePackage)) return new String[]{OFFICIAL_CERT, OFFICIAL_PLAY_CERT, FAMILY_CERT};
+        if (LEGACY_PACKAGE.equals(zNodePackage))   return new String[]{FAMILY_CERT, REX_CERT};
+        for (String[] node : NODES) if (node[0].equals(zNodePackage)) return new String[]{FAMILY_CERT};
+        return new String[0];
+    }
+
+    /** True only when zNodePackage is installed AND signed by one of its pinned certificates. */
+    public static boolean trusted(android.content.Context zContext, String zNodePackage){
+        if (zNodePackage == null) return false;
+        android.content.pm.PackageManager pm = zContext.getPackageManager();
+        for (String hex : certsOf(zNodePackage)) {
+            byte[] digest = new byte[32];
+            for (int i = 0; i < 32; i++) digest[i] = (byte) Integer.parseInt(hex.substring(2 * i, 2 * i + 2), 16);
+            try { if (pm.hasSigningCertificate(zNodePackage, digest, android.content.pm.PackageManager.CERT_INPUT_SHA256)) return true; }
+            catch (RuntimeException ignored) {}
+        }
+        return false;
+    }
 }

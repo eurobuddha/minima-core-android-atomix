@@ -277,6 +277,10 @@ public class MinimaAPI {
             listener.response(MinimaAPIResponse.failure("Node connection is unavailable or has too many unanswered requests."));
             return;
         }
+        if (!trustCheck.test(mContext, intent.getPackage())) {   // never hand the pairing ids to an impostor
+            deliver(id, MinimaAPIResponse.failure("That Minima node app is not signed by a known Minima build. Nothing was sent."));
+            return;
+        }
         // Final local dispatch boundary: no queue or discovery step follows this check.
         boolean allowed;
         try { allowed = authorized != null && authorized.getAsBoolean(); }
@@ -285,7 +289,13 @@ public class MinimaAPI {
             deliver(id, MinimaAPIResponse.failure("Market changed; refresh and try again. No command was sent."));
             return;
         }
-        try { mContext.sendBroadcast(intent); }
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 34) {   // let the node see who REALLY sent this (MinimaReceiver getSentFromPackage)
+                android.app.BroadcastOptions bo = android.app.BroadcastOptions.makeBasic();
+                bo.setShareIdentityEnabled(true);
+                mContext.sendBroadcast(intent, null, bo.toBundle());
+            } else mContext.sendBroadcast(intent);
+        }
         catch (RuntimeException failure) {
             deliver(id, MinimaAPIResponse.failure("Could not dispatch the node request. Outcome is unknown."));
         }
@@ -307,10 +317,39 @@ public class MinimaAPI {
         //Add the PRIVATE Minima uid
         intent.putExtra(MinimaAPIMessages.key(prefix, "REGISTER_MINIMAID"), MINIMA_ID);
 
+        //Security review 2026-11-07: prove who we are on EVERY Android version (the node reads the creator of this
+        //immutable PendingIntent; API 34+ also has shareIdentity). Sent only to the target node package below.
+        android.app.PendingIntent pi = proof();
+        if (pi != null) intent.putExtra(MinimaAPIMessages.key(prefix, "PROOF"), pi);
+
         //Set to send ONLY to that Minima Core APK
         intent.setPackage(zTarget);
 
         return intent;
+    }
+
+    /** The node-signature check (MinimaAPIMessages.trusted); swapped only by this package's JVM tests, which have no
+     *  installed node apps to check against. */
+    static java.util.function.BiPredicate<Context, String> trustCheck = MinimaAPIMessages::trusted;
+
+    private android.app.PendingIntent mProof;
+    private android.app.PendingIntent proof() {
+        try {
+            if (mProof == null) mProof = android.app.PendingIntent.getBroadcast(mContext, 0x5e1f,
+                    new Intent(mPackage + ".IPC_PROOF").setPackage(mPackage), android.app.PendingIntent.FLAG_IMMUTABLE);
+        } catch (RuntimeException unavailable) { return null; }   // sent without the proof (as before 2.2.11)
+        return mProof;
+    }
+
+    /** Security review 2026-11-07 (M-2): a node hands a NEW registration a one-time code, delivered only to this package.
+     *  Echo it back so the node marks this registration VERIFIED; a spoofer claiming this package never sees the code.
+     *  (Parity with Dexicon / apks/base minimaapi 2.2.23: without it BlackBear 2.2.23+ leaves this app "Not verified".) */
+    private void confirmIfAsked(String zTarget, JSONObject zReply){
+        String code = zReply == null ? "" : zReply.optString("confirm", "");
+        if (destroyed || code.isEmpty() || zReply.optBoolean("verified", false)) return;
+        Intent confirm = getBaseIntent("REGISTER", zTarget);
+        confirm.putExtra(MinimaAPIMessages.key(MinimaAPIMessages.prefixOf(zTarget), "CONFIRM"), code);
+        dispatch(confirm, r -> {});
     }
 
     private void Register(MinimaAPIListener zListener){
@@ -322,6 +361,7 @@ public class MinimaAPI {
             final String target = node[0];
             Intent intent = getBaseIntent("REGISTER", target);
             dispatch(intent, reply -> deadlines.post(() -> {
+                confirmIfAsked(target, reply);
                 if (destroyed || !discovering || generation != discoveryGeneration
                         || !reply.optBoolean("status", false)) return;
                 registrations.put(target, reply);

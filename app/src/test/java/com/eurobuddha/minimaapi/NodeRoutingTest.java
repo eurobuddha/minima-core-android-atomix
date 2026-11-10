@@ -14,6 +14,9 @@ import static org.mockito.Mockito.*;
 
 /** Exercise the public SDK with simulated Android broadcast delivery, without a live wallet. */
 public class NodeRoutingTest {
+    // no node apps are installed in the JVM: every target counts as signed by a known Minima build
+    @org.junit.BeforeClass public static void trustNodes() { MinimaAPI.trustCheck = (c, p) -> true; }
+    @org.junit.AfterClass public static void restoreTrust() { MinimaAPI.trustCheck = MinimaAPIMessages::trusted; }
     static final String CLASSIC = MinimaAPIMessages.MINIMA_BASE_CLASS;
     static final String BLOCK = MinimaAPI.BLOCK_PACKAGE;
     static final String OFFICIAL = MinimaAPIMessages.OFFICIAL_PACKAGE;
