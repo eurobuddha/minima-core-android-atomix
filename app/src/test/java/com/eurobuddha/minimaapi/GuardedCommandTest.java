@@ -17,6 +17,9 @@ import static org.junit.Assert.*;
 /** NodeRoutingTest's synthetic registration/reply protocol with the actual paused Android main queue. */
 @RunWith(RobolectricTestRunner.class) @Config(sdk=33) @LooperMode(LooperMode.Mode.PAUSED)
 public class GuardedCommandTest {
+    // no node apps are installed in the JVM: every target counts as signed by a known Minima build
+    @org.junit.BeforeClass public static void trustNodes() { MinimaAPI.trustCheck = (c, p) -> true; }
+    @org.junit.AfterClass public static void restoreTrust() { MinimaAPI.trustCheck = MinimaAPIMessages::trusted; }
     Application app; MinimaAPI api; List<JSONObject> replies;
     @Before public void setup() {
         app=RuntimeEnvironment.getApplication();replies=new ArrayList<>();
