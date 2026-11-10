@@ -37,7 +37,7 @@ public enum TradingContext {
 
     /** Bridged native-USDT (mxUSDT) ↔ ERC20 USDT (usdtSwap's market). Tether-green identity, parity pricing. */
     MXUSDT(
-            "mxusdt", "mxUSDT",
+            "mxusdt", "MxUSD",   // display label: the Minima token is MxUSD (key stays "mxusdt"; forCoinLabel reads old "mxUSDT" rows)
             MinimaHtlc.USDT_TOKENID,
             /* pricingParity */ true,
             /* orderBook */ "0x5553445453574150",                  // "USDTSWAP"
