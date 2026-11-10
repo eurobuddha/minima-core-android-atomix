@@ -27,14 +27,30 @@ public final class AtomixAccount {
     /** Swaps or OTC deals an earlier AtomiX made with the NODE's keys (Handover's own complete check, no time window):
      *  until they finish, AtomiX keeps the node-key path and does not offer the account — "finish before upgrading"
      *  (apks/atomix CLAUDE.md: drain all in-flight swaps before ANY wallet/mode migration). Never once an account exists. */
-    public static boolean legacyPositions(Context c) { return openPositions(c) != null; }
+    public static boolean legacyPositions(Context c) {
+        long now = System.currentTimeMillis();
+        if (now - cachedAt < 5_000L) return cached;
+        boolean v = openPositions(c) != null;
+        cached = v; cachedAt = now;
+        return v;
+    }
+    private static volatile boolean cached;
+    private static volatile long cachedAt;
 
     /** What is still open with the node's keys, or null (none / an account already exists here). */
     public static String openPositions(Context c) {
         if (new AccountVault(c).everCreated()) return null;
+        return openAny(c);
+    }
+
+    /** Everything open, whichever keys made it: swaps / deals (incl. one starting), a published market or OTC offer.
+     *  A lost account's restore passes this (only the SAME words may settle it). Every blocker is named. */
+    public static String openAny(Context c) {
         try {
-            List<String> open = Handover.inFlight(new SwapDb(c.getApplicationContext()), new OtcDb(c.getApplicationContext()).allDeals(), false);
-            if (!open.isEmpty()) return open.size() + (open.size() == 1 ? " swap or deal" : " swaps or deals") + " in flight";
+            StringBuilder b = new StringBuilder();
+            List<String> open = Handover.inFlight(new SwapDb(c.getApplicationContext()), new OtcDb(c.getApplicationContext()).allDeals(),
+                    com.eurobuddha.atomix.swap.SwapEngine.initiatorStarting());
+            if (!open.isEmpty()) b.append(open.size()).append(open.size() == 1 ? " swap or deal" : " swaps or deals").append(" in flight");
             // a market or OTC offer still published under the node identity: takers would lock against a key AtomiX no
             // longer answers for (they refund at the timelock, but never strand them) — withdraw it first
             android.content.SharedPreferences p = c.getSharedPreferences("atomix", Context.MODE_PRIVATE);
@@ -42,8 +58,8 @@ public final class AtomixAccount {
                     && (com.eurobuddha.atomix.swap.Order.fromConfigJson(p.getString("order_config", "")).hasLiquidity() || p.getBoolean("auto_publish", false));
             boolean otc = p.getBoolean("otc_enable", false) || p.getBoolean("otc_auto", false);
             boolean pending = p.getBoolean(Handover.P_TOMB_PENDING, false) || p.getBoolean(Handover.P_OTC_PENDING, false);
-            if (market || otc || pending) return "a published market or OTC offer (withdraw it first)";
-            return null;
+            if (market || otc || pending) b.append(b.length() > 0 ? ", " : "").append("a published market or OTC offer (withdraw it first)");
+            return b.length() == 0 ? null : b.toString();
         } catch (RuntimeException unreadable) { return "swap history unreadable"; }
     }
 
@@ -72,7 +88,14 @@ public final class AtomixAccount {
     private static String oldEthNotice(Activity a) {
         boolean tradedBefore = !a.getSharedPreferences("atomix", Context.MODE_PRIVATE).getString("swap_pk", "").isEmpty();
         return !tradedBefore ? null : "You have swapped with AtomiX here before. The Trading Account has its OWN Ethereum "
-                + "wallet: after this step AtomiX shows the new one. Move any ETH / USDT out of the old AtomiX Ethereum wallet "
-                + "(it comes from your node's seed) BEFORE you continue.";
+                + "wallet: after this step AtomiX shows the new one, and any ETH / USDT left in the old AtomiX Ethereum wallet "
+                + "(derived from your node's seed) is then reachable only from the AtomiX MiniDapp on your node. To move it "
+                + "here first, answer \"Yes — move it first\": AtomiX stays open on its Wallet screen until you restart it.";
+    }
+
+    /** A withdraw address: Mx only, its checksum verified (a pasted token / coin id as 0x would burn the funds). */
+    public static boolean validMx(String a) {
+        if (a == null || !a.startsWith("Mx")) return false;
+        try { return org.minima.objects.Address.convertMinimaAddress(a).getLength() == 32; } catch (RuntimeException bad) { return false; }
     }
 }

@@ -356,7 +356,8 @@ public class MainActivity extends AppCompatActivity {
         }
         if (com.eurobuddha.account.Account.everCreated(this)) {   // lost here: only the SAME words may settle what it holds
             offering = true;
-            com.eurobuddha.account.AccountSetup.show(this, node, this::onAccountReady, true, "funds");
+            String still = AtomixAccount.openAny(this);
+            com.eurobuddha.account.AccountSetup.show(this, node, this::onAccountReady, true, still == null ? "funds" : still);
             return;
         }
         String open = AtomixAccount.openPositions(this);
@@ -419,36 +420,46 @@ public class MainActivity extends AppCompatActivity {
         amt.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
         EditText to = new EditText(this); to.setHint("Minima address (Mx…)"); to.setText(nodeAddr); to.setTypeface(Design.mono());
         box.addView(amt); box.addView(to);
-        new AlertDialog.Builder(this, Design.dialogTheme()).setTitle("Withdraw " + ccy()).setView(box)
+        String name = TradingContext.MINIMA.tokenId.equalsIgnoreCase(tok) ? "MINIMA" : "MxUSD";
+        new AlertDialog.Builder(this, Design.dialogTheme()).setTitle("Withdraw " + name).setView(box)
                 .setMessage(nodeAddr.isEmpty() ? null : "Pre-filled with your node's own wallet address.")
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Review", (d, w) -> {
                     java.math.BigDecimal a, max;
-                    try { a = new java.math.BigDecimal(amt.getText().toString().trim()); max = new java.math.BigDecimal(minimaBal); }
-                    catch (Exception e) { toast("Enter an amount"); return; }
+                    String typed = amt.getText().toString().trim();
+                    if (!typed.matches("[0-9]+(\\.[0-9]+)?")) { toast("Enter the amount as plain digits, e.g. 10 or 0.5"); return; }
+                    try { a = new java.math.BigDecimal(typed); max = new java.math.BigDecimal(minimaBal); }
+                    catch (Exception e) { toast("Your balance is not loaded yet — try again in a moment"); return; }
+                    if (a.stripTrailingZeros().scale() > ("MxUSD".equals(name) ? 8 : 44)) { toast(name + " has at most " + ("MxUSD".equals(name) ? 8 : 44) + " decimals"); return; }
                     String addr = to.getText().toString().trim();
                     if (a.signum() <= 0 || a.compareTo(max) > 0) { toast("The amount must be above 0 and at most " + minimaBal); return; }
-                    if (!validMx(addr)) { toast("That is not a valid Minima address (Mx…)"); return; }
+                    if (!AtomixAccount.validMx(addr)) { toast("That is not a valid Minima address (Mx…)"); return; }
                     String amount = a.stripTrailingZeros().toPlainString();
                     String cmd = "send address:" + addr + " amount:" + amount + ("0x00".equals(tok) ? "" : " tokenid:" + tok);
-                    new AlertDialog.Builder(this, Design.dialogTheme()).setTitle("Withdraw " + amount + " " + ccy() + "?")
+                    new AlertDialog.Builder(this, Design.dialogTheme()).setTitle("Withdraw " + amount + " " + name + "?")
                             .setMessage("To:\n" + addr + "\n\nSigned by your Trading Account and posted through your node.")
                             .setNegativeButton("Cancel", null)
-                            .setPositiveButton("Withdraw", (x, y) -> node.cmd(cmd, new NodeApi.Cb() {
-                                @Override public void onResult(JSONObject j) {
-                                    JSONObject r = j.optJSONObject("response");
-                                    toast(j.optBoolean("status") ? "Withdrawal submitted" + (r == null ? "" : " · txpow " + r.optString("txpowid", "")) : "Not sent: " + j.optString("error", "refused"));
-                                    fetchMinimaBalance();
-                                }
-                                @Override public void onError(String m) { toast("Withdraw: " + m); }
-                            })).show();
+                            .setPositiveButton("Withdraw", (x, y) -> {
+                                // AtomiX's wallet lock (as its own consolidate): the send picks coins, never one a swap holds
+                                if (!SwapEngine.beginConsolidate()) { toast("A swap is using your wallet coins right now — try again in a moment"); return; }
+                                node.cmd(cmd, new NodeApi.Cb() {
+                                    @Override public void onResult(JSONObject j) {
+                                        SwapEngine.endConsolidate();
+                                        JSONObject r = j.optJSONObject("response");
+                                        String id = r == null ? "" : r.optString("txpowid", "");
+                                        if (!j.optBoolean("status")) { toast("Not sent: " + j.optString("error", "refused")); return; }
+                                        TextView t = new TextView(MainActivity.this); t.setText("Withdrawal submitted.\n\ntxpow\n" + id); t.setTextIsSelectable(true);
+                                        int pp = Design.dp(MainActivity.this, 20); t.setPadding(pp, pp / 2, pp, 0);
+                                        new AlertDialog.Builder(MainActivity.this, Design.dialogTheme()).setTitle("Withdraw " + amount + " " + name).setView(t)
+                                                .setPositiveButton("Copy txpow id", (dd, ww) -> copy(id, "Txpow id copied")).setNegativeButton("Close", null).show();
+                                        fetchMinimaBalance();
+                                    }
+                                    @Override public void onError(String m) { SwapEngine.endConsolidate(); toast("Withdraw: " + m); }
+                                });
+                            }).show();
                 }).show();
     }
 
-    static boolean validMx(String a) {
-        if (a == null || !a.startsWith("Mx")) return false;
-        try { return org.minima.objects.Address.convertMinimaAddress(a).getLength() == 32; } catch (RuntimeException bad) { return false; }
-    }
 
     @Override protected void onResume() {
         super.onResume();

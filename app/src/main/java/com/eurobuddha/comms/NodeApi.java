@@ -80,7 +80,9 @@ public class NodeApi implements com.eurobuddha.account.Transport {
     /** Transaction/PoW commands can take a long time on a phone; reads are quick. */
     private static long timeoutFor(String command) {
         String c = command == null ? "" : command.trim();
-        if (WriteSafety.writesFunds(c) || c.startsWith("send") || c.startsWith("consolidate") || c.startsWith("txnsign")
+        // postfrom / txnimport: the Trading Account's ONE write (its signed transaction) takes the write timeout too —
+        // NOT writesFunds (the outer WriteSafety.begin is still open: a second begin would refuse every account post)
+        if (WriteSafety.writesFunds(c) || c.startsWith("postfrom") || c.startsWith("txnimport") || c.startsWith("send") || c.startsWith("consolidate") || c.startsWith("txnsign")
                 || c.startsWith("txnpost") || c.startsWith("tokencreate") || c.startsWith("txnbasics")) {
             return WRITE_TIMEOUT_MS;
         }
@@ -221,6 +223,9 @@ public class NodeApi implements com.eurobuddha.account.Transport {
                 return;
             }
             case NO_ACCOUNT:
+                // seedrandom (the OLD node-derived Ethereum wallet) still reaches the node before the account exists, so
+                // its ETH / USDT can be moved out first; the node decides (admin-only on stock Minima Core)
+                if (command.trim().startsWith("seedrandom")) break;
                 if (!com.eurobuddha.atomix.AtomixAccount.legacyPositions(mContext)) { if (cb != null) mMain.post(() -> cb.onError(ERR_NO_ACCOUNT)); return; }
                 break;   // node-key swaps / offers from before the account settle the old way until finished
             default: break;
@@ -242,7 +247,8 @@ public class NodeApi implements com.eurobuddha.account.Transport {
         };
         final boolean isWrite = timeoutFor(command) == WRITE_TIMEOUT_MS;
         if (isWrite) mPendingWrites++;
-        final Runnable inFlight = () -> { };   // one per call: the account may still be posting — never release the SDK under it
+        final Runnable inFlight = new Runnable() { public void run() { } };   // a NEW object per call (a capture-free
+        // lambda is one shared instance): the account may still be posting — never release the SDK under it
         mPending.add(inFlight);
         com.eurobuddha.account.Account.get(mContext, this).submit(this, command, guard, timeoutFor(command), new com.eurobuddha.account.Transport.Reply() {
             private void end() { if (isWrite) mPendingWrites--; mPending.remove(inFlight); finishDestroy(); }

@@ -15,4 +15,11 @@ public class AtomixAccountTest {
         assertEquals("legacy vault seed unchanged", "0xAB", AtomixAccount.identityInput(new JSONObject().put("response", new JSONObject().put("seed", "0xAB"))));
         assertEquals("dexicon-doors-v1", AtomixAccount.DOORS_IDENTITY);
     }
+
+    @Test public void onlyAChecksummedMxAddressIsAccepted() {
+        org.junit.Assert.assertTrue(AtomixAccount.validMx("MxG086KWK8A5SEPVYPUJEQYH926KFUSCPHVGTM9K4UKG8FGJWNSG1DQP5TG1CUP"));
+        org.junit.Assert.assertFalse("one character changed", AtomixAccount.validMx("MxG086KWK8A5SEPVYPUJEQYH926KFUSCPHVGTM9K4UKG8FGJWNSG1DQP5TG1CUQ"));
+        org.junit.Assert.assertFalse("a token id is not an address", AtomixAccount.validMx("0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90"));
+        org.junit.Assert.assertFalse(AtomixAccount.validMx(null));
+    }
 }

@@ -5,7 +5,7 @@ import android.content.Intent;
 import android.os.Bundle;
 
 /**
- * Restarts PandaPools once, after the Trading Account is created, so every engine boots on the account. Runs in its OWN
+ * Restarts AtomiX once, after the Trading Account is created, so every engine boots on the account. Runs in its OWN
  * process (":phoenix"): started from the foreground activity, it ends the main process, then relaunches the main
  * activity — so the relaunch is never lost with the process it replaces. (Dexicon's and PandaPools', same shape.)
  */
