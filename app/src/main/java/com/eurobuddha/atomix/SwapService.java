@@ -259,10 +259,9 @@ public class SwapService extends Service {
     /** Derive the comms signing identity from the node seed (only needed to republish the maker's order). */
     private void deriveIdentity() {
         identityDeriving = true;
-        node.cmd("vault action:seed", new NodeApi.Cb() {
+        node.cmd(AtomixAccount.identityCommand(this), new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
-                JSONObject r = j.optJSONObject("response");
-                final String ikm = r == null ? "" : r.optString("seed", r.optString("phrase", ""));
+                final String ikm = AtomixAccount.identityInput(j);
                 if (ikm.isEmpty()) { identityDeriving = false; SwapLog.w("svc identity: empty seed reply (vault locked?)"); return; }
                 new Thread(() -> {
                     try {

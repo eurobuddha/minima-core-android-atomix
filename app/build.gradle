@@ -7,7 +7,7 @@ android {
     compileSdk 36
 
     defaultConfig {
-        applicationId "com.eurobuddha.atomix"
+        applicationId "com.eurobuddha.atomix" + (project.hasProperty('stockTest') ? '.stock' : '')
         minSdk 28
         targetSdk 35
         // versionCode is minor*100 + patch, the family convention (0.2.9 -> 209, 0.4.3 -> 403).
@@ -15,8 +15,8 @@ android {
         // and never broke, but it left the number far below where the convention puts it, so the
         // first "correct" numbering would have been a downgrade — which is exactly how Terminal IDE
         // stranded itself. Realigned here while 122 is still an increase over 22.
-        versionCode 214
-        versionName "0.2.14"
+        versionCode 215
+        versionName "0.2.15"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -73,6 +73,15 @@ android {
     }
 }
 
+// No jdk18on BouncyCastle on the APP's runtime classpath (what ships in the APK): it lacks gmss (minima.jar's Winternitz)
+// and duplicates every jdk15on class (duplicate-class dex failure). JVM-test classpaths are exempt (Robolectric brings it).
+configurations.configureEach { conf ->
+    if (conf.name.endsWith('RuntimeClasspath') && !conf.name.contains('UnitTest') && !conf.name.contains('AndroidTest')) conf.incoming.afterResolve { deps ->
+        def bad = deps.resolutionResult.allComponents.findAll { c -> c.moduleVersion != null && c.moduleVersion.group == 'org.bouncycastle' && c.moduleVersion.name.endsWith('jdk18on') }
+        if (!bad.isEmpty()) throw new GradleException("${conf.name}: BouncyCastle jdk18on is forbidden (no gmss; pin bcprov-jdk15on): ${bad*.moduleVersion.join(', ')}")
+    }
+}
+
 dependencies {
 
     implementation libs.appcompat
@@ -102,6 +111,11 @@ dependencies {
     // Ethereum: key derivation (secp256k1), legacy tx signing (RLP) and ABI encode/decode.
     // We do the JSON-RPC ourselves over HttpURLConnection, so we pull only the pure-Java web3j
     // modules (no okhttp/core HTTP stack) to stay light on Android. Bouncy Castle comes transitively.
+    // The shared Trading Account (com.eurobuddha.account, vendored from Dexicon): minima.jar's Transaction / Witness /
+    // TreeKey build and sign in-app. BouncyCastle PINNED strictly to 1.69 (family rule): minima.jar's Winternitz signer
+    // lives in org.bouncycastle.pqc.crypto.gmss, removed in 1.71+ (every jdk18on); web3j would otherwise pick the version.
+    implementation files('libs/minima.jar')
+    implementation('org.bouncycastle:bcprov-jdk15on') { version { strictly '1.69' } }
     implementation 'org.web3j:crypto:4.9.8'
     implementation 'org.web3j:abi:4.9.8'
     implementation 'org.web3j:rlp:4.9.8'

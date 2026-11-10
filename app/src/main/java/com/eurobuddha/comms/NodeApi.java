@@ -19,12 +19,16 @@ import com.eurobuddha.minimaapi.MinimaAPIListener;
  * - Detects the "app not enabled in Minima Core" reply and routes it to a pairing listener
  *   so the UI can show the approve-me banner.
  */
-public class NodeApi {
+public class NodeApi implements com.eurobuddha.account.Transport {
 
-    public interface Cb {
-        void onResult(JSONObject json);
-        void onError(String message);
-    }
+    /** The shared Trading Account takes AtomiX's settings before any Account.get (Account refuses until then). */
+    static { com.eurobuddha.account.Account.configure(com.eurobuddha.atomix.AtomixAccount.config()); }
+
+    /** A node reply; the same shape as the shared account's {@link com.eurobuddha.account.Transport.Reply}. */
+    public interface Cb extends com.eurobuddha.account.Transport.Reply {}
+
+    /** Wallet verb with no Trading Account (and no node-key swaps to finish): nothing is sent. */
+    public static final String ERR_NO_ACCOUNT = "Set up your Trading Account first (AtomiX signs with its own keys, never your node's).";
 
     public interface PairingListener {
         void onEnabled(boolean enabled);
@@ -200,8 +204,81 @@ public class NodeApi {
         catch (RuntimeException failure) { return false; }
     }
     public void cmd(String command, Cb cb) { cmd(command, () -> true, cb); }
+
+    /** Every command: the Trading Account answers wallet / txn verbs in-app (only a signed postfrom reaches the node). */
     public void cmd(String command, java.util.function.BooleanSupplier authorized, Cb cb) {
         if (Looper.myLooper() != Looper.getMainLooper()) { mMain.post(() -> cmd(command, authorized, cb)); return; }
+        if (command == null || command.trim().isEmpty()) { if (cb != null) cb.onError("Empty node command"); return; }
+        if (mReleased) { if (cb != null) mMain.post(() -> cb.onError("released")); return; }
+        switch (com.eurobuddha.account.Account.route(mContext, this, command)) {
+            case ACCOUNT: viaAccount(command, authorized, cb); return;
+            case NODE_THEN_NOTICE: {
+                com.eurobuddha.account.Account acct = com.eurobuddha.account.Account.get(mContext, this);
+                nodeCmd(command, authorized, cb == null && acct == null ? null : new Cb() {
+                    public void onResult(JSONObject j) { if (acct != null) acct.noticeLocks(command, j); if (cb != null) cb.onResult(j); }
+                    public void onError(String m) { if (cb != null) cb.onError(m); }
+                });
+                return;
+            }
+            case NO_ACCOUNT:
+                if (!com.eurobuddha.atomix.AtomixAccount.legacyPositions(mContext)) { if (cb != null) mMain.post(() -> cb.onError(ERR_NO_ACCOUNT)); return; }
+                break;   // node-key swaps / offers from before the account settle the old way until finished
+            default: break;
+        }
+        nodeCmd(command, authorized, cb);
+    }
+
+    /** The Trading Account posts it: the write journal (WriteSafety.begin) is its ONE guard, run right before the post
+     *  (once, even for a verb answered locally); a write whose outcome is unknown keeps the latch. */
+    private void viaAccount(String command, java.util.function.BooleanSupplier authorized, Cb cb) {
+        final boolean funds = WriteSafety.writesFunds(command) && !command.matches(".*(?:^|\\s)dryrun:true(?:\\s|$).*");
+        final String writeId = java.util.UUID.randomUUID().toString();
+        final boolean[] dispatched = {false}, latched = {false};
+        java.util.function.BooleanSupplier guard = () -> {
+            if (!authorized(authorized)) return false;
+            if (funds && !WriteSafety.begin(writePrefs(), writeId, command)) { latched[0] = true; logInterruptedOnce(); return false; }
+            dispatched[0] = true;
+            return true;
+        };
+        final boolean isWrite = timeoutFor(command) == WRITE_TIMEOUT_MS;
+        if (isWrite) mPendingWrites++;
+        final Runnable inFlight = () -> { };   // one per call: the account may still be posting — never release the SDK under it
+        mPending.add(inFlight);
+        com.eurobuddha.account.Account.get(mContext, this).submit(this, command, guard, timeoutFor(command), new com.eurobuddha.account.Transport.Reply() {
+            private void end() { if (isWrite) mPendingWrites--; mPending.remove(inFlight); finishDestroy(); }
+            public void onResult(JSONObject reply) {
+                try {
+                    if (funds && dispatched[0]) WriteSafety.returned(writePrefs(), writeId, WriteSafety.completeReply(command, reply));
+                    if (cb == null) return;
+                    try { cb.onResult(reply); }
+                    catch (RuntimeException callbackFailure) {
+                        if (funds) WriteSafety.callbackFailed(writePrefs(), writeId, command);
+                        try { cb.onError(funds ? ERR_WRITE_UNCERTAIN : "Bad node reply"); } catch (RuntimeException ignored) { }
+                    }
+                } finally { end(); }
+            }
+            public void onError(String message) {
+                try {
+                    String m = message;
+                    if (latched[0]) m = ERR_WRITE_UNCERTAIN;                                       // an earlier write is unresolved
+                    else if (!dispatched[0]) m = ERR_COMMAND_CHANGED;                              // never left the phone
+                    else if (funds) { WriteSafety.uncertain(writePrefs(), writeId); m = ERR_WRITE_UNCERTAIN; }   // may have run
+                    if (cb != null) try { cb.onError(m); } catch (RuntimeException ignored) { }
+                } finally { end(); }
+            }
+        });
+    }
+
+    /** Straight to the node: the Trading Account reaches it only through this (reads, newscript, the signed postfrom). */
+    @Override public void cmdDirect(String command, java.util.function.BooleanSupplier guard, long timeoutMs, com.eurobuddha.account.Transport.Reply reply) {
+        nodeCmd(command, guard == null ? () -> true : guard, reply == null ? null : new Cb() {
+            public void onResult(JSONObject j) { reply.onResult(j); }
+            public void onError(String m) { reply.onError(m); }
+        });
+    }
+
+    private void nodeCmd(String command, java.util.function.BooleanSupplier authorized, Cb cb) {
+        if (Looper.myLooper() != Looper.getMainLooper()) { mMain.post(() -> nodeCmd(command, authorized, cb)); return; }
         if (!authorized(authorized)) { if (cb != null) cb.onError(ERR_COMMAND_CHANGED); return; }
         if (command == null || command.trim().isEmpty()) { if (cb != null) cb.onError("Empty node command"); return; }
         // MA-11: after release, deliver an async onError rather than returning silently — a caller that set a

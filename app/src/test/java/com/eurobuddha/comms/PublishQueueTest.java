@@ -53,6 +53,7 @@ public class PublishQueueTest {
         final NodeApi node;
         Host() {
             Context context = mock(Context.class); when(context.getPackageName()).thenReturn("com.eurobuddha.atomix");
+            when(context.getApplicationContext()).thenReturn(context);   // no Trading Account here: the node-key (legacy) path
             SharedPreferences prefs = mock(SharedPreferences.class); SharedPreferences.Editor edit = mock(SharedPreferences.Editor.class);
             when(context.getSharedPreferences(anyString(), anyInt())).thenReturn(prefs); when(prefs.edit()).thenReturn(edit);
             when(prefs.getString(anyString(), anyString())).thenAnswer(i -> persisted.getOrDefault(i.getArgument(0), i.getArgument(1)));

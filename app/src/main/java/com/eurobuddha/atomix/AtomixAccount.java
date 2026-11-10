@@ -1,0 +1,78 @@
+package com.eurobuddha.atomix;
+
+import android.app.Activity;
+import android.content.Context;
+
+import com.eurobuddha.account.Account;
+import com.eurobuddha.account.AccountVault;
+import com.eurobuddha.atomix.swap.MinimaHtlc;
+import com.eurobuddha.atomix.swap.OtcDb;
+import com.eurobuddha.atomix.swap.SwapDb;
+
+import java.util.Arrays;
+import java.util.List;
+
+/**
+ * AtomiX's settings for the shared Trading Account (vendored from Dexicon, com.eurobuddha.account). The same 24 words
+ * open the same account in Dexicon, AtomiX and PandaPools; one of them holds it at a time.
+ */
+public final class AtomixAccount {
+    private AtomixAccount() {}
+
+    /** HTLC outputs carry the owner port (locks stay relevant to this node); reads of the HTLC watch for locks to us. */
+    public static Account.Config config() {
+        return new Account.Config("AtomiX", Arrays.asList(MinimaHtlc.HTLC_ADDRESSES), null, null, AtomixAccount::oldEthNotice);
+    }
+
+    /** Swaps or OTC deals an earlier AtomiX made with the NODE's keys (Handover's own complete check, no time window):
+     *  until they finish, AtomiX keeps the node-key path and does not offer the account — "finish before upgrading"
+     *  (apks/atomix CLAUDE.md: drain all in-flight swaps before ANY wallet/mode migration). Never once an account exists. */
+    public static boolean legacyPositions(Context c) { return openPositions(c) != null; }
+
+    /** What is still open with the node's keys, or null (none / an account already exists here). */
+    public static String openPositions(Context c) {
+        if (new AccountVault(c).everCreated()) return null;
+        try {
+            List<String> open = Handover.inFlight(new SwapDb(c.getApplicationContext()), new OtcDb(c.getApplicationContext()).allDeals(), false);
+            if (!open.isEmpty()) return open.size() + (open.size() == 1 ? " swap or deal" : " swaps or deals") + " in flight";
+            // a market or OTC offer still published under the node identity: takers would lock against a key AtomiX no
+            // longer answers for (they refund at the timelock, but never strand them) — withdraw it first
+            android.content.SharedPreferences p = c.getSharedPreferences("atomix", Context.MODE_PRIVATE);
+            boolean market = !p.getBoolean(com.eurobuddha.atomix.swap.PriceOracle.P_WITHDRAWN, false)
+                    && (com.eurobuddha.atomix.swap.Order.fromConfigJson(p.getString("order_config", "")).hasLiquidity() || p.getBoolean("auto_publish", false));
+            boolean otc = p.getBoolean("otc_enable", false) || p.getBoolean("otc_auto", false);
+            boolean pending = p.getBoolean(Handover.P_TOMB_PENDING, false) || p.getBoolean(Handover.P_OTC_PENDING, false);
+            if (market || otc || pending) return "a published market or OTC offer (withdraw it first)";
+            return null;
+        } catch (RuntimeException unreadable) { return "swap history unreadable"; }
+    }
+
+    /** The comms (order / OTC) identity's input: with a Trading Account, {@code seedrandom modifier:dexicon-doors-v1}
+     *  answered by the account — the SAME identity Dexicon's AtomiX has for these words (Dexicon DoorHost.deriveIdentities);
+     *  the node's phrase never enters the app (security review 30 Oct). Without an account (node-key swaps still settling
+     *  on the bears) the old vault seed, as before. */
+    public static String identityCommand(Context c) {
+        return new AccountVault(c).everCreated() ? "seedrandom modifier:" + DOORS_IDENTITY : "vault action:seed";
+    }
+    public static final String DOORS_IDENTITY = "dexicon-doors-v1";
+
+    /** The identity input from either reply: "0x" + 64 hex (seedrandom, as Dexicon's SeedSource) or the vault seed. */
+    public static String identityInput(org.json.JSONObject reply) {
+        org.json.JSONObject r = reply == null ? null : reply.optJSONObject("response");
+        if (r == null) return "";
+        if (r.has("seedrandom")) {
+            String hex = r.optString("seedrandom", "").trim();
+            if (hex.startsWith("0x") || hex.startsWith("0X")) hex = hex.substring(2);
+            return hex.matches("[0-9a-fA-F]{64}") ? "0x" + hex : "";
+        }
+        return r.optString("seed", r.optString("phrase", ""));
+    }
+
+    /** Swapped here before with the node's keys: the old Ethereum wallet came from the node's seed, not this account. */
+    private static String oldEthNotice(Activity a) {
+        boolean tradedBefore = !a.getSharedPreferences("atomix", Context.MODE_PRIVATE).getString("swap_pk", "").isEmpty();
+        return !tradedBefore ? null : "You have swapped with AtomiX here before. The Trading Account has its OWN Ethereum "
+                + "wallet: after this step AtomiX shows the new one. Move any ETH / USDT out of the old AtomiX Ethereum wallet "
+                + "(it comes from your node's seed) BEFORE you continue.";
+    }
+}

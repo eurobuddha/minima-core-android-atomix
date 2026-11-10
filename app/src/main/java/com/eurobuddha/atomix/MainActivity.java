@@ -331,8 +331,128 @@ public class MainActivity extends AppCompatActivity {
         super.onBackPressed();
     }
 
+    // ---- the Trading Account (shared com.eurobuddha.account, vendored from Dexicon) ----
+    private boolean offering;
+    private int lockedTries;
+    private final Runnable retryOffer = this::offerAccount;
+
+    /** First run (or a lost account): set up the Trading Account AtomiX signs with. Swaps, deals or a market opened with
+     *  the node's keys finish the old way first — the account is not offered while any remain. */
+    private void offerAccount() {
+        if (offering || node == null || com.eurobuddha.account.Account.get(this, node) != null) { lockedTries = 0; return; }
+        if (com.eurobuddha.account.Account.exists(this)) {   // vault present but the keystore is busy: retry, delete nothing
+            ui.removeCallbacks(retryOffer);
+            if (++lockedTries <= 6) { ui.postDelayed(retryOffer, 5_000); return; }
+            offering = true;
+            new AlertDialog.Builder(this, Design.dialogTheme()).setTitle("Trading Account locked")
+                    .setMessage("This phone's keystore will not unlock your Trading Account. You can restore it from its 24 words "
+                            + "(the locked copy is kept, never deleted).")
+                    .setPositiveButton("Restore", (d, w) -> {
+                        com.eurobuddha.account.Account.quarantineForRestore(this);
+                        com.eurobuddha.account.AccountSetup.show(this, node, this::onAccountReady, true, "funds");
+                    })
+                    .setNegativeButton("Later", (d, w) -> { offering = false; lockedTries = 0; }).show();
+            return;
+        }
+        if (com.eurobuddha.account.Account.everCreated(this)) {   // lost here: only the SAME words may settle what it holds
+            offering = true;
+            com.eurobuddha.account.AccountSetup.show(this, node, this::onAccountReady, true, "funds");
+            return;
+        }
+        String open = AtomixAccount.openPositions(this);
+        if (open != null) {
+            if (legacyNoticeShown) return;
+            legacyNoticeShown = true;
+            new AlertDialog.Builder(this, Design.dialogTheme()).setTitle("Finish these first")
+                    .setMessage("AtomiX still has " + open + " made with your node's own keys. They settle exactly as before. "
+                            + "Once they are finished, AtomiX moves to its own Trading Account (no ADMIN needed).")
+                    .setPositiveButton("OK", null).show();
+            return;
+        }
+        offering = true;
+        com.eurobuddha.account.AccountSetup.show(this, node, this::onAccountReady, false, null);
+    }
+    private boolean legacyNoticeShown;
+
+    /** The account was just created or restored: forget the old node-key swap identity (no node-key position remains —
+     *  offerAccount checked), so IdentityWatch adopts the account's key instead of halting; then restart once. */
+    private void onAccountReady() {
+        offering = false;
+        getSharedPreferences("atomix", MODE_PRIVATE).edit().remove("swap_addr").remove("swap_pk").commit();
+        IdentityWatch.forceNext();
+        try { stopService(new android.content.Intent(this, SwapService.class)); } catch (RuntimeException ignored) { }
+        RestartActivity.restart(this);
+    }
+
+    /** DEPOSIT: the Trading Account's address, in full and copyable. */
+    private void depositDialog() {
+        node.cmd("getaddress", new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                JSONObject r = j.optJSONObject("response");
+                String mx = r == null ? "" : r.optString("miniaddress", "");
+                if (mx.isEmpty()) { toast("Could not read your Trading Account address"); return; }
+                TextView t = new TextView(MainActivity.this); t.setText(mx); t.setTextIsSelectable(true); t.setTypeface(Design.mono());
+                int p = Design.dp(MainActivity.this, 20); t.setPadding(p, p / 2, p, 0);
+                new AlertDialog.Builder(MainActivity.this, Design.dialogTheme()).setTitle("Deposit to your Trading Account")
+                        .setMessage("Send MINIMA or MxUSD here from any Minima wallet (Minima Core → Send). Available to swap after 3 confirmations.")
+                        .setView(t).setPositiveButton("Copy address", (d, w) -> copy(mx, "Address copied"))
+                        .setNegativeButton("Close", null).show();
+            }
+            @Override public void onError(String m) { toast("Address: " + m); }
+        });
+    }
+
+    /** WITHDRAW: to the node's OWN wallet (its real getaddress, read straight from the node); Mx only (checksummed). */
+    private void withdrawDialog() {
+        String tok = TradingContext.active().tokenId;
+        node.cmdDirect("getaddress", null, 0, new com.eurobuddha.account.Transport.Reply() {
+            public void onResult(JSONObject j) { JSONObject r = j.optJSONObject("response"); withdrawForm(tok, r == null ? "" : r.optString("miniaddress", "")); }
+            public void onError(String m) { withdrawForm(tok, ""); }
+        });
+    }
+
+    private void withdrawForm(String tok, String nodeAddr) {
+        if (isFinishing() || isDestroyed()) return;
+        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL);
+        int p = Design.dp(this, 20); box.setPadding(p, p / 2, p, 0);
+        EditText amt = new EditText(this); amt.setHint("Amount (max " + minimaBal + ")");
+        amt.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        EditText to = new EditText(this); to.setHint("Minima address (Mx…)"); to.setText(nodeAddr); to.setTypeface(Design.mono());
+        box.addView(amt); box.addView(to);
+        new AlertDialog.Builder(this, Design.dialogTheme()).setTitle("Withdraw " + ccy()).setView(box)
+                .setMessage(nodeAddr.isEmpty() ? null : "Pre-filled with your node's own wallet address.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Review", (d, w) -> {
+                    java.math.BigDecimal a, max;
+                    try { a = new java.math.BigDecimal(amt.getText().toString().trim()); max = new java.math.BigDecimal(minimaBal); }
+                    catch (Exception e) { toast("Enter an amount"); return; }
+                    String addr = to.getText().toString().trim();
+                    if (a.signum() <= 0 || a.compareTo(max) > 0) { toast("The amount must be above 0 and at most " + minimaBal); return; }
+                    if (!validMx(addr)) { toast("That is not a valid Minima address (Mx…)"); return; }
+                    String amount = a.stripTrailingZeros().toPlainString();
+                    String cmd = "send address:" + addr + " amount:" + amount + ("0x00".equals(tok) ? "" : " tokenid:" + tok);
+                    new AlertDialog.Builder(this, Design.dialogTheme()).setTitle("Withdraw " + amount + " " + ccy() + "?")
+                            .setMessage("To:\n" + addr + "\n\nSigned by your Trading Account and posted through your node.")
+                            .setNegativeButton("Cancel", null)
+                            .setPositiveButton("Withdraw", (x, y) -> node.cmd(cmd, new NodeApi.Cb() {
+                                @Override public void onResult(JSONObject j) {
+                                    JSONObject r = j.optJSONObject("response");
+                                    toast(j.optBoolean("status") ? "Withdrawal submitted" + (r == null ? "" : " · txpow " + r.optString("txpowid", "")) : "Not sent: " + j.optString("error", "refused"));
+                                    fetchMinimaBalance();
+                                }
+                                @Override public void onError(String m) { toast("Withdraw: " + m); }
+                            })).show();
+                }).show();
+    }
+
+    static boolean validMx(String a) {
+        if (a == null || !a.startsWith("Mx")) return false;
+        try { return org.minima.objects.Address.convertMinimaAddress(a).getLength() == 32; } catch (RuntimeException bad) { return false; }
+    }
+
     @Override protected void onResume() {
         super.onResume();
+        offerAccount();
         FOREGROUND = true;     // Activity polls while visible; SwapService stands down
         startWatcher();
         if (pegTickRef != null) ui.post(pegTickRef);   // MI-12: re-arm the peg-preview poll if its dialog is still open (the tick self-cancels if not)
@@ -662,10 +782,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void setupIdentity() {
         identityRequesting = true;
-        node.cmd("vault action:seed", new NodeApi.Cb() {
+        node.cmd(AtomixAccount.identityCommand(this), new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
-                JSONObject r = j.optJSONObject("response");
-                String ikm = r == null ? "" : r.optString("seed", r.optString("phrase", ""));
+                String ikm = AtomixAccount.identityInput(j);
                 if (!ikm.isEmpty()) deriveIdentity(ikm);
                 else { identityRequesting = false; SwapLog.w("fg identity: empty seed reply (vault locked?)"); }
             }
@@ -3053,6 +3172,16 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout minimaCard = walletCard("Minima · available to swap", Util.fmt5(minimaBal) + " " + ccy(), minimaBreakdown() + "  ·  long-press for coins", Design.ACCENT());
         minimaCard.setOnLongClickListener(v -> { minimaCoinDump(); return true; });
         col.addView(minimaCard);
+        if (com.eurobuddha.account.Account.exists(this)) {   // the Trading Account: fund it, move funds back, see the words
+            LinearLayout acctRow = new LinearLayout(this);
+            TextView dep = Design.pill(this, "Deposit", Design.SURFACE2(), Design.ACCENT()); dep.setOnClickListener(v -> depositDialog());
+            TextView wd = Design.pill(this, "Withdraw", Design.SURFACE2(), Design.ACCENT()); wd.setOnClickListener(v -> withdrawDialog());
+            TextView words = Design.pill(this, "24 words", Design.SURFACE2(), Design.ACCENT()); words.setOnClickListener(v -> com.eurobuddha.account.AccountSetup.reveal(this));
+            LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            pl.setMargins(0, 0, Design.dp(this, 6), 0);
+            acctRow.addView(dep, pl); acctRow.addView(wd, new LinearLayout.LayoutParams(pl)); acctRow.addView(words, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            col.addView(acctRow);
+        }
         minimaBalView = (TextView) minimaCard.findViewWithTag(TAG_BAL);   // fresh ref each render (tree is rebuilt)
 
         try {
