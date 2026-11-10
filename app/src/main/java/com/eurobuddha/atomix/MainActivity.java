@@ -694,7 +694,7 @@ public class MainActivity extends AppCompatActivity {
     /** AlertDialog builder whose chrome follows the in-app theme (dark/light). */
     private AlertDialog.Builder dialog() { return new AlertDialog.Builder(this, Design.dialogTheme()); }
 
-    /** The active currency's coin label ("MINIMA" / "mxUSDT") for user-facing strings. */
+    /** The active currency's coin label ("MINIMA" / "MxUSD") for user-facing strings. */
     private static String ccy() { return TradingContext.active().coinLabel; }
 
     // ---- pairing + identity ----
