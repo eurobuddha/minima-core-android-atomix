@@ -273,6 +273,7 @@ public class MainActivity extends AppCompatActivity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         com.eurobuddha.minimaapi.ethereum.EthereumTransactions.initialize(getApplicationContext());
+        AtomixAccount.gateNewSwaps(this);
         ls = Sodium.get();
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         TradingContext.load(prefs);   // the selected currency — BEFORE Design.load so the theme opens in the right identity
@@ -349,14 +350,15 @@ public class MainActivity extends AppCompatActivity {
                             + "(the locked copy is kept, never deleted).")
                     .setPositiveButton("Restore", (d, w) -> {
                         com.eurobuddha.account.Account.quarantineForRestore(this);
-                        com.eurobuddha.account.AccountSetup.show(this, node, this::onAccountReady, true, "funds");
+                        String still = AtomixAccount.openSwaps(this);   // never "Start new" over a swap in flight
+                        com.eurobuddha.account.AccountSetup.show(this, node, this::onAccountReady, true, still == null ? "funds" : still);
                     })
                     .setNegativeButton("Later", (d, w) -> { offering = false; lockedTries = 0; }).show();
             return;
         }
         if (com.eurobuddha.account.Account.everCreated(this)) {   // lost here: only the SAME words may settle what it holds
             offering = true;
-            String still = AtomixAccount.openAny(this);
+            String still = AtomixAccount.openSwaps(this);
             com.eurobuddha.account.AccountSetup.show(this, node, this::onAccountReady, true, still == null ? "funds" : still);
             return;
         }
@@ -448,10 +450,10 @@ public class MainActivity extends AppCompatActivity {
                                         JSONObject r = j.optJSONObject("response");
                                         String id = r == null ? "" : r.optString("txpowid", "");
                                         if (!j.optBoolean("status")) { toast("Not sent: " + j.optString("error", "refused")); return; }
-                                        TextView t = new TextView(MainActivity.this); t.setText("Withdrawal submitted.\n\ntxpow\n" + id); t.setTextIsSelectable(true);
+                                        TextView t = new TextView(MainActivity.this); t.setText("Withdrawal submitted.\n\nPost id (before mining: your node mines it, so the id an explorer shows will differ)\n" + id); t.setTextIsSelectable(true);
                                         int pp = Design.dp(MainActivity.this, 20); t.setPadding(pp, pp / 2, pp, 0);
                                         new AlertDialog.Builder(MainActivity.this, Design.dialogTheme()).setTitle("Withdraw " + amount + " " + name).setView(t)
-                                                .setPositiveButton("Copy txpow id", (dd, ww) -> copy(id, "Txpow id copied")).setNegativeButton("Close", null).show();
+                                                .setPositiveButton("Copy post id", (dd, ww) -> copy(id, "Post id copied")).setNegativeButton("Close", null).show();
                                         fetchMinimaBalance();
                                     }
                                     @Override public void onError(String m) { SwapEngine.endConsolidate(); toast("Withdraw: " + m); }

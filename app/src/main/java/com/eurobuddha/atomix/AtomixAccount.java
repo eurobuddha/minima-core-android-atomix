@@ -43,6 +43,31 @@ public final class AtomixAccount {
         return openAny(c);
     }
 
+    /** No NEW liability (start, publish, OTC execute, responder lock) until the Trading Account exists: node-key swaps
+     *  from before it only drain, so "finish before upgrading" can never renew itself (review 10 Nov, M1). Settlement
+     *  never consults this gate. */
+    public static void gateNewSwaps(Context c) {
+        Context app = c.getApplicationContext();
+        com.eurobuddha.atomix.swap.SwapEngine.setHostGate(() -> !com.eurobuddha.account.Account.exists(app));
+    }
+
+    /** Only the old node-derived ETH wallet's derivation may reach the node without a loaded account, and only before an
+     *  account was ever created on this phone (review 10 Nov, H1). Pure, for the routing test. */
+    public static boolean oldEthToNode(boolean accountEverCreated, String command) {
+        return !accountEverCreated && command != null && command.trim().matches("seedrandom\\s+modifier:ethbridge");
+    }
+
+    /** Swaps and OTC deals still in flight (incl. one starting), whichever keys made them; null when none. What a LOST
+     *  account's restore must not "Start new" over: a published offer is not listed here — with the words gone nothing
+     *  can withdraw it, so it must not shut the user out (its takers refund at their timelock). */
+    public static String openSwaps(Context c) {
+        try {
+            List<String> open = Handover.inFlight(new SwapDb(c.getApplicationContext()), new OtcDb(c.getApplicationContext()).allDeals(),
+                    com.eurobuddha.atomix.swap.SwapEngine.initiatorStarting());
+            return open.isEmpty() ? null : open.size() + (open.size() == 1 ? " swap or deal" : " swaps or deals") + " in flight";
+        } catch (RuntimeException unreadable) { return "swap history unreadable"; }
+    }
+
     /** Everything open, whichever keys made it: swaps / deals (incl. one starting), a published market or OTC offer.
      *  A lost account's restore passes this (only the SAME words may settle it). Every blocker is named. */
     public static String openAny(Context c) {
@@ -54,7 +79,10 @@ public final class AtomixAccount {
             // a market or OTC offer still published under the node identity: takers would lock against a key AtomiX no
             // longer answers for (they refund at the timelock, but never strand them) — withdraw it first
             android.content.SharedPreferences p = c.getSharedPreferences("atomix", Context.MODE_PRIVATE);
-            boolean market = !p.getBoolean(com.eurobuddha.atomix.swap.PriceOracle.P_WITHDRAWN, false)
+            // withdrawn only counts once its tombstone is CONFIRMED on the wire (P_WITHDRAWN is set before it goes out)
+            boolean withdrawn = p.getBoolean(com.eurobuddha.atomix.swap.PriceOracle.P_WITHDRAWN, false)
+                    && p.getBoolean(com.eurobuddha.atomix.swap.PriceOracle.P_TOMBSTONED, false);
+            boolean market = !withdrawn
                     && (com.eurobuddha.atomix.swap.Order.fromConfigJson(p.getString("order_config", "")).hasLiquidity() || p.getBoolean("auto_publish", false));
             boolean otc = p.getBoolean("otc_enable", false) || p.getBoolean("otc_auto", false);
             boolean pending = p.getBoolean(Handover.P_TOMB_PENDING, false) || p.getBoolean(Handover.P_OTC_PENDING, false);

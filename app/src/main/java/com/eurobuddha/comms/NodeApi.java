@@ -223,9 +223,11 @@ public class NodeApi implements com.eurobuddha.account.Transport {
                 return;
             }
             case NO_ACCOUNT:
-                // seedrandom (the OLD node-derived Ethereum wallet) still reaches the node before the account exists, so
-                // its ETH / USDT can be moved out first; the node decides (admin-only on stock Minima Core)
-                if (command.trim().startsWith("seedrandom")) break;
+                // The OLD node-derived Ethereum wallet still reaches the node BEFORE any account exists here, so its
+                // ETH / USDT can be moved out first (the node decides; admin-only on stock Minima Core). Never once an
+                // account exists: a keystore busy after boot, or a lost account, must not swap in the node's ETH key or
+                // comms identity (they would then be published and stick for the life of the service).
+                if (com.eurobuddha.atomix.AtomixAccount.oldEthToNode(com.eurobuddha.account.Account.everCreated(mContext), command)) break;
                 if (!com.eurobuddha.atomix.AtomixAccount.legacyPositions(mContext)) { if (cb != null) mMain.post(() -> cb.onError(ERR_NO_ACCOUNT)); return; }
                 break;   // node-key swaps / offers from before the account settle the old way until finished
             default: break;

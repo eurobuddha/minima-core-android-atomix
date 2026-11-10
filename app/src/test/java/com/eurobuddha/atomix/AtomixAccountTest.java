@@ -22,4 +22,17 @@ public class AtomixAccountTest {
         org.junit.Assert.assertFalse("a token id is not an address", AtomixAccount.validMx("0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90"));
         org.junit.Assert.assertFalse(AtomixAccount.validMx(null));
     }
+
+    /** Review 10 Nov, H1: with no account LOADED the old node ETH derivation may reach the node only if no account was
+     *  ever created here — a keystore busy after boot, or a lost account, must never swap in the node's ETH key, and no
+     *  other seedrandom (the comms identity) may ever go to the node this way. */
+    @Test public void onlyTheOldEthDerivationAndOnlyBeforeAnyAccountReachesTheNode() {
+        org.junit.Assert.assertTrue(AtomixAccount.oldEthToNode(false, "seedrandom modifier:ethbridge"));
+        org.junit.Assert.assertTrue(AtomixAccount.oldEthToNode(false, "  seedrandom modifier:ethbridge "));
+        org.junit.Assert.assertFalse("account exists but is locked / lost", AtomixAccount.oldEthToNode(true, "seedrandom modifier:ethbridge"));
+        org.junit.Assert.assertFalse("the comms identity never", AtomixAccount.oldEthToNode(false, "seedrandom modifier:dexicon-doors-v1"));
+        org.junit.Assert.assertFalse(AtomixAccount.oldEthToNode(false, "seedrandom modifier:ethbridge2"));
+        org.junit.Assert.assertFalse(AtomixAccount.oldEthToNode(false, "send amount:1 address:Mx"));
+        org.junit.Assert.assertFalse(AtomixAccount.oldEthToNode(false, null));
+    }
 }
