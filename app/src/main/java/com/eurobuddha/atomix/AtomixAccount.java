@@ -79,9 +79,11 @@ public final class AtomixAccount {
             // a market or OTC offer still published under the node identity: takers would lock against a key AtomiX no
             // longer answers for (they refund at the timelock, but never strand them) — withdraw it first
             android.content.SharedPreferences p = c.getSharedPreferences("atomix", Context.MODE_PRIVATE);
-            // withdrawn only counts once its tombstone is CONFIRMED on the wire (P_WITHDRAWN is set before it goes out)
+            // withdrawn only counts once its tombstone is on the wire: the peg sets P_WITHDRAWN first (auto_publish stays on)
+            // and P_TOMBSTONED once sent; the hand-over turns auto_publish off and clears P_TOMB_PENDING once sent
             boolean withdrawn = p.getBoolean(com.eurobuddha.atomix.swap.PriceOracle.P_WITHDRAWN, false)
-                    && p.getBoolean(com.eurobuddha.atomix.swap.PriceOracle.P_TOMBSTONED, false);
+                    && (p.getBoolean(com.eurobuddha.atomix.swap.PriceOracle.P_TOMBSTONED, false)
+                        || (!p.getBoolean("auto_publish", false) && !p.getBoolean(Handover.P_TOMB_PENDING, false)));
             boolean market = !withdrawn
                     && (com.eurobuddha.atomix.swap.Order.fromConfigJson(p.getString("order_config", "")).hasLiquidity() || p.getBoolean("auto_publish", false));
             boolean otc = p.getBoolean("otc_enable", false) || p.getBoolean("otc_auto", false);

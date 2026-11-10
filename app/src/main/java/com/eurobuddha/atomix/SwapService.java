@@ -540,7 +540,10 @@ public class SwapService extends Service {
         CommsTransport.SendCb cb = new CommsTransport.SendCb() {
             @Override public void onSent(String txpowid) {
                 PublishGate.release(gate);
-                prefs.edit().putBoolean(which, false).commit();
+                SharedPreferences.Editor done = prefs.edit().putBoolean(which, false);
+                // the market's tombstone is on the wire: the withdrawn market is gone (AtomixAccount.openAny reads this)
+                if (Handover.P_TOMB_PENDING.equals(which)) done.putBoolean(com.eurobuddha.atomix.swap.PriceOracle.P_TOMBSTONED, true);
+                done.commit();
                 SwapLog.d("handover " + which + " posted " + txpowid);
                 h.post(handoverRetry);   // the next one, if any
             }
