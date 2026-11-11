@@ -3209,7 +3209,8 @@ public class MainActivity extends AppCompatActivity {
             }
         } catch (NumberFormatException | ArithmeticException ignored) { /* balance is not available yet */ }
 
-        String addrLine = ethAddr == null ? (ethErr == null ? "deriving from node seed…" : "—") : ethAddr;
+        String addrLine = ethAddr == null ? (ethErr == null ? (com.eurobuddha.account.Account.exists(this)
+                ? "deriving from your Trading Account…" : "deriving from node seed…") : "—") : ethAddr;
         LinearLayout ethCard = walletCard("Ethereum · " + net.label, ethBal, addrLine, Design.TEXT());
         if (ethAddr != null) ethCard.setOnClickListener(v -> copy(ethAddr, "Ethereum address copied"));
         col.addView(ethCard);
@@ -3346,7 +3347,8 @@ public class MainActivity extends AppCompatActivity {
                         + "To trade you'll need:\n"
                         + "•  Minima Core running, with AtomiX enabled in Apps\n"
                         + "•  Some " + ccy() + " to sell — or USDT plus a little ETH (for gas) to buy " + ccy() + "\n\n"
-                        + "Your keys are derived from your Minima node seed, so it's the same wallet on any device.\n\n"
+                        + "Your keys come from your Trading Account's 24 words — kept only in this app and on your paper, never "
+                        + "on the node. The same words open the same account in AtomiX, Dexicon or PandaPools, one app at a time.\n\n"
                         + "Tabs:  Swap (quick trade)  ·  Wallet (your money)  ·  Activity (your swaps)  ·  "
                         + "Market (full order book)  ·  OTC (private deals).\n\n"
                         + "OTC lets you negotiate a size + price directly with a liquidity provider — propose, "
@@ -4199,7 +4201,8 @@ public class MainActivity extends AppCompatActivity {
         dialog()
                 .setTitle("Export ETH private key")
                 .setMessage("This key controls your ETH funds. Anyone who sees it can take them. It is also "
-                        + "derived from your Minima node seed. Never share it or type it into a website.")
+                        + (com.eurobuddha.account.Account.exists(this) ? "derived from your Trading Account's 24 words"
+                                : "derived from your Minima node seed") + ". Never share it or type it into a website.")
                 .setPositiveButton("Reveal key", (d, w) -> revealKeyDialog())
                 .setNegativeButton("Cancel", null)
                 .show();
