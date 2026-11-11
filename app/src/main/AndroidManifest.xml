@@ -70,6 +70,10 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Utxo"
         tools:targetApi="31">
+        <!-- Leaf share of the Trading Account (com.eurobuddha.account.Family / AccountKeys SLOT_ATOMIX): siblings read this to
+             know this build signs only its own one-time leaves. -->
+        <meta-data android:name="com.eurobuddha.account.leafSlot" android:value="1" />
+
         <!-- Restarts the app once after the Trading Account is created (its own process, so the relaunch survives). -->
         <activity
             android:name=".RestartActivity"

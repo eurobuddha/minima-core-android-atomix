@@ -21,7 +21,8 @@ public final class AtomixAccount {
 
     /** HTLC outputs carry the owner port (locks stay relevant to this node); reads of the HTLC watch for locks to us. */
     public static Account.Config config() {
-        return new Account.Config("AtomiX", Arrays.asList(MinimaHtlc.HTLC_ADDRESSES), null, null, AtomixAccount::oldEthNotice);
+        return new Account.Config("AtomiX", Arrays.asList(MinimaHtlc.HTLC_ADDRESSES), null, null, AtomixAccount::oldEthNotice,
+                com.eurobuddha.account.AccountKeys.SLOT_ATOMIX);   // AtomiX's own share of every key's one-time leaves
     }
 
     /** Swaps or OTC deals an earlier AtomiX made with the NODE's keys (Handover's own complete check, no time window):
