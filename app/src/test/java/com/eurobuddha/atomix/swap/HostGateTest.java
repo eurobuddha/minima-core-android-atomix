@@ -256,7 +256,7 @@ public class HostGateTest {
         myMinimaLock(1000);
         liveEvents();
         coinRead(false);
-        com.eurobuddha.atomix.IdentityWatch.noteMinimaOrphaned(MY_PK, null);
+        com.eurobuddha.atomix.IdentityWatch.setMismatchForTest(true, false);
         pass(2000);
         com.eurobuddha.atomix.IdentityWatch.resetForTest();
         engine.setMyPubkeys(Collections.emptySet());
