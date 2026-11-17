@@ -3746,7 +3746,9 @@ public class MainActivity extends AppCompatActivity {
         price.setTypeface(best ? Design.monoBold() : Design.mono());
 
         if (leftHalf) { size.setPadding(0, 0, dp(8), 0); h.addView(size); h.addView(price); }
-        else { price.setPadding(dp(8), 0, 0, 0); h.addView(price); h.addView(size); }
+        // the offer's size sits 8dp after its price, as a bid's size sits 8dp before its price (the padding was on the
+        // wrong side: the size touched the price and the price stood off the divider)
+        else { price.setPadding(0, 0, dp(8), 0); h.addView(price); h.addView(size); }
         return h;
     }
 
