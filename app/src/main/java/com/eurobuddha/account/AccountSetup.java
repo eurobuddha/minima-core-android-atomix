@@ -1,4 +1,4 @@
-// VENDORED VERBATIM from apks/dexicon 0.3.50 (408ecaf) com/eurobuddha/account/AccountSetup.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
+// VENDORED VERBATIM from apks/dexicon 0.3.69 (8816c4c) com/eurobuddha/account/AccountSetup.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
 package com.eurobuddha.account;
 
 import android.app.Activity;
@@ -38,6 +38,77 @@ public final class AccountSetup {
     /** The user chose to move funds out of an old wallet first: no setup offer again until the app restarts. */
     private static volatile boolean deferred;
     private static Transport lastNode;
+
+    // ---- seeds, in plain words (owner, 23 Nov 2026): before the first choice, in "About", beside the same-words paths ----
+    public static final String SEPARATE = "Your Trading Account is a separate wallet from your Minima node's wallet. Even with the "
+            + "same 24 words it has its own addresses and its own balance: coins in your node wallet do not appear here until "
+            + "you deposit them.";
+    public static final String NEW_WORDS = "A new set of words for the Trading Account is the better choice: then one leaked "
+            + "phrase cannot cost you both wallets.";
+    public static final String SAME_WORDS = "If you do use the same words: write them down once and keep them as safe as you "
+            + "would for both wallets.";
+    /** True to AccountKeys: each phone's leaf counter is raised to a wall-clock floor (one leaf per 2 s), and a restore
+     *  starts past every leaf an earlier install signed. Not only "at the same moment": a phone that resumes after the
+     *  account was restored elsewhere can land on the restored phone's leaves for about a day (restore floor: the time
+     *  floor + 1,800 + 40,000 leaves at 2 s), so the first must stop for good. */
+    public static final String ONE_DEVICE = "Use a Trading Account on ONE device at a time. Restoring it on a second phone is "
+            + "fine once the first has stopped using it for good; two devices trading with the same Trading Account can "
+            + "expose its keys.";
+    static final String[] SEEDS = {SEPARATE, NEW_WORDS, SAME_WORDS, ONE_DEVICE};
+    /** The one-line reminder where the node's own words could be typed (Restore) or used (node seed). */
+    public static final String SAME_WORDS_REMINDER = "Using your node's 24 words? This is still a separate wallet with its own "
+            + "balance — keep the words as safe as you would for both wallets.";
+    /** Under the words in "Show 24 words" (owner, 23 Nov 2026). */
+    public static final String REVEAL_NOTE = "These words restore your Trading Account only. Your node's wallet is separate, "
+            + "even if you used the same words.";
+    public static final String NODE_SEED_NOTE = "This account comes from your node's seed: your node's 24 words restore it. "
+            + "It is still a separate wallet with its own balance.";
+
+    /** The four points as a short list. */
+    static String seeds() {
+        StringBuilder b = new StringBuilder();
+        for (String s : SEEDS) b.append(b.length() == 0 ? "" : "\n").append("•  ").append(s);
+        return b.toString();
+    }
+
+    /** The same text for an existing account (its info button): never shown again on its own. */
+    public static void about(Activity a) {
+        dialog(a).setTitle("About your Trading Account").setView(pad(a, text(a, seeds(), false))).setPositiveButton("OK", null).show();
+    }
+
+    /**
+     * "Search the archive again" ({@link Account#searchArchive}), the same in every app: what it does, then progress and
+     * the plain result in place. Closing the dialog never drops the answer: the account keeps the latest progress or
+     * result and this shows it when opened again (a running search is followed again). The dialog is held only weakly,
+     * so a running search never keeps a closed screen alive. {@code node}: the calling screen's connection.
+     */
+    public static void searchArchive(Activity a, Transport node) {
+        Account acc = Account.get(a, node);
+        if (acc == null) { Toast.makeText(a, "The Trading Account is not open yet. Try again in a moment.", Toast.LENGTH_LONG).show(); return; }
+        String last = acc.archiveSearchText();
+        AlertDialog d = dialog(a).setTitle("Search the archive again")
+                .setMessage(last == null ? Account.ARCHIVE_SEARCH_ABOUT : last)
+                .setPositiveButton(last == null ? "Search" : "Search again", null).setNegativeButton("Close", null).create();
+        searchDialog = new java.lang.ref.WeakReference<>(d);
+        d.setOnShowListener(x -> {
+            android.widget.Button go = d.getButton(AlertDialog.BUTTON_POSITIVE);
+            go.setEnabled(!acc.archiveSearching());
+            go.setOnClickListener(v -> {
+                go.setEnabled(false);
+                acc.searchArchive(node, AccountSetup::searchShown, AccountSetup::searchEnded);   // static: captures no screen
+            });
+        });
+        d.show();
+    }
+    private static java.lang.ref.WeakReference<AlertDialog> searchDialog = new java.lang.ref.WeakReference<>(null);
+    private static void searchShown(String s) { AlertDialog d = searchDialog.get(); if (d != null && d.isShowing()) d.setMessage(s); }
+    private static void searchEnded(String s) {
+        AlertDialog d = searchDialog.get();
+        if (d == null || !d.isShowing()) return;
+        d.setMessage(s);
+        android.widget.Button go = d.getButton(AlertDialog.BUTTON_POSITIVE);
+        if (go != null) { go.setText("Search again"); go.setEnabled(true); }
+    }
 
     private static String app() { return Account.config().appName; }
     private static AlertDialog.Builder dialog(Activity a) {
@@ -87,7 +158,7 @@ public final class AccountSetup {
         TextView body = text(a, app() + " keeps its own Trading Account and signs every trade itself. Your Minima node only "
                 + "reads the chain and posts what " + app() + " has already signed — so no other app on this phone can touch "
                 + "these funds, and " + app() + " needs no ADMIN rights.\n\nMove funds in from your Minima wallet with "
-                + "RECEIVE; send them back any time."
+                + "RECEIVE; send them back any time.\n\n" + seeds()
                 + (tradedBefore ? "\n\n⚠ " + notice : ""), false);
         AlertDialog main = dialog(a).setTitle("Your Trading Account").setView(pad(a, body)).setCancelable(false)
                 .setPositiveButton("Create new", (d, w) -> create(a, done))
@@ -201,6 +272,7 @@ public final class AccountSetup {
                 + "everywhere else first.", false));
         box.addView(text(a, "Type each word in its box. A box completes itself as soon as the word is certain; tap a "
                 + "suggestion for short words. You can also paste all 24 words into box 1.", false));
+        box.addView(text(a, SAME_WORDS_REMINDER, false));
         box.addView(words.view);
         AlertDialog d = dialog(a).setTitle("Restore Trading Account").setView(pad(a, box))
                 .setCancelable(false).setPositiveButton("Restore", null).setNegativeButton("Back", (x, w) -> back(a, done)).create();
@@ -226,7 +298,7 @@ public final class AccountSetup {
         dialog(a).setTitle("Derive from your node's seed")
                 .setView(pad(a, text(a, app() + " will read ONE value derived from your node's seed. That needs ADMIN once: "
                         + "give " + app() + " ADMIN in Minima Core → Apps, tap Derive, then switch ADMIN off again.\n\n"
-                        + "Your node's 24 words will then also restore this account. Note: on Minima Core any app you have "
+                        + "Your node's 24 words will then also restore this account. " + SEPARATE + "\n\nNote: on Minima Core any app you have "
                         + "enabled could compute the same value, so a new phrase (Create new) is the safer choice.", false)))
                 .setCancelable(false)
                 .setPositiveButton("Derive", (d, w) -> { node.reRegister(); new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> node.cmdDirect("seedrandom modifier:" + AccountKeys.DOMAIN, null, 0, new Transport.Reply() {
@@ -253,13 +325,21 @@ public final class AccountSetup {
             AccountVault vault = new AccountVault(a);
             String p = vault.revealPhrase();
             boolean any = AccountVault.MODE_ANY.equals(vault.mode());
-            if (p == null) { Toast.makeText(a, "This account comes from your node's seed: your node's 24 words restore it.", Toast.LENGTH_LONG).show(); return; }
+            if (p == null) { Toast.makeText(a, NODE_SEED_NOTE, Toast.LENGTH_LONG).show(); return; }
             // No Copy: the 24 words never go on a clipboard any other app can read. Write them down.
-            AlertDialog d = dialog(a).setTitle(any ? "Trading Account phrase" : "Trading Account words").setView(pad(a, text(a, (any ? p : numbered(p)), true)))
-                    .setPositiveButton("Done", null).create();
+            String[] t = revealTexts(p, any);
+            LinearLayout box = new LinearLayout(a); box.setOrientation(LinearLayout.VERTICAL);
+            box.addView(text(a, t[1], true));
+            box.addView(text(a, t[2], false));
+            AlertDialog d = dialog(a).setTitle(t[0]).setView(pad(a, box)).setPositiveButton("Done", null).create();
             secure(d);
             d.show();
         } catch (Exception e) { Toast.makeText(a, e.getMessage(), Toast.LENGTH_LONG).show(); }
+    }
+
+    /** Title, the words exactly as stored (the phrase as made, or the 24 words numbered), and the note shown under them. */
+    static String[] revealTexts(String phrase, boolean any) {
+        return new String[]{any ? "Trading Account phrase" : "Trading Account words", any ? phrase : numbered(phrase), REVEAL_NOTE};
     }
 
     /** No screenshots, screen recordings or recents thumbnails of the words. */

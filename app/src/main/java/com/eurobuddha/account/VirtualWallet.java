@@ -1,4 +1,4 @@
-// VENDORED VERBATIM from apks/dexicon 0.3.50 (408ecaf) com/eurobuddha/account/VirtualWallet.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
+// VENDORED VERBATIM from apks/dexicon 0.3.69 (8816c4c) com/eurobuddha/account/VirtualWallet.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
 package com.eurobuddha.account;
 
 import org.json.JSONArray;
@@ -70,6 +70,10 @@ public final class VirtualWallet {
          *  ({@link #archiveWanted}); 0 = never. */
         default int archivedKeys(String nodeId) { return Integer.MAX_VALUE; }
         default void setArchivedKeys(String nodeId, int keyCount) {}
+        /** The node lost an account address and the archive mark is not reset yet ({@link #archiveWanted}). Durable
+         *  (synchronous), so a process death before the node's status answers cannot lose it. */
+        default boolean resetPending() { return false; }
+        default void setResetPending(boolean pending) {}
     }
 
     /** Wall clock (tests inject one). */
@@ -137,25 +141,41 @@ public final class VirtualWallet {
     /** Register every account script with the node (trackall:true) unless already tracked. Re-run periodically: any
      *  companion can downgrade a script row with its own newscript (newscript REPLACES the row). */
     public synchronized void ensureTracked() throws Exception {
+        boolean lost = false;
         for (int i = 0; i < store.keyCount(); i++) {
-            track(i);
             String a = keys.address(i);
+            // a lost row lost the address's coins from the node's wallet too: look for them in its own chain again
+            if (track(i)) { lost = true; recovered.remove(norm(a)); }
             if (!recovered.contains(norm(a)) && recoverExisting(a)) recovered.add(norm(a));
+        }
+        if (lost) {   // applied by archiveWanted; if the node's status fails now, by the next one (kept in the store)
+            lostTracking = true; archiveGeneration++;
+            store.setResetPending(true);
+            try { archiveWanted(); } catch (Exception later) { }
         }
     }
     /** Addresses whose existing coins were looked for on THIS node in this process (a node switch restarts the app). */
     private final Set<String> recovered = new HashSet<>();
+    /** The node had stopped tracking an account address ({@link #archiveWanted}); also in the store until applied. */
+    private boolean lostTracking;
+    /** Bumped on every such loss: a pass that started before it must not record the mark after it ({@link #markArchived}). */
+    private int archiveGeneration;
 
-    /** True when the node was NOT tracking this address yet (it was just registered). */
+    /** True when the node was NOT tracking this address and now does: registered, then READ BACK as tracked. A node that
+     *  never reports the row as tracked keeps answering false, so it can never re-open the archive pass in a loop. */
     private boolean track(int i) throws Exception {
         String addr = keys.address(i);
         scripts.put(norm(addr), keys.script(i));
-        JSONObject s = node.call("scripts address:" + addr);
-        JSONObject r = s.optJSONObject("response");
-        if (s.optBoolean("status") && r != null && addr.equalsIgnoreCase(r.optString("address")) && r.optBoolean("track")) return false;
+        if (tracked(addr)) return false;
         JSONObject n = node.call("newscript trackall:true script:\"" + keys.script(i) + "\"");
         if (!n.optBoolean("status")) throw new IllegalStateException("could not register account address " + addr + ": " + err(n));
-        return true;
+        return tracked(addr);
+    }
+
+    private boolean tracked(String addr) throws Exception {
+        JSONObject s = node.call("scripts address:" + addr);
+        JSONObject r = s.optJSONObject("response");
+        return s.optBoolean("status") && r != null && addr.equalsIgnoreCase(r.optString("address")) && r.optBoolean("track");
     }
 
     /**
@@ -201,19 +221,47 @@ public final class VirtualWallet {
      * without a usable row on BlackBear (10 Nov, the pass silently never ran). Null = the archive pass already covered
      * every account address on this node. A coin the node saw arrive is tracked; only coins OLDER than its tracking (it
      * took the account over from another node, or after a restore) are missing. Re-run when the key count grows.
-     * ponytail: a resync or reseed of the SAME node keeps its folder, and an archive that withholds coins is believed;
-     * add a manual "search the archive again" if either is ever seen.
+     *
+     * <p>Re-run, too, when the SAME node (same folder) lost its wallet table: a reseed ({@code megammrsync phrase:},
+     * {@code archive resync phrase:}) deletes the wallet file, and a restore of an older backup brings back a script table
+     * without the account — either way {@link #ensureTracked} finds an account address no longer tracked and registers it
+     * again. Ordinary operation never does that (the rows stay; only the account's own apps register these scripts, always
+     * trackall:true), and the registration makes the next check pass, so it cannot loop. A resync that keeps the wallet
+     * table needs no re-run: megammrsync asks the archive for every tracked address, the account's too. An archive that
+     * withholds coins is still believed; the manual search (Account.searchArchive) names the archive that answered.
      */
     public synchronized String archiveWanted() throws Exception {
+        String id = nodeId();
+        if (lostTracking || store.resetPending()) {
+            if (store.archivedKeys(id) > 0) store.setArchivedKeys(id, 0);
+            store.setResetPending(false);
+            lostTracking = false;
+        }
+        return store.archivedKeys(id) >= store.keyCount() ? null : id;
+    }
+
+    /** The node's data folder ({@code status} → {@code data}): its identity for the archive mark. */
+    public synchronized String nodeId() throws Exception {
         JSONObject st = node.call("status");
         JSONObject r = st.optBoolean("status") ? st.optJSONObject("response") : null;
         String id = r == null ? "" : r.optString("data", "").trim();
         if (id.isEmpty()) throw new IllegalStateException("the node's status gave no data folder: " + err(st));
-        return store.archivedKeys(id) >= store.keyCount() ? null : id;
+        return id;
     }
 
     /** Record a clean pass over the first {@code keyCount} account addresses on this node. */
     public synchronized void markArchived(String nodeId, int keyCount) { store.setArchivedKeys(nodeId, keyCount); }
+
+    /** The current {@link #archiveGeneration}: read it when a pass starts, hand it to {@link #markArchived(String, int, int)}. */
+    public synchronized int archiveGeneration() { return archiveGeneration; }
+
+    /** As above, unless the node lost an account address since the pass started ({@code generation}): then what the pass
+     *  imported may have gone with the wallet table, and the mark stays reset. False = not recorded. */
+    public synchronized boolean markArchived(String nodeId, int keyCount, int generation) {
+        if (generation != archiveGeneration || lostTracking || store.resetPending()) return false;
+        store.setArchivedKeys(nodeId, keyCount);
+        return true;
+    }
 
     /**
      * Import coins this node is missing from part of the archive's reply ({@link ArchiveProofs#fetch}, downloaded OFF the
@@ -227,30 +275,98 @@ public final class VirtualWallet {
 
     /** As above; {@code log} (may be null) gets one line per coin: its id and what happened to it. */
     public synchronized boolean importArchived(List<CoinProof> archive, java.util.function.Consumer<String> log) throws Exception {
+        return importArchived(archive, log, null);
+    }
+
+    /** As above; {@code into} (may be null) collects the coins imported and the ones the node refused. Safe to repeat:
+     *  a coin the node already holds is skipped, and an import the node answers "Attempting to add relevant coin we
+     *  already have" (coinimport, a coin it took meanwhile) counts as held, not as a failure. No key, no transaction. */
+    public synchronized boolean importArchived(List<CoinProof> archive, java.util.function.Consumer<String> log, ArchiveResult into) throws Exception {
         boolean clean = true;
         for (CoinProof cp : archive) {
             String id = cp.getCoin().getCoinID().to0xString();
             if (indexOfAddress(cp.getCoin().getAddress().to0xString()) < 0) continue;
-            String outcome;
+            String outcome, refused = null;
             Boolean held = relevantNow(id);
-            if (held == null) { clean = false; outcome = "lookup failed"; }
+            if (held == null) { clean = false; outcome = "lookup failed"; refused = "your node did not answer the lookup"; }
             else if (held) outcome = "already held";
             else {
                 String data = MiniData.getMiniDataVersion(cp).to0xString();
                 JSONObject chk = node.call("coincheck data:" + data);
                 JSONObject r = chk.optJSONObject("response");
-                if (!chk.optBoolean("status") || r == null || !r.optBoolean("valid")) { clean = false; outcome = "refused by coincheck: " + err(chk); }   // spent, or not synced yet
-                else {
+                if (!chk.optBoolean("status") || r == null || !r.optBoolean("valid")) {   // spent, or not synced yet
+                    clean = false; outcome = "refused by coincheck: " + err(chk);
+                    refused = "your node could not verify it (spent since the archive's copy, or your node is still syncing)";
+                } else {
                     JSONObject im = node.call("coinimport track:true data:" + data);
-                    if (!im.optBoolean("status")) { clean = false; outcome = "coinimport failed: " + err(im); }
-                    else if (!Boolean.TRUE.equals(relevantNow(id))) { clean = false; outcome = "imported but not visible as relevant"; }
-                    else outcome = "imported";
+                    boolean nowHeld = Boolean.TRUE.equals(relevantNow(id));
+                    if (!im.optBoolean("status")) {
+                        if (nowHeld) outcome = "already held";
+                        else { clean = false; outcome = "coinimport failed: " + err(im); refused = "your node refused the import: " + err(im); }
+                    }
+                    else if (!nowHeld) { clean = false; outcome = "imported but not visible as relevant"; refused = "imported, but your node does not show it"; }
+                    else { outcome = "imported"; if (into != null) into.imported.add(cp); }
                 }
             }
+            if (into != null && refused != null) into.refused.add(id + " — " + refused);
             if (log != null) log.accept(id + " " + outcome);
         }
         return clean;
     }
+
+    /** One archive pass, for the person who asked for it: what was found, what was refused, and which archive answered. */
+    public static final class ArchiveResult {
+        public final String source;
+        /** Coins the archive returned at the account's addresses; -1 = it was never asked. */
+        public int returned = -1;
+        public final List<CoinProof> imported = new ArrayList<>();
+        public final List<String> refused = new ArrayList<>();
+        /** The pass could not finish: what failed, in plain words. */
+        public String failure;
+        public ArchiveResult(String source) { this.source = source; }
+        public boolean clean() { return failure == null && refused.isEmpty(); }
+
+        public String text() {
+            StringBuilder b = new StringBuilder();
+            if (failure != null) b.append(failure);
+            if (!imported.isEmpty()) {
+                if (b.length() > 0) b.append("\n\nBefore that: ");
+                b.append("Found ").append(imported.size()).append(imported.size() == 1 ? " coin" : " coins")
+                        .append(" your node did not have: ").append(amounts(imported)).append('.');
+            } else if (failure == null) b.append("Nothing new found.");
+            if (!refused.isEmpty()) {
+                b.append("\n\nYour node did not take ").append(refused.size()).append(refused.size() == 1 ? " coin" : " coins")
+                        .append(" the archive listed — search again later:");
+                for (String r : refused) b.append('\n').append(r);
+            }
+            b.append("\n\n");
+            if (returned >= 0) b.append("Answered by the MegaMMR archive at ").append(source).append(" (")
+                    .append(returned).append(returned == 1 ? " coin" : " coins").append(" at this account's addresses). It reports only the coins that archive holds.\n");
+            b.append("Nothing was moved and no key was used.");
+            return b.toString();
+        }
+
+        /** Exact sums per token, never rounded: "12.5 MINIMA, 3 MxUSD, 7 of token 0x…" (full token id). */
+        static String amounts(List<CoinProof> coins) {
+            Map<String, java.math.BigDecimal> per = new LinkedHashMap<>();
+            for (CoinProof cp : coins) {
+                Coin c = cp.getCoin();
+                String tid = c.getTokenID().to0xString();
+                MiniNumber amt = "0x00".equals(tid) || c.getToken() == null ? c.getAmount() : c.getToken().getScaledTokenAmount(c.getAmount());
+                per.merge(tid, new java.math.BigDecimal(amt.toString()), java.math.BigDecimal::add);
+            }
+            StringBuilder b = new StringBuilder();
+            for (Map.Entry<String, java.math.BigDecimal> e : per.entrySet()) {
+                if (b.length() > 0) b.append(", ");
+                String tid = e.getKey();
+                b.append(e.getValue().stripTrailingZeros().toPlainString()).append(' ')
+                        .append("0x00".equals(tid) ? "MINIMA" : MXUSD.equalsIgnoreCase(tid) ? "MxUSD" : "of token " + tid);
+            }
+            return b.toString();
+        }
+    }
+    /** The Minima dollar token. */
+    static final String MXUSD = "0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90";
 
     /** Is the coin one this node tracks as unspent? null = the lookup failed. */
     private Boolean relevantNow(String coinid) throws Exception {

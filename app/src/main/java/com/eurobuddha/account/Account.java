@@ -1,4 +1,4 @@
-// VENDORED VERBATIM from apks/dexicon 0.3.50 (408ecaf) com/eurobuddha/account/Account.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
+// VENDORED VERBATIM from apks/dexicon 0.3.69 (8816c4c) com/eurobuddha/account/Account.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
 package com.eurobuddha.account;
 
 import android.content.Context;
@@ -166,6 +166,8 @@ public final class Account {
             public boolean savePosted(String json) { return sp.edit().putString("posted_" + fp[0], json).commit(); }
             public int archivedKeys(String nodeId) { return sp.getInt("archived_" + fp[0] + "_" + nodeId.toLowerCase(java.util.Locale.ROOT), 0); }
             public void setArchivedKeys(String nodeId, int n) { sp.edit().putInt("archived_" + fp[0] + "_" + nodeId.toLowerCase(java.util.Locale.ROOT), n).apply(); }
+            public boolean resetPending() { return sp.getBoolean("archive_reset_" + fp[0], false); }
+            public void setResetPending(boolean p) { sp.edit().putBoolean("archive_reset_" + fp[0], p).commit(); }   // commit: durable now
         };
         this.app = app; this.sp = sp; this.seenKey = "seen_coins_" + fp[0];
         current = node;
@@ -323,27 +325,113 @@ public final class Account {
             String nodeId = wallet.archiveWanted();
             if (nodeId == null) { archiveBusy.set(false); return; }
             archiveTriedAt = now; archiveAttempts++;
+            int gen = wallet.archiveGeneration();
             java.util.List<String> addresses = wallet.accountAddresses();
             ARCHIVE.execute(() -> {
                 try {
-                    java.util.List<org.minima.objects.CoinProof> proofs = ArchiveProofs.fetch(addresses);
-                    importBatch(nodeId, addresses.size(), proofs, 0, true);
+                    java.util.List<org.minima.objects.CoinProof> proofs = archive.get(addresses);
+                    importBatch(nodeId, gen, addresses.size(), proofs, 0, new VirtualWallet.ArchiveResult(ARCHIVE_SOURCE), null, null);
                 } catch (Throwable e) { android.util.Log.w(config.appName, "archive fetch deferred: " + e); archiveBusy.set(false); }
             });
         } catch (Throwable e) { archiveBusy.set(false); android.util.Log.w(config.appName, "archive check deferred: " + e); }
     }
 
-    private void importBatch(String nodeId, int keyCount, java.util.List<org.minima.objects.CoinProof> proofs, int from, boolean clean) {
+    /** The archive download; tests replace it, so no test ever contacts the archive. */
+    interface Fetch { java.util.List<org.minima.objects.CoinProof> get(java.util.Collection<String> addresses) throws Exception; }
+    static volatile Fetch archive = ArchiveProofs::fetch;
+
+    /** Which archive answers, as the person is told. */
+    public static final String ARCHIVE_SOURCE = ArchiveProofs.HOST + ":" + ArchiveProofs.PORT;
+    /** What the manual search does, in plain words (owner, 23 Nov 2026). */
+    public static final String ARCHIVE_SEARCH_ABOUT = "Looks for coins of this Trading Account that are older than your node keeps. "
+            + "Use it if a balance looks short after your node was resynced or restored. It moves nothing.\n\n"
+            + "It asks the MegaMMR archive at " + ARCHIVE_SOURCE + " (a download of a few MB), which reports only the coins it holds; "
+            + "your node checks every coin before taking it.";
+    static final String ARCHIVE_BUSY = "The archive is already being searched. Wait for that search to finish, then try again.";
+
+    /**
+     * "Search the archive again": the full archive pass for every account address on the current node, whatever the
+     * stored mark says (it closes the gap the automatic pass cannot see: an archive or node that answered short before).
+     * Safe to repeat: one search at a time (shared with the automatic pass), coins the node holds are skipped, nothing is
+     * signed or sent. A clean search records the mark again. Both callbacks run on the main thread; {@code done} once.
+     * {@code node} is the calling screen's connection: the account outlives screens (MakerService keeps the process), so
+     * the one it stored may have been closed with an earlier screen. The latest progress or result is kept
+     * ({@link #archiveSearchText}), so a screen closed meanwhile can show it when opened again.
+     */
+    public void searchArchive(Transport node, java.util.function.Consumer<String> progress, java.util.function.Consumer<String> done) {
+        if (!archiveBusy.compareAndSet(false, true)) { main().post(() -> { if (done != null) done.accept(ARCHIVE_BUSY); }); return; }
+        searching = true;
+        java.util.function.Consumer<String> shown = s -> { searchText = s; if (progress != null) progress.accept(s); };
+        java.util.function.Consumer<String> ended = s -> { searchText = s; searching = false; if (done != null) done.accept(s); };
+        searchArchive0(node, shown, ended);
+    }
+
+    /** The manual search's latest progress or result in this process; null = none yet. */
+    public String archiveSearchText() { return searchText; }
+    /** A manual search is running. */
+    public boolean archiveSearching() { return searching; }
+    private volatile String searchText;
+    private volatile boolean searching;
+
+    private void searchArchive0(Transport node, java.util.function.Consumer<String> progress, java.util.function.Consumer<String> done) {
+        VirtualWallet.ArchiveResult r = new VirtualWallet.ArchiveResult(ARCHIVE_SOURCE);
+        say(progress, "Asking your node…");
         WORKER.execute(() -> {
-            boolean ok = clean;
+            if (node != null) current = node;
+            String nodeId; java.util.List<String> addresses; int gen;
+            try { wallet.ensureTracked(); gen = wallet.archiveGeneration(); nodeId = wallet.nodeId(); addresses = wallet.accountAddresses(); }
+            catch (Throwable e) { r.failure = "Your node did not answer: " + why(e) + "."; finish(r, done); return; }
+            say(progress, "Asking the archive at " + ARCHIVE_SOURCE + " about " + addresses.size()
+                    + (addresses.size() == 1 ? " address" : " addresses") + " (a download of a few MB)…");
+            ARCHIVE.execute(() -> {
+                java.util.List<org.minima.objects.CoinProof> proofs;
+                try { proofs = archive.get(addresses); }
+                catch (Throwable e) {
+                    r.failure = (unusable(e) ? "The archive's answer could not be used: " : "No answer from the archive at " + ARCHIVE_SOURCE + ": ") + why(e) + ".";
+                    finish(r, done); return;
+                }
+                r.returned = proofs.size();
+                say(progress, "The archive listed " + proofs.size() + (proofs.size() == 1 ? " coin" : " coins")
+                        + " at this account's addresses. Your node is checking each one…");
+                importBatch(nodeId, gen, addresses.size(), proofs, 0, r, progress, done);
+            });
+        });
+    }
+
+    /** The reason, without a closing full stop (the sentence adds its own). */
+    private static String why(Throwable e) {
+        String m = e.getMessage() == null ? e.toString() : e.getMessage();
+        return m.endsWith(".") ? m.substring(0, m.length() - 1) : m;
+    }
+    /** The archive answered, but its reply broke a limit or the protocol (ArchiveProofs), or could not fit in memory. */
+    static boolean unusable(Throwable e) {
+        String m = String.valueOf(e.getMessage());
+        return e instanceof OutOfMemoryError || m.startsWith("ARCHIVE_PROTOCOL") || m.startsWith("ARCHIVE_REPLY_LIMIT") || m.startsWith("ARCHIVE_PROOF_LIMIT");
+    }
+    private static void say(java.util.function.Consumer<String> to, String s) { if (to != null) main().post(() -> to.accept(s)); }
+    private void finish(VirtualWallet.ArchiveResult r, java.util.function.Consumer<String> done) {
+        archiveBusy.set(false);
+        if (done != null) { String t = r.text(); main().post(() -> done.accept(t)); }
+    }
+
+    private void importBatch(String nodeId, int gen, int keyCount, java.util.List<org.minima.objects.CoinProof> proofs, int from,
+                             VirtualWallet.ArchiveResult r, java.util.function.Consumer<String> progress, java.util.function.Consumer<String> done) {
+        WORKER.execute(() -> {
             try {
                 int to = Math.min(proofs.size(), from + VirtualWallet.ARCHIVE_BATCH);
-                ok &= wallet.importArchived(proofs.subList(from, to), line -> android.util.Log.i(config.appName, "archive: " + line));
-                if (to < proofs.size()) { importBatch(nodeId, keyCount, proofs, to, ok); return; }
-                if (ok) wallet.markArchived(nodeId, keyCount);
-                android.util.Log.i(config.appName, "archive pass over " + proofs.size() + " coin(s) " + (ok ? "complete" : "incomplete, retried later"));
-            } catch (Throwable e) { android.util.Log.w(config.appName, "archive import deferred: " + e); }
-            archiveBusy.set(false);
+                wallet.importArchived(proofs.subList(from, to), line -> android.util.Log.i(config.appName, "archive: " + line), r);
+                if (to < proofs.size()) {
+                    say(progress, "Your node checked " + to + " of " + proofs.size() + " coins…");
+                    importBatch(nodeId, gen, keyCount, proofs, to, r, progress, done); return;
+                }
+                boolean marked = r.clean() && wallet.markArchived(nodeId, keyCount, gen);
+                android.util.Log.i(config.appName, "archive pass over " + proofs.size() + " coin(s) " + (marked ? "complete"
+                        : r.clean() ? "clean, but the node lost an account address meanwhile: run again" : "incomplete, retried later"));
+            } catch (Throwable e) {
+                r.failure = "Your node stopped answering while it checked the coins: " + why(e) + ".";
+                android.util.Log.w(config.appName, "archive import deferred: " + e);
+            }
+            finish(r, done);
         });
     }
 

@@ -1,4 +1,4 @@
-// VENDORED VERBATIM from apks/dexicon 0.3.50 (408ecaf) com/eurobuddha/account/VirtualWalletTest.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
+// VENDORED VERBATIM from apks/dexicon 0.3.69 (8816c4c) com/eurobuddha/account/VirtualWalletTest.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
 package com.eurobuddha.account;
 
 import static org.junit.Assert.*;
@@ -497,5 +497,171 @@ public class VirtualWalletTest {
         VirtualWallet w = new VirtualWallet(n, k, new ArchiveStore(), Collections.emptySet());
         assertFalse(w.importArchived(Collections.singletonList(archived("0x44", k.address(0), 100 - 256))));
         assertEquals("the node could not verify it (behind the archive)", 0, n.imports());
+    }
+
+    /** A node whose script table can be wiped (reseed / restore of an older backup) or whose rows never read as tracked. */
+    static class ScriptTableNode extends ArchiveNode {
+        final java.util.Set<String> table = new java.util.HashSet<>();   // tracked account addresses, lower-case
+        boolean neverReportsTrack;
+        @Override public JSONObject call(String cmd) throws Exception {
+            if (cmd.startsWith("scripts address:")) { calls.add(cmd);
+                String a = cmd.substring("scripts address:".length()).trim();
+                if (!table.contains(a.toLowerCase())) return new JSONObject().put("status", false).put("error", "Script with that address not found");
+                return new JSONObject().put("status", true).put("response", new JSONObject().put("address", a).put("track", !neverReportsTrack)); }
+            if (cmd.startsWith("newscript trackall:true script:\"")) { calls.add(cmd);
+                String script = cmd.substring(cmd.indexOf('"') + 1, cmd.lastIndexOf('"'));
+                table.add(new org.minima.objects.Address(script).getAddressData().to0xString().toLowerCase());
+                return new JSONObject().put("status", true).put("response", new JSONObject()); }
+            return super.call(cmd);
+        }
+    }
+
+    static String nodeFolder() { return "/data/user/0/com.eurobuddha.minimablock/files/minima"; }
+
+    /** 23 Nov: a reseed (or a restore of an older backup) of the SAME node keeps its folder but loses the wallet's script
+     *  table — the account's addresses are no longer tracked. That, and only that, re-opens the archive pass, once. */
+    @Test public void aNodeThatLostTheAccountScriptsReopensTheArchivePassOnce() throws Exception {
+        ScriptTableNode n = new ScriptTableNode(); ArchiveStore st = new ArchiveStore(); st.n = 2;
+        VirtualWallet w = new VirtualWallet(n, AccountKeys.fromPhrase(AccountKeysTest.PHRASE, new AccountKeysTest.Mem(), null), st, Collections.emptySet());
+        w.ensureTracked();                              // first sight on this node: registered, the pass is wanted anyway
+        String id = w.archiveWanted();
+        assertEquals(nodeFolder(), id);
+        w.markArchived(id, 2);
+        for (int i = 0; i < 5; i++) { w.ensureTracked(); assertNull("ordinary operation keeps the mark", w.archiveWanted()); }
+        n.table.clear();                                // megammrsync phrase: deletes the wallet file
+        w.ensureTracked();
+        assertEquals("the mark did not survive the lost script table", 0, (int) st.done.get(id));
+        assertEquals(id, w.archiveWanted());
+        w.markArchived(id, 2);                          // the new baseline
+        w.ensureTracked();
+        assertNull("registered again: the next check passes — no loop", w.archiveWanted());
+    }
+
+    /** A node that never reports the account's row as tracked would otherwise re-open the pass on every check. */
+    @Test public void aNodeThatNeverReportsTrackingCannotLoopTheArchivePass() throws Exception {
+        ScriptTableNode n = new ScriptTableNode(); n.neverReportsTrack = true; ArchiveStore st = new ArchiveStore(); st.n = 1;
+        VirtualWallet w = new VirtualWallet(n, AccountKeys.fromPhrase(AccountKeysTest.PHRASE, new AccountKeysTest.Mem(), null), st, Collections.emptySet());
+        w.markArchived(nodeFolder(), 1);
+        for (int i = 0; i < 3; i++) { w.ensureTracked(); assertNull(w.archiveWanted()); }
+    }
+
+    /** The signal survives a node whose status fails at the moment it is seen: applied by the next archiveWanted. */
+    @Test public void aLostScriptTableSeenWhileStatusFailsIsAppliedLater() throws Exception {
+        final boolean[] statusDown = {true};
+        ScriptTableNode n = new ScriptTableNode() {
+            @Override public JSONObject call(String cmd) throws Exception {
+                if (cmd.equals("status") && statusDown[0]) { calls.add(cmd); return new JSONObject().put("status", false).put("error", "busy"); }
+                return super.call(cmd);
+            }
+        };
+        ArchiveStore st = new ArchiveStore(); st.n = 1;
+        VirtualWallet w = new VirtualWallet(n, AccountKeys.fromPhrase(AccountKeysTest.PHRASE, new AccountKeysTest.Mem(), null), st, Collections.emptySet());
+        w.markArchived(nodeFolder(), 1);
+        w.ensureTracked();
+        statusDown[0] = false;
+        assertEquals(nodeFolder(), w.archiveWanted());
+    }
+
+    /** Review MINOR-3: an address the node lost and got back has also lost its coins from the node's wallet — the node's
+     *  own chain is scanned for them again (recoverExisting), not only the archive. */
+    @Test public void aLostAddressIsRecoveredFromTheNodesOwnChainAgain() throws Exception {
+        ScriptTableNode n = new ScriptTableNode(); ArchiveStore st = new ArchiveStore(); st.n = 1;
+        AccountKeys k = AccountKeys.fromPhrase(AccountKeysTest.PHRASE, new AccountKeysTest.Mem(), null);
+        VirtualWallet w = new VirtualWallet(n, k, st, Collections.emptySet());
+        String scan = "balance address:" + k.address(0);
+        w.ensureTracked();
+        w.ensureTracked();
+        assertEquals("looked for once while the row stays", 1, n.calls.stream().filter(scan::equals).count());
+        n.table.clear();
+        w.ensureTracked();
+        assertEquals("looked for again after the node lost the row", 2, n.calls.stream().filter(scan::equals).count());
+    }
+
+    /** Review NIT: the pending reset is durable — a process death between seeing the loss and the node's status answering
+     *  does not lose it (a new wallet on the same store applies it). */
+    @Test public void aPendingResetSurvivesAProcessDeath() throws Exception {
+        final boolean[] statusDown = {true};
+        ScriptTableNode n = new ScriptTableNode() {
+            @Override public JSONObject call(String cmd) throws Exception {
+                if (cmd.equals("status") && statusDown[0]) { calls.add(cmd); return new JSONObject().put("status", false).put("error", "busy"); }
+                return super.call(cmd);
+            }
+        };
+        class Durable extends ArchiveStore {   // no @Override: the methods are new
+            boolean pending;
+            public boolean resetPending() { return pending; }
+            public void setResetPending(boolean p) { pending = p; }
+        }
+        Durable st = new Durable(); st.n = 1;
+        AccountKeys k = AccountKeys.fromPhrase(AccountKeysTest.PHRASE, new AccountKeysTest.Mem(), null);
+        new VirtualWallet(n, k, st, Collections.emptySet()).markArchived(nodeFolder(), 1);
+        new VirtualWallet(n, k, st, Collections.emptySet()).ensureTracked();   // loss seen, status down, then the process dies
+        statusDown[0] = false;
+        VirtualWallet restarted = new VirtualWallet(n, k, st, Collections.emptySet());
+        assertEquals("the reset was not lost", nodeFolder(), restarted.archiveWanted());
+        restarted.markArchived(nodeFolder(), 1);
+        assertNull("applied once", restarted.archiveWanted());
+    }
+
+    /** Pressing "Search the archive again" twice: the second import finds the coin held and imports nothing. A coin the
+     *  node took between the lookup and the import ("Attempting to add relevant coin we already have") is held, not a
+     *  failure. The result names the archive and what it found, per token, exactly. */
+    @Test public void archiveSearchIsIdempotentAndReportsPlainly() throws Exception {
+        ArchiveNode n = new ArchiveNode(); ArchiveStore st = new ArchiveStore(); st.n = 1;
+        AccountKeys k = AccountKeys.fromPhrase(AccountKeysTest.PHRASE, new AccountKeysTest.Mem(), null);
+        VirtualWallet w = new VirtualWallet(n, k, st, Collections.emptySet());
+        List<org.minima.objects.CoinProof> proofs = Collections.singletonList(archived("0x44", k.address(0), 100 - 256));
+        VirtualWallet.ArchiveResult first = new VirtualWallet.ArchiveResult("eurobuddha.com:9001"); first.returned = 1;
+        assertTrue(w.importArchived(proofs, null, first));
+        assertEquals("Found 1 coin your node did not have: 5 MINIMA.\n\nAnswered by the MegaMMR archive at eurobuddha.com:9001 "
+                + "(1 coin at this account's addresses). It reports only the coins that archive holds.\nNothing was moved and no key was used.", first.text());
+        VirtualWallet.ArchiveResult again = new VirtualWallet.ArchiveResult("eurobuddha.com:9001"); again.returned = 1;
+        assertTrue(w.importArchived(proofs, null, again));
+        assertEquals(1, n.imports());
+        assertTrue(again.text().startsWith("Nothing new found.\n\nAnswered by the MegaMMR archive at eurobuddha.com:9001"));
+        assertFalse("no key, no transaction", n.calls.stream().anyMatch(c -> c.startsWith("txn") || c.startsWith("postfrom") || c.startsWith("send")));
+
+        ArchiveNode racing = new ArchiveNode() {   // stock coinimport on a coin it already tracks
+            @Override public JSONObject call(String cmd) throws Exception {
+                if (cmd.startsWith("coinimport")) { super.call(cmd); return new JSONObject().put("status", false).put("error", "Attempting to add relevant coin we already have"); }
+                return super.call(cmd);
+            }
+        };
+        VirtualWallet.ArchiveResult raced = new VirtualWallet.ArchiveResult("eurobuddha.com:9001");
+        assertTrue(new VirtualWallet(racing, k, new ArchiveStore(), Collections.emptySet()).importArchived(proofs, null, raced));
+        assertTrue(raced.clean());
+        assertTrue(raced.imported.isEmpty());
+    }
+
+    @Test public void archiveSearchFailuresSayWhatFailed() throws Exception {
+        AccountKeys k = AccountKeys.fromPhrase(AccountKeysTest.PHRASE, new AccountKeysTest.Mem(), null);
+        ArchiveNode n = new ArchiveNode(); n.synced = false;
+        VirtualWallet.ArchiveResult r = new VirtualWallet.ArchiveResult("eurobuddha.com:9001"); r.returned = 1;
+        assertFalse(new VirtualWallet(n, k, new ArchiveStore(), Collections.emptySet())
+                .importArchived(Collections.singletonList(archived("0x44", k.address(0), 100 - 256)), null, r));
+        assertTrue(r.text(), r.text().startsWith("Nothing new found.\n\nYour node did not take 1 coin the archive listed — search again later:\n"
+                + "0x44 — your node could not verify it (spent since the archive's copy, or your node is still syncing)"));
+        VirtualWallet.ArchiveResult down = new VirtualWallet.ArchiveResult("eurobuddha.com:9001");
+        down.failure = "No answer from the archive at eurobuddha.com:9001: ARCHIVE_TIMEOUT: recovery time limit reached.";
+        assertEquals("No answer from the archive at eurobuddha.com:9001: ARCHIVE_TIMEOUT: recovery time limit reached.\n\n"
+                + "Nothing was moved and no key was used.", down.text());
+        assertFalse(down.clean());
+    }
+
+    /** Amounts are exact sums per token (never rounded), MxUSD by name, any other token by its FULL id. */
+    @Test public void archiveAmountsArePerTokenExactAndFull() {
+        org.minima.objects.Token mxusd = new org.minima.objects.Token(new org.minima.objects.base.MiniData("0x00"), new org.minima.objects.base.MiniNumber("8"),
+                new org.minima.objects.base.MiniNumber("1"), new org.minima.objects.base.MiniString("MxUSD"), new org.minima.objects.base.MiniString("RETURN TRUE"));
+        org.minima.objects.Coin dollars = new org.minima.objects.Coin(new org.minima.objects.base.MiniData("0x55"), new org.minima.objects.base.MiniData("0x" + "12".repeat(32)),
+                new org.minima.objects.base.MiniNumber("0.00000001234567"), new org.minima.objects.base.MiniData(VirtualWallet.MXUSD));
+        dollars.setToken(mxusd);
+        String other = "0x" + "AB".repeat(32);
+        org.minima.objects.Coin odd = new org.minima.objects.Coin(new org.minima.objects.base.MiniData("0x66"), new org.minima.objects.base.MiniData("0x" + "12".repeat(32)),
+                new org.minima.objects.base.MiniNumber("7"), new org.minima.objects.base.MiniData(other));
+        List<org.minima.objects.CoinProof> coins = java.util.Arrays.asList(
+                archived("0x11", "0x" + "12".repeat(32), 1), archived("0x22", "0x" + "12".repeat(32), 1),
+                new org.minima.objects.CoinProof(dollars, new org.minima.objects.mmr.MMRProof(new org.minima.objects.base.MiniNumber(1))),
+                new org.minima.objects.CoinProof(odd, new org.minima.objects.mmr.MMRProof(new org.minima.objects.base.MiniNumber(1))));
+        assertEquals("10 MINIMA, 1.234567 MxUSD, 7 of token " + other, VirtualWallet.ArchiveResult.amounts(coins));
     }
 }

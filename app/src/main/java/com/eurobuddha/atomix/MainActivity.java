@@ -3194,6 +3194,16 @@ public class MainActivity extends AppCompatActivity {
             pl.setMargins(0, 0, Design.dp(this, 6), 0);
             acctRow.addView(dep, pl); acctRow.addView(wd, new LinearLayout.LayoutParams(pl)); acctRow.addView(words, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
             col.addView(acctRow);
+            // the shared account's own screens (vendored from Dexicon): the same texts as Dexicon's TRADING ACCOUNT section
+            LinearLayout acctRow2 = new LinearLayout(this);
+            TextView search = Design.pill(this, "Search the archive again", Design.SURFACE2(), Design.ACCENT());
+            search.setOnClickListener(v -> com.eurobuddha.account.AccountSetup.searchArchive(this, node));
+            TextView about = Design.pill(this, "About this account", Design.SURFACE2(), Design.ACCENT());
+            about.setOnClickListener(v -> com.eurobuddha.account.AccountSetup.about(this));
+            acctRow2.addView(search, new LinearLayout.LayoutParams(pl)); acctRow2.addView(about, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            LinearLayout.LayoutParams rl = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            rl.topMargin = Design.dp(this, 6);
+            col.addView(acctRow2, rl);
         }
         minimaBalView = (TextView) minimaCard.findViewWithTag(TAG_BAL);   // fresh ref each render (tree is rebuilt)
 
