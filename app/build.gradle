@@ -17,8 +17,8 @@ android {
         // stranded itself. Realigned here while 122 is still an increase over 22.
         // 0.2.44: Trading Account parity with Dexicon 0.3.69 - "Search the archive again" + "About this account" in the wallet's
         // account row; the archive pass re-opens when the node lost the account's script rows; the seeds explained in setup.
-        versionCode 244
-        versionName "0.2.44"
+        versionCode 245
+        versionName "0.2.45"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -340,7 +340,10 @@ public class MainActivity extends AppCompatActivity {
     /** First run (or a lost account): set up the Trading Account AtomiX signs with. Swaps, deals or a market opened with
      *  the node's keys finish the old way first — the account is not offered while any remain. */
     private void offerAccount() {
-        if (offering || node == null || com.eurobuddha.account.Account.get(this, node) != null) { lockedTries = 0; return; }
+        if (offering || node == null) { lockedTries = 0; return; }
+        if (com.eurobuddha.account.Account.get(this, node) != null) {   // open: show what the person must know (another device signing, ...)
+            lockedTries = 0; com.eurobuddha.account.AccountSetup.warnings(this, node); return;
+        }
         if (com.eurobuddha.account.Account.exists(this)) {   // vault present but the keystore is busy: retry, delete nothing
             ui.removeCallbacks(retryOffer);
             if (++lockedTries <= 6) { ui.postDelayed(retryOffer, 5_000); return; }

@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # Vendor the shared Trading Account (com.eurobuddha.account) VERBATIM from Dexicon, its single source, into this app.
 # One header line names the source and Dexicon's version; the rest is Dexicon's bytes. `--check` fails on any drift.
-# The same 24 words give the same keys in Dexicon, AtomiX and PandaPools (SameKeysEverywhereTest pins them); the apps
-# are mutually exclusive on a phone (Family) — never edit these files here: change them in Dexicon and re-vendor.
+# The same 24 words give the same keys in Dexicon, AtomiX and PandaPools (SameKeysEverywhereTest pins them). A phone runs
+# either Dexicon, or AtomiX and PandaPools side by side on one account, each signing only its own leaf share (Family,
+# AccountKeys leaf slots) — never edit these files here: change them in Dexicon and re-vendor.
+# The header names Dexicon's FULL 40-character commit id (identifiers are never shortened).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DEX=${DEXICON:-../dexicon}
 P=com/eurobuddha/account
-MAIN="KeyUses PrefsKeyUses AccountKeys AccountVault VirtualWallet Account AccountSetup Transport Family ArchiveProofs WordEntry"
-TESTS="AccountKeysTest VirtualWalletTest KeyCountMigrationTest AccountTestAccess SameKeysEverywhereTest AccountRouteTest LeafShareTest FamilyRuleTest FamilyInstalledTest WordEntryTest AnyPhraseAccountTest"
+MAIN="KeyUses PrefsKeyUses AccountKeys AccountVault VirtualWallet Account AccountSetup Transport Family ArchiveProofs WordEntry SignerWatch CommandSafety"
+TESTS="AccountKeysTest VirtualWalletTest KeyCountMigrationTest AccountTestAccess SameKeysEverywhereTest AccountRouteTest LeafShareTest FamilyRuleTest FamilyInstalledTest WordEntryTest AnyPhraseAccountTest SecondSignerTest CommandSafetyTest"
 VER=$(grep -E 'versionName' "$DEX/app/build.gradle" | head -1 | grep -oE '"[^"]+"' | tr -d '"')
-SHA=$(git -C "$DEX" rev-parse --short HEAD 2>/dev/null || echo unknown)
+SHA=$(git -C "$DEX" rev-parse HEAD 2>/dev/null || echo unknown)
 head_for() { echo "// VENDORED VERBATIM from apks/dexicon $VER ($SHA) $1 by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor."; }
 fail=0; MODE="${1:-}"
 one() {  # $1 = src root, $2 = dst root, $3 = class

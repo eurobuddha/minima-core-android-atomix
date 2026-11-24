@@ -1,4 +1,4 @@
-// VENDORED VERBATIM from apks/dexicon 0.3.69 (8816c4c) com/eurobuddha/account/VirtualWalletTest.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
+// VENDORED VERBATIM from apks/dexicon 0.3.79 (ca0eff8821233a757ee0e531798f102e4ee2b4b5) com/eurobuddha/account/VirtualWalletTest.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
 package com.eurobuddha.account;
 
 import static org.junit.Assert.*;
@@ -134,7 +134,6 @@ public class VirtualWalletTest {
         VirtualWallet w = wallet(new FakeNode());
         assertNull(w.handle("block"));
         assertNull(w.handle("coins address:MxG080CRJB1D4NHGRYGNF7Q52FK7023UM3FUUPVD1W1WCQZSA8MDQ25982N842G order:desc depth:64"));
-        assertNull(w.handle("newscript script:\"RETURN TRUE\" trackall:false"));
         assertNull(w.handle("coinexport coinid:0x1234"));
     }
 
@@ -663,5 +662,155 @@ public class VirtualWalletTest {
                 new org.minima.objects.CoinProof(dollars, new org.minima.objects.mmr.MMRProof(new org.minima.objects.base.MiniNumber(1))),
                 new org.minima.objects.CoinProof(odd, new org.minima.objects.mmr.MMRProof(new org.minima.objects.base.MiniNumber(1))));
         assertEquals("10 MINIMA, 1.234567 MxUSD, 7 of token " + other, VirtualWallet.ArchiveResult.amounts(coins));
+    }
+
+    /** Review 23 Nov 2026: a restored account's floor came from the phone clock alone, so a phone set years ahead at the
+     *  restore stored a floor past every key's capacity, for good. Now it waits for a chain-checked clock. */
+    @Test public void aRestoreFloorIsTakenOnlyFromAChainCheckedClock() throws Exception {
+        long[] chainTime = {System.currentTimeMillis()};
+        FakeNode n = new FakeNode() {
+            @Override public JSONObject call(String cmd) throws Exception {
+                if (cmd.equals("block")) return new JSONObject().put("status", true).put("response", new JSONObject().put("block", "100")
+                        .put("timemilli", String.valueOf(chainTime[0])));
+                return super.call(cmd);
+            }
+        };
+        long[] phone = {System.currentTimeMillis() + 5L * 365 * 86_400_000L};   // the phone clock five years ahead
+        int[] saved = {-1};
+        Store store = new Store() { @Override public void saveRestoreFloor(int f) { saved[0] = f; } };
+        AccountKeysTest.Mem mem = new AccountKeysTest.Mem();
+        AccountKeys k = AccountKeys.fromPhrase(AccountKeysTest.PHRASE, mem, null);
+        k.setRestoreFloorPending(true);
+        VirtualWallet w = new VirtualWallet(n, k, store, Collections.emptySet(), () -> phone[0]);
+        try { k.sign(new org.minima.objects.base.MiniData("0x01"), 0, phone[0]); fail("signed with the floor still pending"); }
+        catch (IllegalStateException expected) { assertTrue(expected.getMessage().contains("restore floor")); }
+        w.handle("keys");
+        assertEquals("nothing saved from an unchecked clock", -1, saved[0]);
+        assertTrue(k.restoreFloorPending());
+        assertEquals("no leaf burnt by a clock years ahead", 0, mem.currentUses(0));
+        phone[0] = chainTime[0] + 60_000L;                                        // the clock is fixed
+        int uses = w.handle("keys").getJSONObject("response").getJSONArray("keys").getJSONObject(0).getInt("uses");
+        assertEquals(AccountKeys.restoreFloor(phone[0]), saved[0]);
+        assertFalse(k.restoreFloorPending());
+        assertEquals(saved[0], uses);
+        k.setRestoreFloor(5);
+        assertEquals("raise-only", saved[0], k.restoreFloor());
+    }
+
+    /** Review 23 Nov 2026 (MAJOR-D), the reviewer's scenario: a FAST order lists RETURN SIGNEDBY(<a key of the taker's NODE
+     *  wallet>). The account's scripts read hides node rows, so only the newscript itself can refuse it. */
+    @Test public void aCounterpartyScriptNeverReplacesTheNodesOwnRows() throws Exception {
+        String nodeKey = "0x" + "5E".repeat(32), nodeScript = "RETURN SIGNEDBY(" + nodeKey + ")";
+        String nodeAddr = new org.minima.objects.Address(nodeScript).getAddressData().to0xString();
+        FakeNode n = new FakeNode() {
+            @Override public JSONObject call(String cmd) throws Exception {
+                if (cmd.equals("scripts address:" + nodeAddr)) { calls.add(cmd); return new JSONObject().put("status", true).put("response", new JSONObject()
+                        .put("script", nodeScript).put("address", nodeAddr).put("simple", true).put("publickey", nodeKey).put("track", true)); }
+                return super.call(cmd);
+            }
+        };
+        VirtualWallet w = wallet(n);
+        JSONObject r = w.handle("newscript script:\"" + nodeScript + "\" trackall:false");
+        assertNotNull("the account answers newscript", r);
+        assertFalse(r.toString(), r.getBoolean("status"));
+        assertTrue(r.getString("error"), r.getString("error").contains(nodeAddr));
+        assertFalse("the node's row was never replaced", n.calls.stream().anyMatch(c -> c.startsWith("newscript")));
+
+        String theirs = "RETURN SIGNEDBY(0x" + "7A".repeat(32) + ")";   // a real maker script: kept in-app for the witness
+        JSONObject ok = w.handle("newscript script:\"" + theirs + "\" trackall:false");
+        assertTrue(ok.getBoolean("status"));
+        assertFalse("nothing written on the node", n.calls.stream().anyMatch(c -> c.startsWith("newscript")));
+        assertEquals(new org.minima.objects.Address(theirs).getAddressData().to0xString(), ok.getJSONObject("response").getString("address"));
+
+        assertNull("a contract the node must track still goes to the node", w.handle("newscript script:\"RETURN TRUE\" trackall:true"));
+        String mine = w.handle("getaddress").getJSONObject("response").getString("script");
+        assertTrue("an account row is the account's own", w.handle("newscript script:\"" + mine + "\" trackall:false").getBoolean("status"));
+        assertFalse(n.calls.stream().anyMatch(c -> c.startsWith("newscript")));
+    }
+
+    /** Review 23 Nov 2026 (MINOR): engines sign key by key; the size check counted only the key being signed, so a
+     *  transaction too big once its SECOND key signed was refused at the post - after the first leaf was spent. */
+    @Test public void theSizeCheckCountsEveryKeyStillToSignBeforeTheFirstLeaf() throws Exception {
+        AccountKeysTest.Mem mem = new AccountKeysTest.Mem();
+        AccountKeys k = AccountKeys.fromPhrase(AccountKeysTest.PHRASE, mem, null);
+        java.util.Map<String, String> exports = new java.util.HashMap<>();
+        for (int i = 0; i < 2; i++) {
+            org.minima.objects.Coin c = new org.minima.objects.Coin(new org.minima.objects.base.MiniData("0x" + String.format("%064X", 0xC0 + i)),
+                    new org.minima.objects.base.MiniData(k.address(i)), new org.minima.objects.base.MiniNumber("5"), new org.minima.objects.base.MiniData("0x00"));
+            exports.put(c.getCoinID().to0xString(), org.minima.objects.base.MiniData.getMiniDataVersion(
+                    new org.minima.objects.CoinProof(c, new org.minima.objects.mmr.MMRProof(new org.minima.objects.base.MiniNumber(1)))).to0xString());
+        }
+        FakeNode n = new FakeNode() {
+            @Override public JSONObject call(String cmd) throws Exception {
+                if (cmd.startsWith("coinexport coinid:")) { calls.add(cmd); return new JSONObject().put("status", true).put("response", new JSONObject().put("data", exports.get(cmd.substring(18)))); }
+                return super.call(cmd);
+            }
+        };
+        Store st = new Store();
+        VirtualWallet w = new VirtualWallet(n, k, st, Collections.emptySet());
+        w.handle("newaddress");
+        w.handle("txncreate id:big");
+        for (String id : exports.keySet()) assertTrue(w.handle("txninput id:big coinid:" + id).getBoolean("status"));
+        for (int i = 0; i < 7; i++) w.handle("txnstate id:big port:" + i + " value:0x" + "AB".repeat(1000));
+        JSONObject r = w.handle("txnsign id:big publickey:" + k.publicKey(0));
+        assertFalse("two keys still to sign do not fit the node link", r.getBoolean("status"));
+        assertTrue(r.getString("error"), r.getString("error").contains("Nothing was signed"));
+        assertEquals("no leaf spent", 0, mem.currentUses(0));
+    }
+
+    @Test public void aCounterFarAheadOfTheClockIsWarnedWithTheWait() throws Exception {
+        AccountKeysTest.Mem mem = new AccountKeysTest.Mem();
+        VirtualWallet w = new VirtualWallet(new FakeNode(), AccountKeys.fromPhrase(AccountKeysTest.PHRASE, mem, null), new Store(), Collections.emptySet());
+        assertNull(w.aheadWarning());
+        long now = System.currentTimeMillis();
+        mem.recordExternalUses(0, AccountKeys.timeFloor(now) + 30_000);   // 30,000 leaves = 60,000 s ahead
+        String warn = w.aheadWarning();
+        assertNotNull(warn);
+        assertTrue(warn, warn.contains("key 0 is 30000 one-time keys ahead") || warn.contains("key 0 is 2999"));
+        assertTrue(warn, warn.endsWith("wait at least 17 hours."));
+    }
+
+    /** Review 23 Nov 2026 (MINOR): every key's leaves run out with the time floor on 2043-01-05T18:48:32Z; warned a year before. */
+    @Test public void theKeysEndIsWarnedFromAYearBefore() throws Exception {
+        assertEquals(java.time.Instant.parse("2043-01-05T18:48:32Z").toEpochMilli(), AccountKeys.EXHAUSTED_MS);
+        assertEquals(268_435_456L, (long) AccountKeys.timeFloor(AccountKeys.EXHAUSTED_MS));
+        long[] now = {System.currentTimeMillis()};
+        VirtualWallet w = new VirtualWallet(new FakeNode(), AccountKeys.fromPhrase(AccountKeysTest.PHRASE, new AccountKeysTest.Mem(), null),
+                new Store(), Collections.emptySet(), () -> now[0]);
+        assertNull(w.exhaustionWarning());
+        now[0] = AccountKeys.EXHAUSTED_MS - 364L * 86_400_000L;
+        assertTrue(w.exhaustionWarning(), w.exhaustionWarning().contains("2043-01-05 at 18:48:32 UTC"));
+    }
+
+    /** Review 23 Nov 2026 (MINOR): the scripts list read the node's WHOLE table on every call - a stock reply over ~131K
+     *  chars kills the app. It is read once (to seed the record), then never again. */
+    @Test public void theScriptsListNeverReadsTheNodesWholeTableTwice() throws Exception {
+        String pool = "RETURN TRUE", poolAddr = new org.minima.objects.Address(pool).getAddressData().to0xString();
+        FakeNode n = new FakeNode() {
+            @Override public JSONObject call(String cmd) throws Exception {
+                if (cmd.equals("scripts")) { calls.add(cmd); return new JSONObject().put("status", true).put("response", new JSONArray()
+                        .put(new JSONObject().put("address", poolAddr).put("script", pool).put("simple", false).put("track", true))
+                        .put(new JSONObject().put("address", "0x" + "5E".repeat(32)).put("script", "RETURN SIGNEDBY(0x01)").put("simple", true))); }
+                if (cmd.equals("scripts address:" + poolAddr)) { calls.add(cmd); return new JSONObject().put("status", true).put("response",
+                        new JSONObject().put("address", poolAddr).put("script", pool).put("simple", false).put("track", true)); }
+                return super.call(cmd);
+            }
+        };
+        String[] saved = {null};
+        Store st = new Store() {
+            @Override public String contractScripts() { return saved[0]; }
+            @Override public void saveContractScripts(String j) { saved[0] = j; }
+        };
+        VirtualWallet w = new VirtualWallet(n, AccountKeys.fromPhrase(AccountKeysTest.PHRASE, new AccountKeysTest.Mem(), null), st, Collections.emptySet());
+        for (int i = 0; i < 3; i++) {
+            JSONArray rows = w.handle("scripts").getJSONArray("response");
+            assertEquals("the account's row and the contract; never the node's own simple row", 2, rows.length());
+            assertEquals(poolAddr, rows.getJSONObject(1).getString("address"));
+        }
+        assertEquals(1, n.calls.stream().filter(c -> c.equals("scripts")).count());
+        String theirs = "RETURN SIGNEDBY(0x" + "7A".repeat(32) + ")";
+        w.handle("newscript script:\"" + theirs + "\" trackall:false");
+        assertEquals("a script kept in-app is listed too", 3, w.handle("scripts").getJSONArray("response").length());
+        assertEquals(1, n.calls.stream().filter(c -> c.equals("scripts")).count());
     }
 }

@@ -1,4 +1,4 @@
-// VENDORED VERBATIM from apks/dexicon 0.3.69 (8816c4c) com/eurobuddha/account/AccountKeys.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
+// VENDORED VERBATIM from apks/dexicon 0.3.79 (ca0eff8821233a757ee0e531798f102e4ee2b4b5) com/eurobuddha/account/AccountKeys.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
 package com.eurobuddha.account;
 
 import org.minima.objects.Address;
@@ -15,7 +15,9 @@ import java.util.Map;
 
 /**
  * The Trading Account's keys. Dexicon holds these itself and signs locally, so on a stock Minima Core node the node
- * never sees a private key and no other companion app (even one that escalates to ADMIN) can spend account funds.
+ * never sees a private key. No other companion app can spend account funds as long as the account has its OWN words: one
+ * made from the node's seed (node mode) or from the node's own 24 words can be computed by any app enabled on stock Minima
+ * Core (postfrom runs `seedrandom` / `vault` as ADMIN; see AccountSetup.SAME_WORDS).
  *
  * <p>Derivation mirrors minima-core {@code Wallet.createNewKey} on a DOMAIN-SEPARATED base seed:
  * <pre>
@@ -44,6 +46,10 @@ public final class AccountKeys {
     /** 2026-01-01T00:00:00Z. */
     public static final long EPOCH_MS = 1767225600000L;
     public static final long LEAF_MILLIS = 2000L;
+    /** The time floor reaches the last leaf (128^4 leaves at one per 2 s from the epoch): 2043-01-05T18:48:32Z. From then
+     *  on no key of the account can sign (see {@link #sign}); the app warns from one year before. */
+    public static final long EXHAUSTED_MS = EPOCH_MS + 268_435_456L * LEAF_MILLIS;
+    public static final long EXHAUSTION_NOTICE_MS = 365L * 86_400_000L;
 
     /** Public keys survive restarts here so the expensive TreeKey build runs once per key per install. */
     public interface PubCache {
@@ -151,6 +157,17 @@ public final class AccountKeys {
     }
     public int maxUses() { return (int) Math.pow(KEYS_PER_LEVEL, LEVELS); }
 
+    /** Another install signed {@code leaf} on key {@code index}: this install's next leaf is above it, in its own share. */
+    public void raiseAbove(int index, int leaf) { raiseTo(index, (int) Math.min(Integer.MAX_VALUE, (long) leaf + 1)); }
+
+    /** Raise key {@code index}'s counter to at least {@code n} (aligned up to this app's share): never lowers. */
+    public void raiseTo(int index, int n) {
+        synchronized (signLock) {
+            int target = leafSlot >= 0 ? alignToSlot(n, leafSlot) : n;
+            if (uses.currentUses(index) < target) uses.recordExternalUses(index, target);
+        }
+    }
+
     /** Leaf floor stored once when an account is RESTORED (or derived from the node seed): the time floor now, plus two
      *  phones' worth of allowed clock skew (2 × 30 min), plus a margin for an earlier install that signed faster than
      *  the clock — so a restore on a slow phone never lands on a leaf a fast one already signed. */
@@ -160,7 +177,16 @@ public final class AccountKeys {
         return (int) Math.min(Integer.MAX_VALUE, (long) timeFloor(nowMillis) + skewLeaves + 10_000L * LEAF_SLOTS);
     }
 
-    public void setRestoreFloor(int floor) { restoreFloor = Math.max(0, floor); }
+    /** Raise-only: a floor once set never goes down (a second call with a lower value changes nothing). */
+    public void setRestoreFloor(int floor) { restoreFloor = Math.max(restoreFloor, Math.max(0, floor)); }
+    public int restoreFloor() { return restoreFloor; }
+
+    /** A restored / node-derived account whose floor is not computed yet: it is taken from the first CHAIN-CHECKED clock
+     *  (VirtualWallet.checkedClock), never from the phone clock alone - a phone set years ahead at restore would otherwise
+     *  store a floor that exhausts every key for good. Nothing signs while it is pending. */
+    private volatile boolean floorPending;
+    public void setRestoreFloorPending(boolean pending) { floorPending = pending; }
+    public boolean restoreFloorPending() { return floorPending; }
 
     public void setLeafSlot(int slot) {
         if (slot < 0 || slot >= LEAF_SLOTS) throw new IllegalArgumentException("leaf slot must be 0.." + (LEAF_SLOTS - 1));
@@ -181,6 +207,7 @@ public final class AccountKeys {
      *  is raised to the time floor and the leaf reserved durably BEFORE the signature exists. */
     public Signature sign(MiniData txnId, int index, long nowMillis) {
         synchronized (signLock) {
+            if (floorPending) throw new IllegalStateException("account key " + index + ": the restore floor is not set yet (no chain-checked clock) — refusing to sign");
             TreeKey key = tree(index);
             if (!key.getPublicKey().to0xString().equalsIgnoreCase(publicKey(index)))
                 throw new IllegalStateException("account key " + index + " does not match its cached public key — refusing to sign");

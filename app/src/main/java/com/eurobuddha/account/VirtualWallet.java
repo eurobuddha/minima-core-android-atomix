@@ -1,4 +1,4 @@
-// VENDORED VERBATIM from apks/dexicon 0.3.69 (8816c4c) com/eurobuddha/account/VirtualWallet.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
+// VENDORED VERBATIM from apks/dexicon 0.3.79 (ca0eff8821233a757ee0e531798f102e4ee2b4b5) com/eurobuddha/account/VirtualWallet.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
 package com.eurobuddha.account;
 
 import org.json.JSONArray;
@@ -74,6 +74,22 @@ public final class VirtualWallet {
          *  (synchronous), so a process death before the node's status answers cannot lose it. */
         default boolean resetPending() { return false; }
         default void setResetPending(boolean pending) {}
+        /** A restored account's floor, computed from a chain-checked clock: durable (synchronous), raise-only; throws when
+         *  it could not be saved (then nothing signs). */
+        default void saveRestoreFloor(int floor) {}
+        /** This install signs {@code txnId} (called BEFORE the signature exists): durable (synchronous); false = not
+         *  saved, and then nothing is signed. The second-signer watch never mistakes these for another device. */
+        default boolean recordSigned(String txnId) { return true; }
+        /** {@code txnId} was signed by this install ({@link #recordSigned}). */
+        default boolean signedHere(String txnId) { return false; }
+        /** The second-signer watch's state (JSON object): position, the reading mark, the latch. */
+        default String signerState() { return "{}"; }
+        /** Durable (synchronous) save; false = not written. */
+        default boolean saveSignerState(String json) { return true; }
+        /** Contract scripts the engines registered through this account (JSON object address -> script), so the
+         *  {@code scripts} list never needs the node's whole, unbounded table; null = never recorded (seeded once). */
+        default String contractScripts() { return null; }
+        default void saveContractScripts(String json) {}
     }
 
     /** Wall clock (tests inject one). */
@@ -100,7 +116,7 @@ public final class VirtualWallet {
 
     private static final Set<String> WALLET_VERBS = new HashSet<>(Arrays.asList(
             "getaddress", "newaddress", "keys", "balance", "send", "consolidate", "seedrandom", "vault",
-            "sign", "sendpoll", "sendnosign", "multisig", "checkmode", "scripts"));
+            "sign", "sendpoll", "sendnosign", "multisig", "checkmode", "scripts", "newscript"));
 
     private final Node node;
     private final AccountKeys keys;
@@ -112,12 +128,10 @@ public final class VirtualWallet {
     private final Map<String, String> scripts = new HashMap<>();       // address -> script text
     private final Map<String, Long> spending = new HashMap<>();        // coinid -> when we posted a txn spending it
     private final SecureRandom rnd = new SecureRandom();
-    private Set<String> nodeSimple;                                     // the NODE wallet's own simple addresses
-    private long nodeSimpleAt;
     /** Re-checked immediately before the one write (postfrom): the engine's "market changed" contract. */
     private BooleanSupplier postGuard;
 
-    private static final long PROOF_TTL_MS = 60_000L, SPENDING_TTL_MS = 15 * 60_000L, NODE_SIMPLE_TTL_MS = 10 * 60_000L;
+    private static final long PROOF_TTL_MS = 60_000L, SPENDING_TTL_MS = 15 * 60_000L;
 
     private static final class Cached { final CoinProof cp; final String data; final long at; Cached(CoinProof cp, String data, long at) { this.cp = cp; this.data = data; this.at = at; } }
 
@@ -438,6 +452,7 @@ public final class VirtualWallet {
             switch (verb) {
                 case "getaddress":  return ok(verb, addressRow(0, true));
                 case "scripts":     return scriptsCmd(p);
+                case "newscript":   return newScript(p);
                 case "newaddress":  return newAddress();
                 case "keys":        return keysCmd(p);
                 case "balance":     return balance(p);
@@ -486,16 +501,93 @@ public final class VirtualWallet {
             int k = indexOfAddress(address);
             return k < 0 ? null : ok("scripts", addressRow(k, k == 0));
         }
-        JSONObject r = node.call("scripts");
-        if (!r.optBoolean("status")) return r;
-        JSONArray rows = r.optJSONArray("response"), out = new JSONArray();
+        // review 23 Nov 2026: never the node's whole table on every read (a stock reply over ~131K chars kills the app; a
+        // node polluted with pool rows is the likeliest to have one) - the account's rows, then each contract the engines
+        // registered through the account, looked up one by one (`scripts address:`, one small row each)
+        JSONObject known = contracts();
+        JSONArray out = new JSONArray();
         for (int i = 0; i < store.keyCount(); i++) out.put(addressRow(i, i == 0));
+        for (java.util.Iterator<String> it = known.keys(); it.hasNext(); ) {
+            String a = it.next();
+            JSONObject r = node.call("scripts address:" + a);
+            JSONObject row = r.optBoolean("status") ? r.optJSONObject("response") : null;
+            if (row != null && a.equalsIgnoreCase(row.optString("address")) && !row.optBoolean("simple")) out.put(row);
+            else if (scripts.containsKey(norm(a))) out.put(scriptRow(known.getString(a), a, false));   // kept in-app (newscript)
+        }
+        return ok("scripts", out);
+    }
+
+    /** Most contract rows listed by {@code scripts}: beyond this the oldest are dropped from the list (not from the node). */
+    static final int MAX_CONTRACT_ROWS = 400;
+
+    /** The recorded contract scripts. The first time (an install from before this record existed), seeded ONCE from the
+     *  node's whole table - the read every list used to make. */
+    private JSONObject contracts() throws Exception {
+        String saved = store.contractScripts();
+        if (saved != null) try { return new JSONObject(saved); } catch (Exception bad) { /* reseeded below */ }
+        JSONObject r = node.call("scripts");
+        if (!r.optBoolean("status")) throw new IllegalStateException("scripts: " + err(r));
+        JSONObject known = new JSONObject();
+        JSONArray rows = r.optJSONArray("response");
         if (rows != null) for (int i = 0; i < rows.length(); i++) {
             JSONObject row = rows.getJSONObject(i);
             if (row.optBoolean("simple") || indexOfAddress(row.optString("address")) >= 0) continue;
-            out.put(row);
+            known.put(row.optString("address"), row.optString("script"));
         }
-        return ok("scripts", out);
+        trimContracts(known);
+        store.saveContractScripts(known.toString());
+        return known;
+    }
+
+    private void recordContract(String address, String script) {
+        try {
+            JSONObject known = contracts();
+            known.remove(address);
+            known.put(address, script);
+            trimContracts(known);
+            store.saveContractScripts(known.toString());
+        } catch (Exception later) { /* listed again once recorded */ }
+    }
+
+    private static void trimContracts(JSONObject known) {
+        for (java.util.Iterator<String> it = known.keys(); it.hasNext() && known.length() > MAX_CONTRACT_ROWS; ) { it.next(); it.remove(); }
+    }
+
+    private static JSONObject scriptRow(String script, String addr, boolean track) throws Exception {
+        return new JSONObject().put("script", script).put("address", addr)
+                .put("miniaddress", org.minima.objects.Address.makeMinimaAddress(new MiniData(addr))).put("simple", false)
+                .put("default", false).put("publickey", "0x00").put("track", track);
+    }
+
+    /**
+     * Review 23 Nov 2026 (MAJOR-D): {@code newscript} REPLACES the node's row for the script's address, and with an account
+     * loaded the engines' {@code scripts} read leaves out the node's own simple rows, so a hostile order listing
+     * {@code RETURN SIGNEDBY(<a node key>)} passed the taker's guard and its {@code newscript … trackall:false} turned the
+     * node's wallet row into simple:false / track:false (the address left the sendable set and stopped being tracked). So:
+     * <ul><li>an account address: answered here, its row is the account's own (never replaced by an engine);</li>
+     * <li>the node holds a row and it is SIMPLE (a key of the node's own wallet): refused, the node is never asked;</li>
+     * <li>no row, trackall:false (a counterparty's script, needed only in our own witness): kept HERE for
+     * {@code txninput … scriptmmr:true} / txnbasics - nothing is written on the node;</li>
+     * <li>otherwise (trackall:true, or a contract row the node already holds - PandaPools' own pools, its foreign-row
+     * demotion): null = the node registers it, as before.</li></ul>
+     * The lookup is {@code scripts address:} with the address exactly as the node stores it (0x, upper-case hex).
+     */
+    private JSONObject newScript(P p) throws Exception {
+        String script = p.s("script", "");
+        if (script.trim().isEmpty()) return fail("newscript", "newscript needs script:");
+        if (p.b("clean", false)) script = org.minima.kissvm.Contract.cleanScript(script);
+        String addr = new org.minima.objects.Address(script).getAddressData().to0xString();
+        JSONObject row = scriptRow(script, addr, p.b("trackall", false));
+        int k = indexOfAddress(addr);
+        if (k >= 0) return ok("newscript", addressRow(k, k == 0));
+        JSONObject r = node.call("scripts address:" + addr);
+        JSONObject held = r.optBoolean("status") ? r.optJSONObject("response") : null;
+        boolean exists = held != null && addr.equalsIgnoreCase(held.optString("address"));
+        if (exists && held.optBoolean("simple"))
+            return fail("newscript", "Refused: that script is an address of your node's own wallet (" + addr + "). Nothing was changed.");
+        recordContract(addr, script);
+        if (!exists && !p.b("trackall", false)) { scripts.put(norm(addr), script); return ok("newscript", row); }
+        return null;
     }
 
     private JSONObject newAddress() throws Exception {
@@ -658,19 +750,6 @@ public final class VirtualWallet {
             if (indexOfAddress(row.optString("address")) >= 0 && !isSpending(row.optString("coinid"))) kept.put(row);
         }
         return ok("coins", kept);
-    }
-
-    private Set<String> nodeSimpleAddresses() throws Exception {
-        if (nodeSimple != null && clock.now() - nodeSimpleAt < NODE_SIMPLE_TTL_MS) return nodeSimple;
-        Set<String> out = new HashSet<>();
-        JSONObject r = node.call("scripts");
-        JSONArray rows = r.optJSONArray("response");
-        if (rows != null) for (int k = 0; k < rows.length(); k++) {
-            JSONObject s = rows.getJSONObject(k);
-            if (s.optBoolean("simple") && indexOfAddress(s.optString("address")) < 0) out.add(norm(s.optString("address")));
-        }
-        nodeSimple = out; nodeSimpleAt = clock.now();
-        return out;
     }
 
     private JSONObject balance(P p) throws Exception {
@@ -992,10 +1071,19 @@ public final class VirtualWallet {
         List<Integer> needed = new ArrayList<>();
         for (int k : toSign) if (!w.isSignedBy(keys.publicKey(k))) needed.add(k);
         if (!needed.isEmpty()) {
+            if (!watchedOnce) watchSigners();                 // at account open, before the first signature
+            String halt = secondSigner();
+            if (halt != null) return new JSONObject().put("error", halt);
             long now = checkedClock();
-            int estimate = hex(r).length() + needed.size() * SIG_HEX_ESTIMATE + proofEstimate(r);
+            // review 23 Nov 2026: EVERY account key this transaction still needs counts, not only the one this call signs -
+            // engines sign key by key (txnsign publickey:), and a post refused for size after the first key signed burnt a leaf
+            Set<Integer> unsigned = new HashSet<>(needed);
+            for (Coin c : t.getAllInputs()) { int k = indexOfAddress(c.getAddress().to0xString()); if (k >= 0 && !w.isSignedBy(keys.publicKey(k))) unsigned.add(k); }
+            int estimate = hex(r).length() + unsigned.size() * SIG_HEX_ESTIMATE + proofEstimate(r);
             if (estimate > MAX_POST_HEX)
                 return new JSONObject().put("error", "Transaction too large for the node link (~" + estimate + " chars) — use fewer coins. Nothing was signed.");
+            if (!store.recordSigned(norm(t.getTransactionID().to0xString())))   // durable BEFORE any signature exists
+                return new JSONObject().put("error", "Could not record this signature on the phone. Nothing was signed.");
             for (int k : needed) {
                 Signature s = keys.sign(t.getTransactionID(), k, now);
                 w.addSignature(s);
@@ -1013,18 +1101,180 @@ public final class VirtualWallet {
         return resp;
     }
 
+    // ------------------------------------------------------------------------------------------ second-signer watch
+
+    /** Shown when another install signs with this account's keys (review 23 Nov 2026), and the refusal of every sign. */
+    public static final String ANOTHER_DEVICE = "This Trading Account is being used on another device. Signing is stopped here to "
+            + "protect its keys. Use it on one device only: on the device you keep, press 'This is the only device now'.";
+    /** History items read per pass (each one TxPoW reply), and on the first pass ever (a baseline: raise only). */
+    static final int SIGNER_PER_PASS = 20, SIGNER_SEEN = 500, SIGNER_POISON = 20;
+    private boolean watchedOnce;
+
+    /** Review 23 Nov 2026: a counter more than half the restore margin ahead of the time floor means a restore elsewhere
+     *  (which starts one restore margin past the time floor) could land on leaves this install already signed. The
+     *  warning says how long to wait after the last trade here; null when no key is that far ahead. Phone clock: a
+     *  warning only, nothing is written. */
+    public synchronized String aheadWarning() {
+        long now = clock.now();
+        int tf = AccountKeys.timeFloor(now), margin = AccountKeys.restoreFloor(now) - tf, worst = -1, ahead = 0;
+        for (int k = 0; k < store.keyCount(); k++) { int a = keys.storedUses(k) - tf; if (a > ahead) { ahead = a; worst = k; } }
+        if (worst < 0 || ahead <= margin / 2) return null;
+        long hours = ((long) ahead * AccountKeys.LEAF_MILLIS + 3_599_999L) / 3_600_000L;
+        return "This Trading Account has signed more often than its clock allows for: key " + worst + " is " + ahead
+                + " one-time keys ahead. If you ever restore it on another device, first stop using it here and wait at least "
+                + hours + (hours == 1 ? " hour." : " hours.");
+    }
+
+    /** From one year before every key's leaves run out (AccountKeys.EXHAUSTED_MS), the date and what to do; else null. */
+    public String exhaustionWarning() {
+        if (clock.now() < AccountKeys.EXHAUSTED_MS - AccountKeys.EXHAUSTION_NOTICE_MS) return null;
+        return EXHAUSTION;
+    }
+    static final String EXHAUSTION = "The one-time keys of this Trading Account run out on 2043-01-05 at 18:48:32 UTC: from then "
+            + "on it cannot sign at all. Move everything in it to a new Trading Account (new words) before then.";
+
+    /** The halt text while the latch is set, else null. */
+    public synchronized String secondSigner() {
+        JSONObject st = signerState();
+        return st.optJSONObject("latch") == null ? null : ANOTHER_DEVICE;
+    }
+
+    /** What the latch recorded (key index, leaf, transaction id), for the person; null when not latched. */
+    public synchronized String secondSignerDetail() {
+        JSONObject l = signerState().optJSONObject("latch");
+        return l == null ? null : "Key " + l.optInt("key") + " signed with one-time key " + l.optInt("leaf") + " in transaction "
+                + l.optString("txnid") + ", which this device never signed.";
+    }
+
+    private JSONObject signerState() {
+        try { return new JSONObject(store.signerState()); } catch (Exception bad) { return new JSONObject(); }
+    }
+
+    /**
+     * Second-signer detection, on the worker's regular scans and before the first signature. The node keeps every TxPoW
+     * that spends a tracked coin as "relevant" (TxPoWDB.checkTxPoWRelevant: account scripts are tracked), and
+     * {@code history action:list max:1 offset:} pages them newest first, one TxPoW per reply (a READ command on stock:
+     * CommandRunner ALL_WRITE_COMMANDS). Each one's verified account-key signatures ({@link SignerWatch}) over a
+     * transaction id this install never signed ({@link Store#signedHere}):
+     * <ul><li>raise this install's counter above that leaf (per key, share-aligned);</li>
+     * <li>at or above the restore floor: HALT signing here with a durable latch ({@link #ANOTHER_DEVICE}); below it the
+     * signature predates this install (the words' earlier install) and only raises.</li></ul>
+     * Leaves in the sibling app's share (AtomiX with PandaPools on one phone) are that app's to judge. Bounded: a pass reads
+     * at most {@link #SIGNER_PER_PASS} items, positions counted from the oldest so new items never hide old ones; the first
+     * pass ever is a baseline (raise only: an upgraded install has no record of what it signed before). A reply too big
+     * for the node link on stock Minima Core kills the process: a durable mark is set before each read, and an item read
+     * while the process died is skipped for good. Best effort: never throws.
+     */
+    public synchronized void watchSigners() {
+        watchedOnce = true;
+        try { watchSigners0(false); } catch (Exception later) { /* the next scan retries */ }
+    }
+
+    private void watchSigners0(boolean rescan) throws Exception {
+        checkedClock();                                        // the restore floor must be known (and the clock sane)
+        JSONObject st = signerState();
+        JSONObject sz = node.call("history action:size");
+        JSONObject szr = sz.optBoolean("status") ? sz.optJSONObject("response") : null;
+        if (szr == null || !szr.has("size")) return;
+        int size = szr.optInt("size", 0);
+        JSONArray poison = st.optJSONArray("poison") == null ? new JSONArray() : st.optJSONArray("poison");
+        if (st.has("reading")) {                               // the process died reading this item: never again
+            poison.put(st.getInt("reading"));
+            while (poison.length() > SIGNER_POISON) poison.remove(0);
+            st.remove("reading"); st.put("poison", poison);
+        }
+        boolean baseline = rescan || !st.has("done");
+        int done = Math.min(st.optInt("done", size), size);
+        int from = baseline ? Math.max(0, size - SIGNER_PER_PASS) : done;
+        Set<Integer> skip = new HashSet<>();
+        for (int i = 0; i < poison.length(); i++) skip.add(poison.optInt(i));
+        JSONArray seen = st.optJSONArray("seen") == null ? new JSONArray() : st.optJSONArray("seen");
+        Set<String> seenSet = new HashSet<>();
+        for (int i = 0; i < seen.length(); i++) seenSet.add(seen.optString(i));
+        int pos = from;
+        for (int n = 0; pos < size && n < SIGNER_PER_PASS; pos++, n++) {
+            if (skip.contains(pos)) continue;
+            st.put("reading", pos);
+            if (!store.saveSignerState(st.toString())) return;   // never read an item without its mark on disk
+            JSONObject r = node.call("history action:list max:1 offset:" + (size - 1 - pos));
+            st.remove("reading");
+            JSONObject resp = r.optBoolean("status") ? r.optJSONObject("response") : null;
+            JSONArray items = resp == null ? null : resp.optJSONArray("txpows");
+            JSONObject item = items == null || items.length() == 0 ? null : items.optJSONObject(0);
+            String id = item == null ? "" : item.optString("txpowid", "");
+            if (!id.isEmpty() && seenSet.contains(id)) break;    // the list moved under us: the next pass re-reads its size
+            if (item != null) examine(item, baseline, st);
+            if (!id.isEmpty()) { seenSet.add(id); seen.put(id); }
+        }
+        while (seen.length() > SIGNER_SEEN) seen.remove(0);
+        st.put("seen", seen);
+        if (!rescan) st.put("done", baseline ? size : pos);
+        store.saveSignerState(st.toString());
+    }
+
+    /** One TxPoW: raise past every foreign leaf; latch on a live one (see {@link #watchSigners}). A transaction spending
+     *  only account coins made internal outputs: they are recorded as the account's own, so the sibling app's change
+     *  (AtomiX and PandaPools share one account, each with its own record) is never filed as "Received". */
+    private void examine(JSONObject txpow, boolean baseline, JSONObject st) throws Exception {
+        if (SignerWatch.fundedByAccount(txpow, this::indexOfAddress)) {
+            List<String> outs = new ArrayList<>();
+            for (String id : SignerWatch.outputIds(txpow)) outs.add(norm(id));
+            store.ownOutputs(outs);
+        }
+        int mine = keys.leafSlot();
+        for (SignerWatch.Seen s : SignerWatch.signatures(txpow, this::indexOfKey)) {
+            if (store.signedHere(norm(s.txnId))) continue;                       // this install signed it
+            int slot = Math.floorMod(s.leaf, AccountKeys.LEAF_SLOTS);
+            if (slot != mine && sibling(mine, slot)) continue;                   // AtomiX / PandaPools beside us: theirs
+            keys.raiseAbove(s.key, s.leaf);
+            if (!baseline && s.leaf >= keys.restoreFloor() && st.optJSONObject("latch") == null)
+                st.put("latch", new JSONObject().put("key", s.key).put("leaf", s.leaf).put("txnid", s.txnId)
+                        .put("txpowid", txpow.optString("txpowid", "")).put("at", clock.now()));
+        }
+    }
+
+    /** AtomiX and PandaPools may hold the account side by side on one phone; Dexicon never shares a phone (Family). */
+    static boolean sibling(int mine, int slot) {
+        return (mine == AccountKeys.SLOT_ATOMIX || mine == AccountKeys.SLOT_PANDAPOOLS)
+                && (slot == AccountKeys.SLOT_ATOMIX || slot == AccountKeys.SLOT_PANDAPOOLS);
+    }
+
+    /**
+     * "This is the only device now" (confirmed by the person): re-read the latest history, then raise EVERY key past what
+     * was seen and the restore margin (time floor + two phones' skew + the out-signing margin, as a restore does), make
+     * that the new restore floor, and clear the latch. Throws (and keeps the latch) when the clock or the node fail.
+     */
+    public synchronized void onlyDeviceNow() throws Exception {
+        long now = checkedClock();
+        watchSigners0(true);
+        int floor = AccountKeys.restoreFloor(now), margin = floor - AccountKeys.timeFloor(now);
+        for (int k = 0; k < store.keyCount(); k++) keys.raiseTo(k, Math.max(floor, (int) Math.min(Integer.MAX_VALUE, (long) keys.storedUses(k) + margin)));
+        store.saveRestoreFloor(floor);
+        keys.setRestoreFloor(floor);
+        JSONObject st = signerState();
+        st.remove("latch");
+        if (!store.saveSignerState(st.toString())) throw new IllegalStateException("Could not save the change on the phone. Signing stays stopped.");
+    }
+
     /** Hex chars of the coin + script proofs still to be attached before posting. */
     private int proofEstimate(TxnRow r) {
         int have = r.getWitness().getAllCoinProofs().size(), inputs = r.getTransaction().getAllInputs().size();
         return Math.max(0, inputs - have) * 3_000;
     }
 
-    /** Wall clock, after checking it against the chain tip's time. */
+    /** Wall clock, after checking it against the chain tip's time. A restored account's pending floor is set here, from
+     *  this checked clock (raise-only, saved before it is used) - never from the phone clock alone. */
     private long checkedClock() throws Exception {
         JSONObject b = blockInfo();
         long tipTime = Long.parseLong(b.optString("timemilli", "0")), now = clock.now();
         if (tipTime <= 0 || Math.abs(now - tipTime) > MAX_CLOCK_SKEW_MS)
             throw new IllegalStateException("This phone's clock and the Minima chain disagree by more than 30 minutes (or the node is not synced). Fix the clock / wait for the node, then retry. Nothing was signed.");
+        if (keys.restoreFloorPending()) {
+            int floor = AccountKeys.restoreFloor(now);
+            store.saveRestoreFloor(floor);          // durable first: a floor in memory only would be lost by a crash
+            keys.setRestoreFloor(floor);
+            keys.setRestoreFloorPending(false);
+        }
         return now;
     }
 

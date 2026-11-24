@@ -1,4 +1,4 @@
-// VENDORED VERBATIM from apks/dexicon 0.3.69 (8816c4c) com/eurobuddha/account/Account.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
+// VENDORED VERBATIM from apks/dexicon 0.3.79 (ca0eff8821233a757ee0e531798f102e4ee2b4b5) com/eurobuddha/account/Account.java by scripts/vendor-account.sh — do not edit here; change Dexicon and re-vendor.
 package com.eurobuddha.account;
 
 import android.content.Context;
@@ -82,6 +82,7 @@ public final class Account {
         }
         if (!VirtualWallet.handles(verb)) return Route.NODE;
         Account a = get(c, t);
+        if ("newscript".equals(verb)) return a == null ? Route.NODE : Route.ACCOUNT;   // the account guards it (MAJOR-D)
         // No account here yet: a coins read that names an address or a coin can only be about a contract or someone
         // else's coin (there are no account addresses) — a plain chain read. Before 0.3.30 it was refused, so AtomiX /
         // PandaPools opened before account setup showed an empty market (on the Fold, 10 Nov: every pool's reserve read
@@ -91,7 +92,9 @@ public final class Account {
         return a != null ? Route.ACCOUNT : Route.NO_ACCOUNT;
     }
 
-    private static final String PREFS = "dexicon_account_state";
+    private static final String PREFS = "dexicon_account_state", SIGNED_PREFS = "dexicon_account_signed";
+    /** Transaction ids this install signed, newest kept: far more than the second-signer watch ever looks back over. */
+    private static final int SIGNED_CAP = 3000;
     private static volatile Account instance;
     /** The MegaMMR download (~5.6 MB, up to 90 s) runs here, never on the signing worker. */
     private static final ExecutorService ARCHIVE = Executors.newSingleThreadExecutor(r -> { Thread t = new Thread(r, "account-archive"); t.setDaemon(true); return t; });
@@ -119,7 +122,7 @@ public final class Account {
     /** The transport of the call being handled: screens come and go, the account outlives them. Worker-thread only. */
     private volatile Transport current;
 
-    private Account(Context c, String secret, String mode, int restoreFloor, Transport node) {
+    private Account(Context c, String secret, String mode, int restoreFloor, boolean floorPending, Transport node) {
         Context app = c.getApplicationContext();
         SharedPreferences sp = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         final String[] fp = {""};   // filled once the keys exist: the cache below is keyed by the seed's fingerprint
@@ -133,6 +136,7 @@ public final class Account {
                 : AccountVault.MODE_ANY.equals(mode) ? AccountKeys.fromAnyPhrase(AccountVault.anyPhraseOf(secret), uses, cache)
                 : AccountKeys.fromPhrase(secret, uses, cache);
         keys.setRestoreFloor(restoreFloor);
+        keys.setRestoreFloorPending(floorPending);
         // the share is defined ONCE, by the app's package (Family): a Config that names another app's share is refused
         int ownSlot = Family.slotOf(app.getPackageName());
         if (ownSlot >= 0 && ownSlot != config.leafSlot)
@@ -168,6 +172,29 @@ public final class Account {
             public void setArchivedKeys(String nodeId, int n) { sp.edit().putInt("archived_" + fp[0] + "_" + nodeId.toLowerCase(java.util.Locale.ROOT), n).apply(); }
             public boolean resetPending() { return sp.getBoolean("archive_reset_" + fp[0], false); }
             public void setResetPending(boolean p) { sp.edit().putBoolean("archive_reset_" + fp[0], p).commit(); }   // commit: durable now
+            public void saveRestoreFloor(int floor) { new AccountVault(app).resolveRestoreFloor(floor); }
+            // what this install signed: its own prefs file (rewritten on every signature, so kept apart from the rest)
+            private final SharedPreferences signedSp = app.getSharedPreferences(SIGNED_PREFS, Context.MODE_PRIVATE);
+            private java.util.LinkedHashSet<String> signed;
+            private java.util.LinkedHashSet<String> signed() {
+                if (signed == null) {
+                    signed = new java.util.LinkedHashSet<>();
+                    try { org.json.JSONArray a = new org.json.JSONArray(signedSp.getString(fp[0], "[]")); for (int i = 0; i < a.length(); i++) signed.add(a.getString(i)); } catch (Exception fresh) { }
+                }
+                return signed;
+            }
+            public synchronized boolean recordSigned(String txnId) {
+                java.util.LinkedHashSet<String> s = signed();
+                s.remove(txnId); s.add(txnId);
+                java.util.Iterator<String> it = s.iterator();
+                while (s.size() > SIGNED_CAP) { it.next(); it.remove(); }
+                return signedSp.edit().putString(fp[0], new org.json.JSONArray(new java.util.ArrayList<>(s)).toString()).commit();
+            }
+            public synchronized boolean signedHere(String txnId) { return signed().contains(txnId); }
+            public String signerState() { return sp.getString("signers_" + fp[0], "{}"); }
+            public boolean saveSignerState(String json) { return sp.edit().putString("signers_" + fp[0], json).commit(); }
+            public String contractScripts() { return sp.getString("contracts_" + fp[0], null); }
+            public void saveContractScripts(String json) { sp.edit().putString("contracts_" + fp[0], json).apply(); }
         };
         this.app = app; this.sp = sp; this.seenKey = "seen_coins_" + fp[0];
         current = node;
@@ -189,7 +216,7 @@ public final class Account {
             catch (AccountVault.Unavailable later) { lockedAt = System.currentTimeMillis(); return null; }   // retry later, delete nothing
             catch (AccountVault.Lost lost) { v.quarantine(); return null; }    // key gone for good: setup offers RESTORE
             v.markCreated();
-            instance = new Account(c, secret, v.mode(), v.restoreFloor(), node);
+            instance = new Account(c, secret, v.mode(), v.restoreFloor(), v.restoreFloorPending(), node);
             v.recordIdentity(instance.keys.fingerprint(), v.mode());
             return instance;
         }
@@ -284,6 +311,7 @@ public final class Account {
                             java.util.Set<String> k = new java.util.HashSet<>();
                             for (String a : wallet.accountAddresses()) k.add(VirtualWallet.norm(a));
                             knownAddresses = k;
+                            wallet.watchSigners();
                             archivePass();
                         }
                         catch (Exception later) { android.util.Log.w(config.appName, "account re-track deferred: " + later); }   // never fails a claim
@@ -439,6 +467,7 @@ public final class Account {
         long now = System.currentTimeMillis();
         if (now - scannedAt < 30_000L || app == null) return;
         scannedAt = now;
+        wallet.watchSigners();   // a second signer is looked for on every scan (bounded; never throws)
         try {
             JSONObject r = wallet.handle("coins relevant:true");
             if (r == null || !r.optBoolean("status")) return;
@@ -485,6 +514,34 @@ public final class Account {
             }
             sp.edit().putString(seenKey, new org.json.JSONArray(new java.util.ArrayList<>(seen)).toString()).apply();
         } catch (Exception later) { android.util.Log.w(config.appName, "incoming scan deferred: " + later); }
+    }
+
+    /** What the person must know about this account now (null = nothing), and whether signing is stopped because another
+     *  device signs with it (then "This is the only device now" is offered). Worked out on the worker; delivered on the
+     *  main thread. */
+    public void warnings(java.util.function.BiConsumer<String, Boolean> got) {
+        WORKER.execute(() -> {
+            String halt = wallet.secondSigner(), text = halt;
+            if (halt != null) { String d = wallet.secondSignerDetail(); if (d != null) text = halt + "\n\n" + d; }
+            else {
+                String ahead = wallet.aheadWarning(), end = wallet.exhaustionWarning();
+                text = ahead == null ? end : end == null ? ahead : ahead + "\n\n" + end;
+            }
+            final String t = text; final boolean stopped = halt != null;
+            main().post(() -> got.accept(t, stopped));
+        });
+    }
+
+    /** The person confirmed "This is the only device now" (VirtualWallet.onlyDeviceNow): {@code done} gets null, or why
+     *  signing stays stopped. On the worker; delivered on the main thread. */
+    public void onlyDeviceNow(Transport node, java.util.function.Consumer<String> done) {
+        WORKER.execute(() -> {
+            String err = null;
+            try { if (node != null) current = node; wallet.onlyDeviceNow(); }
+            catch (Exception e) { err = e.getMessage() == null ? e.toString() : e.getMessage(); }
+            final String r = err;
+            main().post(() -> done.accept(r));
+        });
     }
 
     /** The account's receive address (index 0), full 0x and Mx forms: [0x, Mx]. Computed on the worker. */
